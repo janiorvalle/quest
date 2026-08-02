@@ -1,5 +1,9 @@
 name: CLA check
 
+# Bootstrap order matters: GitHub loads pull_request_target and issue_comment
+# workflows from the default branch, so this file produces no `CLA check`
+# context until it is on main. Land it first, confirm the context reports on a
+# later pull request, and only then make `CLA check` a required status check.
 on: # zizmor: ignore[dangerous-triggers] CLA writes signatures but never checks out or runs PR code
   issue_comment:
     types: [created]
