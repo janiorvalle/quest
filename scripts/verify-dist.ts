@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-
+import { bundledSkillFiles } from "../src/cli/skill-assets";
 import { artifactName, resolveDistVersion, selectDistTargets } from "./dist-config";
 
 const rootDirectory = resolve(import.meta.dir, "..");
@@ -54,6 +54,18 @@ async function distributionEntries(distDirectory: string): Promise<string[]> {
   }
 }
 
+function verifyEmbeddedSkill(name: string, bytes: Uint8Array): void {
+  for (const file of bundledSkillFiles) {
+    // Bun escapes template-literal punctuation inside compiled text assets, so use a stable raw prefix.
+    const assetMarker = new TextEncoder().encode(file.content.slice(0, 128));
+    if (Buffer.from(bytes).indexOf(assetMarker) === -1) {
+      throw new Error(
+        `DIST_VERIFY_SKILL_MISSING: ${name} does not carry the embedded ${file.relativePath} marker; rebuild the executable from the repository root`,
+      );
+    }
+  }
+}
+
 export async function verifyDistribution(projectRoot: string = rootDirectory): Promise<void> {
   const distDirectory = join(projectRoot, "dist");
   const {
@@ -92,6 +104,8 @@ export async function verifyDistribution(projectRoot: string = rootDirectory): P
         `DIST_VERIFY_VERSION_MISSING: ${name} does not contain stamped version ${version}; rebuild with QUEST_VERSION=${version} make dist`,
       );
     }
+
+    verifyEmbeddedSkill(name, bytes);
 
     const checksum = createHash("sha256").update(bytes).digest("hex");
     if (!checksumLines.has(`${checksum}  ${name}`)) {

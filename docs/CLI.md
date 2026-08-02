@@ -93,9 +93,33 @@ output. A non-empty `QUEST_CONVEX_TOKEN` overrides the saved config token.
 If config persistence fails after join, the invite has already made the member
 active. Fix `config.toml`, then ask the administrator to run
 `quest members rotate <name>` and send the replacement token, or remove and
-reinvite the member.
+reinvite the member. When neither supported agent directory contains
+`SKILL.md`, join prints one line telling the member to run `quest skill install`;
+join never installs into an agent's configuration automatically.
 
 ## Verbs
+
+### Agent skill
+
+The compiled binary carries the agent skill and installs both supported agent
+layouts without needing a checkout of the Quest repository:
+
+```
+quest skill install
+quest skill install --force
+quest skill show
+quest skill install --stdout
+```
+
+The default destinations are `~/.claude/skills/quest/` and
+`~/.codex/skills/quest/` (or `$CODEX_HOME/skills/quest/` when `CODEX_HOME` is
+set). `--claude-dir <path>` and `--codex-dir <path>` select different
+destination directories. Install creates missing directories and writes
+`SKILL.md` plus `agents/openai.yaml`. Existing byte-identical files are left
+alone and produce no output. A different existing file is never replaced
+unless `--force` is present; the error names the file and the retry command.
+`show` and `install --stdout` print the raw `SKILL.md` for a nonstandard agent
+host.
 
 ### Lifecycle
 

@@ -90,7 +90,19 @@ doing happens through the verbs.
 
 The CLI is the API. The bundled skill (`.agents/skills/quest/`) teaches Claude
 Code and Codex the verbs, the lifecycle rules, and the evidence expectations —
-point your agent at it and the board becomes shared memory across sessions.
+the compiled binary carries that skill so a teammate can install it directly:
+
+```sh
+quest skill install
+```
+
+This writes the byte-identical skill to `~/.claude/skills/quest/` and
+`~/.codex/skills/quest/`. Repeating the command is silent; a different existing
+version is preserved until `quest skill install --force` is requested. Use
+`quest skill show` to print `SKILL.md` for another agent host.
+
+Point the installed agent at the skill and the board becomes shared memory
+across sessions.
 Events record which guild, model, and effort level touched each quest, so
 `quest brief` can tell attempt two exactly what attempt one was and did.
 
@@ -106,10 +118,10 @@ bun scripts/dispatch.ts --agent claude --trust full --concurrency 2
 
 The team backend is Convex, and you deploy it yourself — quest ships the
 functions, nobody else's infrastructure is involved. See
-[docs/DEPLOY.md](docs/DEPLOY.md) for the walkthrough. Onboarding a teammate is
-two steps: they install quest, then run `quest join <deployment-url>` with a
-one-time invite token. Their personal key is written straight into their
-config and never travels through chat.
+[docs/DEPLOY.md](docs/DEPLOY.md) for the walkthrough. Onboarding a teammate is:
+install quest, run `quest skill install`, then run `quest join <deployment-url>`
+with a one-time invite token. Their personal key is written straight into
+their config and never travels through chat.
 
 Moving a repo to the team backend (or back) is one command, with backups on
 both sides and verified counts before anything routes:

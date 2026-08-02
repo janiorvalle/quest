@@ -90,6 +90,17 @@ export {
   type WorkingDirectoryValidator,
 } from "./scope";
 export {
+  type ExecuteSkillCliOptions,
+  executeSkillCli,
+  hasQuestSkillInstalled,
+  isSkillCliRequest,
+  QUEST_SKILL_INSTALL_SUGGESTION,
+  registerSkillCommands,
+  SkillCliConflictError,
+  type SkillCliRequest,
+  SkillCliUsageError,
+} from "./skill";
+export {
   type ExecuteUpgradeCliOptions,
   executeUpgradeCli,
   isUpgradeCliRequest,

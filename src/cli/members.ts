@@ -8,6 +8,7 @@ import { type Config, questReportSchema } from "../schema";
 import { type ConvexMember, convexApi, createConvexHttpClient } from "../store";
 import type { CliPrompter } from "./prompt";
 import type { CliFormat } from "./scope";
+import { hasQuestSkillInstalled, QUEST_SKILL_INSTALL_SUGGESTION } from "./skill";
 
 const nonEmptyTextSchema = z.string().trim().min(1);
 const memberSchema = z.strictObject({
@@ -344,6 +345,18 @@ async function addJoinRouting(
   }
 }
 
+async function joinSkillSuggestion(
+  environment: Readonly<Record<string, string | undefined>>,
+  verificationWarning: string | undefined,
+): Promise<string | undefined> {
+  if (verificationWarning !== undefined) {
+    return undefined;
+  }
+  return (await hasQuestSkillInstalled(environment)) === false
+    ? QUEST_SKILL_INSTALL_SUGGESTION
+    : undefined;
+}
+
 async function executeInvite(
   options: ExecuteMembersCliOptions,
   request: Extract<MembersCliRequest, { readonly command: "members-invite" }>,
@@ -450,6 +463,7 @@ async function executeJoin(
     verification.warning === undefined && request.routing
       ? await addJoinRouting(onboarding, writer, deployment, joined.token)
       : { added: [], skipped: [], warnings: [] };
+  const skillSuggestion = await joinSkillSuggestion(options.environment, verification.warning);
   const data = joinDataSchema.parse({
     connected_as: verification.member,
     deployment,
@@ -459,6 +473,7 @@ async function executeJoin(
   const warnings = [
     ...(verification.warning === undefined ? [] : [verification.warning]),
     ...routing.warnings,
+    ...(skillSuggestion === undefined ? [] : [skillSuggestion]),
   ];
   if (options.format === "json") {
     report(options, "join", data, warnings);
@@ -468,7 +483,10 @@ async function executeJoin(
         ? renderJoin(data.connected_as, data.routing_added)
         : `Connected as ${data.connected_as}; token saved, but server verification failed. Retry a normal Quest command; do not run quest join again.\n`,
     );
-    for (const warning of routing.warnings) {
+    for (const warning of warnings) {
+      if (warning === verification.warning) {
+        continue;
+      }
       options.output.write(`${warning}\n`);
     }
   }
