@@ -6,9 +6,11 @@ import {
   blockedStatusText,
   buildDetailLayout,
   laneMarkerFor,
+  pullRequestGlyphColor,
   sessionAttributionText,
   wrapText,
 } from "./components";
+import { DENSE_THEME } from "./theme";
 
 const item: QuestLogItem = {
   area: "cli",
@@ -24,6 +26,7 @@ const item: QuestLogItem = {
     "evidence/094-convex-error-normalization/VERIFICATION.md",
   ],
   pr: null,
+  prState: null,
   priority: 2,
   repo: "quest",
   status: "accepted",
@@ -217,5 +220,23 @@ describe("plan list annotations", () => {
       label: "shared files",
     });
     expect(laneMarkerFor(0, [dispatchable, { ...blocked, id: 101 }], sharedFiles)).toBeNull();
+  });
+});
+
+describe("PR list annotations", () => {
+  test("uses amber only for awaiting review and keeps merged PRs quiet", () => {
+    expect(
+      pullRequestGlyphColor(DENSE_THEME, { ...item, pr: "42", prState: "awaiting-review" }, false),
+    ).toBe(DENSE_THEME.palette.warn);
+    expect(
+      pullRequestGlyphColor(DENSE_THEME, { ...item, pr: "42", prState: "merged" }, false),
+    ).toBe(DENSE_THEME.palette.textDim);
+    expect(pullRequestGlyphColor(DENSE_THEME, { ...item, pr: "42", prState: "quiet" }, false)).toBe(
+      DENSE_THEME.palette.textDim,
+    );
+    expect(pullRequestGlyphColor(DENSE_THEME, item, false)).toBeNull();
+    expect(
+      pullRequestGlyphColor(DENSE_THEME, { ...item, pr: "42", prState: "awaiting-review" }, true),
+    ).toBe(DENSE_THEME.palette.selectionInk);
   });
 });

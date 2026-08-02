@@ -355,6 +355,72 @@ function rowColors(theme: QuestTheme, item: QuestLogItem, selected: boolean) {
   };
 }
 
+export function pullRequestGlyphColor(
+  theme: QuestTheme,
+  item: QuestLogItem,
+  selected: boolean,
+): string | null {
+  if (item.prState === null) {
+    return null;
+  }
+  if (selected) {
+    return theme.palette.selectionInk;
+  }
+  return item.prState === "awaiting-review" ? theme.palette.warn : theme.palette.textDim;
+}
+
+function pullRequestPrefixFor(theme: QuestTheme, item: QuestLogItem): string {
+  return item.prState === null ? "" : `${theme.glyphs.pullRequest} `;
+}
+
+function pullRequestMarker(
+  theme: QuestTheme,
+  item: QuestLogItem,
+  selected: boolean,
+  prefix: string,
+) {
+  const color = pullRequestGlyphColor(theme, item, selected);
+  return color === null || prefix === "" ? null : <span fg={color}>{prefix}</span>;
+}
+
+interface TitlePrefixLayout {
+  readonly blockedPrefix: string;
+  readonly pullRequestPrefix: string;
+  readonly titleWidth: number;
+}
+
+function titlePrefixLayout(
+  theme: QuestTheme,
+  item: QuestLogItem,
+  availableWidth: number,
+): TitlePrefixLayout {
+  const blockedPrefix =
+    item.computedState === "blocked" ? "" : item.blocked ? `${theme.glyphs.blocked} ` : "";
+  const pullRequestPrefix = pullRequestPrefixFor(theme, item);
+  const candidates = [
+    { blockedPrefix, pullRequestPrefix },
+    { blockedPrefix: "", pullRequestPrefix },
+    { blockedPrefix, pullRequestPrefix: "" },
+    { blockedPrefix: "", pullRequestPrefix: "" },
+  ];
+  const fallback = { blockedPrefix: "", pullRequestPrefix: "" };
+  const selected =
+    candidates.find(
+      (candidate) =>
+        stringWidth(candidate.blockedPrefix) + stringWidth(candidate.pullRequestPrefix) + 1 <=
+        availableWidth,
+    ) ?? fallback;
+  return {
+    ...selected,
+    titleWidth: Math.max(
+      1,
+      availableWidth -
+        stringWidth(selected.blockedPrefix) -
+        stringWidth(selected.pullRequestPrefix),
+    ),
+  };
+}
+
 function laneText(theme: QuestTheme, marker: QuestLogLaneMarker | null): string {
   if (marker === null) {
     return "";
@@ -375,12 +441,12 @@ function rowText(
 ) {
   const status = theme.status[item.status];
   const colors = rowColors(theme, item, selected);
-  const title = `${item.computedState === "blocked" ? "" : item.blocked ? `${theme.glyphs.blocked} ` : ""}${item.title}`;
   const markerText = laneText(theme, laneMarker);
   const visibleMarkerText =
     markerText === "" || titleWidth <= 2 ? "" : fit(markerText, titleWidth - 2);
   const markerSuffix = visibleMarkerText === "" ? "" : ` ${visibleMarkerText}`;
   const fittedTitleWidth = Math.max(1, titleWidth - stringWidth(markerSuffix));
+  const titleLayout = titlePrefixLayout(theme, item, fittedTitleWidth);
   const blockedStatus = blockedStatusText(item);
   return (
     <span>
@@ -401,7 +467,9 @@ function rowText(
         {`${pad(`${theme.glyphs.priority}${item.priority}`, 4)} `}
       </span>
       {showAssignee ? <span fg={colors.muted}>{`${pad(item.assignee ?? "—", 16)} `}</span> : null}
-      <span fg={colors.primary}>{fit(title, fittedTitleWidth)}</span>
+      <span fg={colors.primary}>{titleLayout.blockedPrefix}</span>
+      {pullRequestMarker(theme, item, selected, titleLayout.pullRequestPrefix)}
+      <span fg={colors.primary}>{fit(item.title, titleLayout.titleWidth)}</span>
       {visibleMarkerText === "" ? null : (
         <span fg={selected ? theme.palette.selectionInk : theme.palette.lane}>{markerSuffix}</span>
       )}
