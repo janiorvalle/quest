@@ -59,6 +59,7 @@ export {
   addLifecycleQuest,
   type DuplicateCandidate,
   type EvidenceAttachmentRequest,
+  LaneConflictCommandError,
   LifecycleCommandError,
   type LifecycleServicePorts,
   type LifecycleTransitionOptions,
@@ -84,6 +85,8 @@ export {
 export {
   getNextQuest,
   type NextBacklog,
+  type NextLaneConflict,
+  type NextQuestOptions,
   type NextQuestResult,
   type NextSelectionPolicy,
   selectNextQuest,

@@ -134,16 +134,21 @@ quest add [title]                 File a new quest (interactive prompts, or flag
     --status <s> --verdict <v>    Backfill flags for migrating historical items
                                   (state recorded as-is; event log notes backfill).
     --predicted-files <p>...      Files the fix will likely touch; feeds `next`'s
-                                  overlap warnings.
+                                  lane conflict advice.
                                   Prefer `quest add --json -` for long or multi-line input. Pipe one JSON
                                   object using the same fields (`title`, `description`, `predicted_files`);
                                   JSON and flags are mutually exclusive.
 
 quest next                        The answer to "what do I work on?" Respects:
                                   chain blocking (skips quests whose `requires`
-                                  aren't complete), priority policy, and warns on
-                                  predicted-file overlap with in-flight quests.
+                                  aren't complete), priority policy, and the shared
+                                  dispatch-plan lane clusters. Hard file conflicts
+                                  are skipped when another quest is available.
     --claim                       Atomically accept the suggestion in one step.
+    --allow-conflict              With --claim, acknowledge a hard lane conflict.
+                                  Without this flag, TTY sessions ask `y/N`; headless
+                                  sessions refuse with `NEXT_LANE_CONFLICT` and say
+                                  how to pick another quest or retry with this flag.
     --brief                       With --claim, include the full context package
                                   in the same response; this is the one-shot work
                                   start for agents.
@@ -259,6 +264,7 @@ The plan reads one consistent store snapshot in the selected scope. Its JSON
 `blocker_paths` preserve every path from the quest to a root blocker.
 `shared_files` clusters are hard overlap signals. `same_area` clusters only
 apply when both quests have no predicted files and are labeled as heuristics.
+`next` warns about a selected soft same-area conflict but never refuses it.
 Completed, dropped, open, turned-in, and expired accepted quests are not
 dispatch entries.
 

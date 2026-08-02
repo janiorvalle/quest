@@ -8,6 +8,8 @@ import {
   strictPriorityThenAgePolicy,
 } from "./next";
 
+const now = "2026-08-02T16:00:00Z";
+
 function quest(id: number, title: string, options: Partial<Quest> = {}): Quest {
   return {
     id,
@@ -86,7 +88,7 @@ describe("next selection policy", () => {
     expect(result.warnings).toEqual(["quest 1 skipped: blocked by 2 (accepted by janior/fable-1)"]);
   });
 
-  test("warns on selected predicted-file overlap with accepted and turned-in work", () => {
+  test("warns on selected predicted-file overlap with live accepted work", () => {
     const quests = [
       quest(1, "Selected", {
         priority: 1,
@@ -94,6 +96,7 @@ describe("next selection policy", () => {
       }),
       quest(2, "Accepted overlap", {
         assignee: "janior/codex-2",
+        lease_expires_at: "2026-08-02T17:00:00Z",
         status: "accepted",
         predicted_files: ["src/cli/program.ts"],
       }),
@@ -115,10 +118,138 @@ describe("next selection policy", () => {
       }),
     ];
 
-    expect(selectNextQuest(backlog(quests), { repo: "quest" }).warnings).toEqual([
-      "quest 1 predicted_files overlap with in-flight quest 2: src/cli/program.ts",
-      "quest 1 predicted_files overlap with in-flight quest 3: src/services/next.ts",
+    expect(
+      selectNextQuest(backlog(quests), { repo: "quest" }, undefined, null, undefined, now).warnings,
+    ).toEqual(["quest 1 predicted_files overlap with in-flight quest 2: src/cli/program.ts"]);
+  });
+
+  test("skips hard lane conflicts when a conflict-free quest is available", () => {
+    const quests = [
+      quest(1, "In flight", {
+        assignee: "worker",
+        lease_expires_at: "2026-08-02T17:00:00Z",
+        predicted_files: ["src/shared.ts"],
+        status: "accepted",
+      }),
+      quest(2, "Conflicted priority", {
+        predicted_files: ["src/shared.ts"],
+        priority: 1,
+      }),
+      quest(3, "Available", { priority: 2 }),
+    ];
+
+    const result = selectNextQuest(
+      backlog(quests),
+      { repo: "quest" },
+      undefined,
+      null,
+      undefined,
+      now,
+    );
+
+    expect(result.quest?.id).toBe(3);
+    expect(result.laneConflicts).toEqual([]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  test("reports every scoped in-flight quest in a shared-files lane", () => {
+    const quests = [
+      quest(1, "In flight one", {
+        assignee: "worker-one",
+        lease_expires_at: "2026-08-02T17:00:00Z",
+        predicted_files: ["src/shared.ts"],
+        status: "accepted",
+      }),
+      quest(2, "In flight two", {
+        assignee: "worker-two",
+        lease_expires_at: "2026-08-02T17:00:00Z",
+        predicted_files: ["src/shared.ts"],
+        status: "accepted",
+      }),
+      quest(3, "Conflicted work", {
+        predicted_files: ["src/shared.ts"],
+      }),
+      quest(4, "Other repository", {
+        repo: "other",
+        assignee: "other-worker",
+        lease_expires_at: "2026-08-02T17:00:00Z",
+        predicted_files: ["src/shared.ts"],
+        status: "accepted",
+      }),
+    ];
+
+    const result = selectNextQuest(
+      backlog(quests),
+      { repo: "quest" },
+      undefined,
+      null,
+      undefined,
+      now,
+    );
+
+    expect(result.quest?.id).toBe(3);
+    expect(result.laneConflicts.map(({ inFlightQuestId }) => inFlightQuestId)).toEqual([1, 2]);
+    expect(result.warnings).toEqual([
+      "quest 3 predicted_files overlap with in-flight quest 1: src/shared.ts",
+      "quest 3 predicted_files overlap with in-flight quest 2: src/shared.ts",
     ]);
+  });
+
+  test("keeps global selection lanes isolated by repository", () => {
+    const result = selectNextQuest(
+      backlog([
+        quest(1, "Other repository work", {
+          assignee: "other-worker",
+          lease_expires_at: "2026-08-02T17:00:00Z",
+          predicted_files: ["package.json"],
+          repo: "other",
+          status: "accepted",
+        }),
+        quest(2, "Quest repository work", { predicted_files: ["package.json"] }),
+      ]),
+      { repo: null },
+      undefined,
+      null,
+      undefined,
+      now,
+    );
+
+    expect(result.quest?.id).toBe(2);
+    expect(result.laneConflicts).toEqual([]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  test("warns on soft same-area conflicts without treating them as hard conflicts", () => {
+    const quests = [
+      quest(1, "In flight", {
+        assignee: "worker",
+        lease_expires_at: "2026-08-02T17:00:00Z",
+        status: "accepted",
+      }),
+      quest(2, "Available"),
+    ];
+
+    const result = selectNextQuest(
+      backlog(quests),
+      { repo: "quest" },
+      undefined,
+      null,
+      undefined,
+      now,
+    );
+
+    expect(result.quest?.id).toBe(2);
+    expect(result.laneConflicts).toEqual([
+      {
+        area: "cli",
+        files: [],
+        heuristic: true,
+        inFlightQuestId: 1,
+        kind: "same_area",
+        questId: 2,
+      },
+    ]);
+    expect(result.warnings).toEqual(["quest 2 shares area cli with in-flight quest 1 (heuristic)"]);
   });
 
   test("keeps the eligible-quest policy swappable without encoding area weighting", () => {

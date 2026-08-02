@@ -79,6 +79,8 @@ export {
   chainResultSchema,
   type EventFilter,
   eventFilterSchema,
+  type LaneConflictReference,
+  laneConflictReferenceSchema,
   type NewChain,
   type NewEvidence,
   type NewQuest,

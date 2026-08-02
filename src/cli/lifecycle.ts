@@ -34,6 +34,7 @@ import {
   getNextQuest,
   LifecycleCommandError,
   type LifecycleTransitionOptions,
+  type NextLaneConflict,
   type NextQuestResult,
   type PullRequestMergeChecker,
   type PullRequestMergeState,
@@ -166,6 +167,7 @@ interface AddCliRequest {
 }
 
 interface NextCliRequest {
+  readonly allowConflict: boolean;
   readonly brief: boolean;
   readonly claim: boolean;
   readonly command: "next";
@@ -410,6 +412,7 @@ export function registerLifecycleCommands(
     .command("next")
     .description("suggest the next unblocked quest")
     .option("--claim", "atomically accept the suggestion")
+    .option("--allow-conflict", "claim despite a hard lane conflict")
     .option("--brief", "include the full context package; requires --claim")
     .option(
       "--skip-after-reopens <count>",
@@ -417,6 +420,7 @@ export function registerLifecycleCommands(
     )
     .action(function (this: Command) {
       capture.set({
+        allowConflict: booleanOption(this, "allowConflict"),
         brief: booleanOption(this, "brief"),
         claim: booleanOption(this, "claim"),
         command: "next",
@@ -945,12 +949,27 @@ async function executeAdd(options: ExecuteLifecycleCliOptions): Promise<ExitCode
 }
 
 function requireBriefClaim(request: NextCliRequest): void {
-  if (!request.brief || request.claim) {
-    return;
+  if (request.brief && !request.claim) {
+    throw new LifecycleCliUsageError(
+      "--brief requires --claim; run `quest next --claim --brief` to claim work with its context package",
+    );
   }
-  throw new LifecycleCliUsageError(
-    "--brief requires --claim; run `quest next --claim --brief` to claim work with its context package",
-  );
+  if (request.allowConflict && !request.claim) {
+    throw new LifecycleCliUsageError(
+      "--allow-conflict requires --claim; run `quest next --claim --allow-conflict` to claim work with the override",
+    );
+  }
+}
+
+function laneConflictDescription(conflict: NextLaneConflict): string {
+  if (conflict.kind === "shared_files") {
+    return `quest ${conflict.questId} overlaps in-flight quest ${conflict.inFlightQuestId}: ${conflict.files.join(", ")}`;
+  }
+  return `quest ${conflict.questId} shares area ${conflict.area ?? "<none>"} with in-flight quest ${conflict.inFlightQuestId}`;
+}
+
+function laneConflictPrompt(conflicts: readonly NextLaneConflict[]): string {
+  return `Lane conflict: ${conflicts.map(laneConflictDescription).join("; ")}. Claim anyway? [y/N] `;
 }
 
 function compileNextBrief(
@@ -1030,6 +1049,7 @@ async function executeNext(options: ExecuteLifecycleCliOptions): Promise<ExitCod
   requireBriefClaim(request);
   const owner = request.claim ? requireIdentity(options.identity) : null;
   const sessionAttribution = sessionAttributionFromEnvironment(options.environment);
+  const now = await options.ports.clock.now();
   const result = await getNextQuest(
     options.ports.questStore,
     options.scope,
@@ -1039,6 +1059,18 @@ async function executeNext(options: ExecuteLifecycleCliOptions): Promise<ExitCod
     request.skipAfterReopens,
     request.brief,
     sessionAttribution,
+    {
+      allowConflict: request.allowConflict,
+      now,
+      ...(options.isTty && !request.allowConflict
+        ? {
+            resolveLaneConflict: async (conflicts: readonly NextLaneConflict[]) => {
+              const answer = await options.prompter.ask(laneConflictPrompt(conflicts));
+              return /^(?:y|yes)$/iu.test(answer.trim());
+            },
+          }
+        : {}),
+    },
   );
   const compiled = compileNextBrief(request, result);
 
