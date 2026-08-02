@@ -38,6 +38,10 @@ supported target and verifies the checksums; `make dist-smoke` additionally
 exercises the checksum-verifying installer against those local artifacts. Run
 it when a change touches packaging, the installers, or the build scripts.
 
+Verification evidence for a change lives in the pull request description and
+its CI runs; maintainers additionally attach receipts to the internal tracker.
+Do not commit evidence directories.
+
 The TypeScript and Biome configurations in this repository are the authority,
 and every rule is enforced by a tool on every commit. Never use `--no-verify`,
 never weaken a compiler flag or lint rule, and never add `as`, `any`, or `!`
