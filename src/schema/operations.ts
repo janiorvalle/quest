@@ -68,9 +68,19 @@ export const newChainSchema = chainSchema.pick({
 });
 export type NewChain = z.infer<typeof newChainSchema>;
 
+export const laneConflictReferenceSchema = z.strictObject({
+  files: z.array(nonEmptyTextSchema).min(1),
+  quest_id: displayIdSchema,
+});
+export type LaneConflictReference = z.infer<typeof laneConflictReferenceSchema>;
+
 export const acceptQuestInputSchema = z.strictObject({
   force: z.boolean().optional(),
   id: displayIdSchema,
+  // next uses this guard so the backend checks live hard conflicts in the claim transaction.
+  lane_conflict_guard: z.literal(true).optional(),
+  lane_conflict_acknowledged: z.array(laneConflictReferenceSchema).optional(),
+  lane_conflict_override: z.literal(true).optional(),
   owner: nonEmptyTextSchema,
   ...sessionAttributionFields,
   session_guild: sessionGuildSchema,
@@ -85,6 +95,18 @@ export const acceptResultSchema = z.discriminatedUnion("outcome", [
   }),
   z.strictObject({
     outcome: z.literal("conflict"),
+    lease_expires_at: questSchema.shape.lease_expires_at,
+    quest: questSchema,
+  }),
+  z.strictObject({
+    outcome: z.literal("lane-conflict-stale"),
+    lane_conflicts: z.array(laneConflictReferenceSchema),
+    lease_expires_at: questSchema.shape.lease_expires_at,
+    quest: questSchema,
+  }),
+  z.strictObject({
+    outcome: z.literal("lane-conflict"),
+    lane_conflicts: z.array(laneConflictReferenceSchema).min(1),
     lease_expires_at: questSchema.shape.lease_expires_at,
     quest: questSchema,
   }),

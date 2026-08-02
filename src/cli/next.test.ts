@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createLocalEvidenceFileReader } from "../evidence";
-import { createCliOutputBoundary, EXIT_SUCCESS, EXIT_USAGE_ERROR } from "../output";
+import {
+  createCliOutputBoundary,
+  EXIT_DOMAIN_ERROR,
+  EXIT_SUCCESS,
+  EXIT_USAGE_ERROR,
+} from "../output";
 import type { Config, NewQuest, QuestReport, QuestStatus } from "../schema";
 import { getNextQuest } from "../services";
 import type { QuestStore } from "../store";
@@ -45,6 +50,7 @@ interface NextCliHarness {
   readonly runJson: (
     argumentsWithoutRuntime: readonly string[],
   ) => Promise<{ code: number; report: QuestReport | null; stderr: readonly string[] }>;
+  readonly promptQuestions: string[];
   readonly setCliStore: (store: QuestStore) => void;
   readonly stop: () => Promise<void>;
   readonly store: SqliteStore;
@@ -83,17 +89,20 @@ function questInput(
   };
 }
 
-async function createHarness(): Promise<NextCliHarness> {
+async function createHarness(
+  options: { readonly isTty?: boolean; readonly promptAnswer?: string } = {},
+): Promise<NextCliHarness> {
   const directory = await mkdtemp(join(tmpdir(), "quest-next-cli-"));
   const stdout: string[] = [];
   const stderr: string[] = [];
+  const promptQuestions: string[] = [];
   let cliStore: QuestStore;
   let timestampIndex = 0;
   const timestamps = [
-    "2026-07-01T00:00:00Z",
-    "2026-07-02T00:00:00Z",
-    "2026-07-03T00:00:00Z",
-    "2026-07-04T00:00:00Z",
+    "2026-07-29T12:00:00Z",
+    "2026-07-29T12:01:00Z",
+    "2026-07-29T12:02:00Z",
+    "2026-07-29T12:03:00Z",
   ];
   const store = new SqliteStore(join(directory, "quest.db"), {
     now: () => timestamps[timestampIndex++] ?? generatedAt,
@@ -113,7 +122,7 @@ async function createHarness(): Promise<NextCliHarness> {
     config,
     evidenceFiles: createLocalEvidenceFileReader(),
     initialWorkingDirectory: directory,
-    isTty: true,
+    isTty: options.isTty ?? true,
     locateGitRoot: () => Promise.resolve(directory),
     openApplicationPorts: () =>
       Promise.resolve({
@@ -126,7 +135,13 @@ async function createHarness(): Promise<NextCliHarness> {
       stderr: (line) => stderr.push(line),
     }),
     prompter: {
-      ask: () => Promise.reject(new Error("next must not prompt")),
+      ask: async (question) => {
+        if (options.promptAnswer === undefined) {
+          throw new Error("next must not prompt");
+        }
+        promptQuestions.push(question);
+        return options.promptAnswer;
+      },
     },
     validateWorkingDirectory: () => Promise.resolve(),
   } satisfies QuestCliDependencies;
@@ -155,6 +170,7 @@ async function createHarness(): Promise<NextCliHarness> {
         stderr: result.stderr,
       };
     },
+    promptQuestions,
     store,
     setCliStore(nextStore) {
       cliStore = nextStore;
@@ -223,6 +239,242 @@ describe("next CLI behavior", () => {
     }
   });
 
+  test("skips a hard lane conflict when a conflict-free quest is available", async () => {
+    const harness = await createHarness();
+    try {
+      const inFlight = await harness.addQuest("In-flight work", {
+        assignee: "janior/fable-1",
+        predictedFiles: ["src/shared.ts"],
+        status: "accepted",
+      });
+      const conflicted = await harness.addQuest("Conflicted priority one", {
+        predictedFiles: ["src/shared.ts"],
+        priority: 1,
+      });
+      const available = await harness.addQuest("Available priority two", { priority: 2 });
+
+      const result = await harness.runJson(["next", "--claim"]);
+
+      expect(result.code).toBe(EXIT_SUCCESS);
+      expect(result.report).toMatchObject({
+        warnings: [],
+        data: {
+          claimed: true,
+          quest: { id: available, status: "accepted" },
+        },
+      });
+      expect(await harness.store.getQuest(conflicted)).toMatchObject({
+        assignee: null,
+        id: conflicted,
+        status: "ready",
+      });
+      expect(await harness.store.getQuest(inFlight)).toMatchObject({
+        id: inFlight,
+        status: "accepted",
+      });
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  test("prompts a TTY before claiming a hard lane conflict and records the acknowledgement", async () => {
+    const harness = await createHarness({ promptAnswer: "y" });
+    try {
+      const inFlight = await harness.addQuest("In-flight work", {
+        assignee: "janior/fable-1",
+        predictedFiles: ["src/shared.ts"],
+        status: "accepted",
+      });
+      const conflicted = await harness.addQuest("Conflicted work", {
+        predictedFiles: ["src/shared.ts"],
+      });
+
+      const result = await harness.runJson(["next", "--claim"]);
+
+      expect(result.code).toBe(EXIT_SUCCESS);
+      expect(harness.promptQuestions).toEqual([
+        `Lane conflict: quest ${conflicted} overlaps in-flight quest ${inFlight}: src/shared.ts. Claim anyway? [y/N] `,
+      ]);
+      expect((await harness.store.events(conflicted)).at(-1)?.detail).toMatchObject({
+        lane_conflict_acknowledged: true,
+      });
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  test("refuses a headless hard lane conflict with receiver-ready remedies and makes no claim", async () => {
+    const harness = await createHarness({ isTty: false });
+    try {
+      const inFlight = await harness.addQuest("In-flight work", {
+        assignee: "janior/fable-1",
+        predictedFiles: ["src/shared.ts"],
+        status: "accepted",
+      });
+      const conflicted = await harness.addQuest("Conflicted work", {
+        predictedFiles: ["src/shared.ts"],
+      });
+
+      const result = await harness.runJson(["next", "--claim"]);
+
+      expect(result.code).toBe(EXIT_DOMAIN_ERROR);
+      expect(result.report).toBeNull();
+      expect(result.stderr).toHaveLength(1);
+      expect(result.stderr[0]).toContain(
+        `quest ${conflicted} predicted_files overlap with in-flight quest ${inFlight}: src/shared.ts`,
+      );
+      expect(result.stderr[0]).toContain("NEXT_LANE_CONFLICT");
+      expect(result.stderr[0]).toContain("no claim was made");
+      expect(result.stderr[0]).toContain("pick another quest");
+      expect(result.stderr[0]).toContain("re-run with --allow-conflict");
+      expect((await harness.store.events(conflicted)).map((event) => event.action)).toEqual([
+        "add",
+      ]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  test("refuses a hard lane conflict that appears during the claim transaction", async () => {
+    const harness = await createHarness({ isTty: false });
+    try {
+      const candidate = await harness.addQuest("Raced candidate", {
+        predictedFiles: ["src/shared.ts"],
+      });
+      let injected = false;
+      const racingStore = new Proxy(harness.store, {
+        get(target, property, receiver) {
+          if (property !== "acceptQuest") {
+            const value = Reflect.get(target, property, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+          return async (input: Parameters<QuestStore["acceptQuest"]>[0]) => {
+            if (!injected) {
+              injected = true;
+              const inFlight = await target.addQuest({
+                ...questInput("Raced in-flight work", {
+                  assignee: "janior/racer",
+                  predictedFiles: ["src/shared.ts"],
+                  status: "accepted",
+                }),
+                lease_expires_at: "2099-01-01T00:00:00Z",
+              });
+              expect(inFlight.status).toBe("accepted");
+            }
+            return target.acceptQuest(input);
+          };
+        },
+      });
+      harness.setCliStore(racingStore);
+
+      const result = await harness.runJson(["next", "--claim"]);
+
+      expect(result.code).toBe(EXIT_DOMAIN_ERROR);
+      expect(result.report).toBeNull();
+      expect(result.stderr[0]).toContain(
+        `quest ${candidate} predicted_files overlap with in-flight quest 2: src/shared.ts`,
+      );
+      expect(result.stderr[0]).toContain("NEXT_LANE_CONFLICT");
+      expect((await harness.store.events(candidate)).map(({ action }) => action)).toEqual(["add"]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  test("reports a hard conflict discovered during an approved claim retry", async () => {
+    const harness = await createHarness({ isTty: false });
+    try {
+      const candidate = await harness.addQuest("Raced candidate", {
+        predictedFiles: ["src/shared.ts"],
+      });
+      let injected = false;
+      const racingStore = new Proxy(harness.store, {
+        get(target, property, receiver) {
+          if (property !== "acceptQuest") {
+            const value = Reflect.get(target, property, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+          return async (input: Parameters<QuestStore["acceptQuest"]>[0]) => {
+            if (!injected) {
+              injected = true;
+              const inFlight = await target.addQuest({
+                ...questInput("Raced in-flight work", {
+                  assignee: "janior/racer",
+                  predictedFiles: ["src/shared.ts"],
+                  status: "accepted",
+                }),
+                lease_expires_at: "2099-01-01T00:00:00Z",
+              });
+              expect(inFlight.status).toBe("accepted");
+            }
+            return target.acceptQuest(input);
+          };
+        },
+      });
+      harness.setCliStore(racingStore);
+
+      const result = await harness.runJson(["next", "--claim", "--allow-conflict"]);
+
+      expect(result.code).toBe(EXIT_SUCCESS);
+      expect(result.report).toMatchObject({
+        warnings: [
+          `quest ${candidate} predicted_files overlap with in-flight quest 2: src/shared.ts`,
+        ],
+        data: { claimed: true, quest: { id: candidate, status: "accepted" } },
+      });
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  test("--allow-conflict claims hard-conflicted work without prompting and records the override", async () => {
+    const harness = await createHarness({ isTty: false });
+    try {
+      const conflicted = await harness.addQuest("Conflicted work", {
+        predictedFiles: ["src/shared.ts"],
+      });
+      await harness.addQuest("In-flight work", {
+        assignee: "janior/fable-1",
+        predictedFiles: ["src/shared.ts"],
+        status: "accepted",
+      });
+
+      const result = await harness.runJson(["next", "--claim", "--allow-conflict"]);
+
+      expect(result.code).toBe(EXIT_SUCCESS);
+      expect(harness.promptQuestions).toEqual([]);
+      expect((await harness.store.events(conflicted)).at(-1)?.detail).toMatchObject({
+        lane_conflict_acknowledged: true,
+      });
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  test("warns but claims a soft same-area conflict in a headless session", async () => {
+    const harness = await createHarness({ isTty: false });
+    try {
+      await harness.addQuest("In-flight work", {
+        assignee: "janior/fable-1",
+        status: "accepted",
+      });
+      const available = await harness.addQuest("Same-area work");
+
+      const result = await harness.runJson(["next", "--claim"]);
+
+      expect(result.code).toBe(EXIT_SUCCESS);
+      expect(result.report).toMatchObject({
+        warnings: [`quest ${available} shares area cli with in-flight quest 1 (heuristic)`],
+        data: { claimed: true, quest: { id: available, status: "accepted" } },
+      });
+      expect((await harness.store.events(available)).at(-1)?.detail).not.toHaveProperty(
+        "lane_conflict_acknowledged",
+      );
+    } finally {
+      await harness.stop();
+    }
+  });
+
   test("skips chain-blocked work, selects strict priority then age, and envelopes warnings", async () => {
     const harness = await createHarness();
     try {
@@ -237,11 +489,6 @@ describe("next CLI behavior", () => {
       const selected = await harness.addQuest("Available priority two", {
         predictedFiles: ["src/cli/program.ts"],
         priority: 2,
-      });
-      const overlap = await harness.addQuest("Overlapping work", {
-        assignee: "janior/codex-16",
-        predictedFiles: ["src/cli/program.ts"],
-        status: "turned_in",
       });
       await harness.store.addChainLink({
         actor: identity,
@@ -259,7 +506,6 @@ describe("next CLI behavior", () => {
         filters: { repo: "quest" },
         warnings: [
           `quest ${blocked} skipped: blocked by ${requirement} (accepted by janior/fable-1)`,
-          `quest ${selected} predicted_files overlap with in-flight quest ${overlap}: src/cli/program.ts`,
         ],
         data: {
           claimed: false,

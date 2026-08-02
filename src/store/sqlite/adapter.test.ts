@@ -815,6 +815,53 @@ describe("SqliteStore", () => {
     await removeDirectory(directory);
   });
 
+  test("guards lane conflicts inside the claim transaction", async () => {
+    await withStore(async (store) => {
+      const inFlight = await store.addQuest({
+        ...taskInput("lane owner"),
+        assignee: "sqlite/other",
+        lease_expires_at: "2099-01-01T00:00:00Z",
+        predicted_files: ["src/shared.ts"],
+        status: "accepted",
+      });
+      const candidate = await store.addQuest({
+        ...taskInput("lane candidate"),
+        predicted_files: ["src/shared.ts"],
+      });
+      await store.addQuest({
+        ...taskInput("other repository lane owner"),
+        repo: "other",
+        assignee: "other/worker",
+        lease_expires_at: "2099-01-01T00:00:00Z",
+        predicted_files: ["src/shared.ts"],
+        status: "accepted",
+      });
+
+      const refused = await store.acceptQuest({
+        id: candidate.id,
+        lane_conflict_guard: true,
+        owner: actor,
+      });
+      expect(refused).toMatchObject({
+        outcome: "lane-conflict",
+        lane_conflicts: [{ files: ["src/shared.ts"], quest_id: inFlight.id }],
+        quest: { assignee: null, status: "ready" },
+      });
+      expect((await store.events(candidate.id)).map(({ action }) => action)).toEqual(["add"]);
+
+      const acknowledged = await store.acceptQuest({
+        id: candidate.id,
+        lane_conflict_acknowledged: [{ files: ["src/shared.ts"], quest_id: inFlight.id }],
+        lane_conflict_guard: true,
+        owner: actor,
+      });
+      expect(acknowledged).toMatchObject({
+        outcome: "accepted",
+        quest: { assignee: actor, status: "accepted" },
+      });
+    });
+  });
+
   test("checks guild routing inside the atomic claim update", async () => {
     await withStore(async (store) => {
       const quest = await store.addQuest({ ...taskInput("guild-routed claim"), guild: "claude" });

@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import {
   allocateDisplayId,
   canApplyVerdict,
+  computeQuestPlan,
   findChainCyclePath,
   isLeaseExpired,
   isLegalStatusTransition,
@@ -31,6 +32,7 @@ import {
   eventFilterSchema,
   eventSchema,
   evidenceSchema,
+  type LaneConflictReference,
   type NewEvidence,
   type NewQuest,
   newEvidenceSchema,
@@ -115,6 +117,58 @@ type SqliteSequenceHighWater = {
   readonly evidence: number;
   readonly events: number;
 };
+
+function hardLaneConflictsForQuest(
+  quests: readonly Quest[],
+  questId: number,
+  now: string,
+): Array<{ readonly files: string[]; readonly quest_id: number }> {
+  const plan = computeQuestPlan({ chains: [], now, quests });
+  const inFlightQuestIds = new Set(
+    plan.quests.filter((quest) => quest.computed_state === "in_flight").map((quest) => quest.id),
+  );
+  const planQuestsById = new Map(plan.quests.map((quest) => [quest.id, quest]));
+  const candidate = planQuestsById.get(questId);
+  if (candidate === undefined) {
+    return [];
+  }
+  const conflicts = new Map<string, { readonly files: string[]; readonly quest_id: number }>();
+  for (const cluster of plan.lane_clusters) {
+    if (cluster.kind !== "shared_files" || !cluster.quest_ids.includes(questId)) {
+      continue;
+    }
+    for (const candidateId of cluster.quest_ids) {
+      const inFlight = planQuestsById.get(candidateId);
+      if (
+        candidateId === questId ||
+        !inFlightQuestIds.has(candidateId) ||
+        inFlight === undefined ||
+        inFlight.repo !== candidate.repo
+      ) {
+        continue;
+      }
+      const conflict = { files: [...cluster.files], quest_id: candidateId };
+      conflicts.set(`${candidateId}:${cluster.files.join("\0")}`, conflict);
+    }
+  }
+  return [...conflicts.values()].sort(
+    (left, right) =>
+      left.quest_id - right.quest_id || left.files.join("\0").localeCompare(right.files.join("\0")),
+  );
+}
+
+function laneConflictsMatch(
+  actual: readonly LaneConflictReference[],
+  acknowledged: readonly LaneConflictReference[],
+): boolean {
+  if (actual.length !== acknowledged.length) {
+    return false;
+  }
+  const key = (conflict: LaneConflictReference) =>
+    `${conflict.quest_id}:${[...conflict.files].sort().join("\0")}`;
+  const acknowledgedKeys = new Set(acknowledged.map(key));
+  return actual.every((conflict) => acknowledgedKeys.has(key(conflict)));
+}
 
 function maxEntityId(items: readonly { readonly id: number }[]): number {
   let maximum = 0;
@@ -431,6 +485,11 @@ export class SqliteStore implements QuestStore {
       } satisfies AcceptResult;
     }
 
+    const laneConflict = this.#unacknowledgedLaneConflict(parsed, current, timestamp);
+    if (laneConflict !== null) {
+      return laneConflict;
+    }
+
     const nextLeaseExpiresAt = leaseExpiry(timestamp);
     const changed = runStatement(
       this.#database,
@@ -459,6 +518,10 @@ export class SqliteStore implements QuestStore {
       lease_expires_at: nextLeaseExpiresAt,
       ...(expired && stored.assignee !== null ? { reclaimed_from: stored.assignee } : {}),
       status: "accepted",
+      ...(parsed.lane_conflict_override === true ||
+      (parsed.lane_conflict_acknowledged?.length ?? 0) > 0
+        ? { lane_conflict_acknowledged: true }
+        : {}),
       ...(parsed.session_effort === undefined ? {} : { session_effort: parsed.session_effort }),
       session_guild: parsed.session_guild ?? null,
       ...(parsed.session_model === undefined ? {} : { session_model: parsed.session_model }),
@@ -1802,6 +1865,30 @@ export class SqliteStore implements QuestStore {
     force: boolean | undefined,
   ): boolean {
     return quest.guild !== null && quest.guild !== (sessionGuild ?? null) && force !== true;
+  }
+
+  #unacknowledgedLaneConflict(
+    parsed: AcceptQuestInput,
+    current: Quest,
+    timestamp: string,
+  ): Extract<AcceptResult, { outcome: "lane-conflict" | "lane-conflict-stale" }> | null {
+    if (parsed.lane_conflict_guard !== true || parsed.lane_conflict_override === true) {
+      return null;
+    }
+    const laneConflicts = hardLaneConflictsForQuest(
+      this.#readQuestDump(timestamp).quests,
+      parsed.id,
+      timestamp,
+    );
+    if (laneConflictsMatch(laneConflicts, parsed.lane_conflict_acknowledged ?? [])) {
+      return null;
+    }
+    return {
+      outcome: laneConflicts.length > 0 ? "lane-conflict" : "lane-conflict-stale",
+      lane_conflicts: laneConflicts,
+      lease_expires_at: current.lease_expires_at,
+      quest: current,
+    };
   }
 
   #canAccept(stored: Quest, current: Quest, expired: boolean): boolean {

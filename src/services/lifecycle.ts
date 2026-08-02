@@ -10,6 +10,7 @@ import type {
   Evidence,
   EvidenceKind,
   EvidenceStage,
+  LaneConflictReference,
   NewQuest,
   Quest,
   QuestDump,
@@ -107,6 +108,31 @@ export class LifecycleCommandError extends Error {
   }
 }
 
+export class LaneConflictCommandError extends LifecycleCommandError {
+  readonly conflicts: Extract<
+    AcceptResult,
+    { outcome: "lane-conflict" | "lane-conflict-stale" }
+  >["lane_conflicts"];
+
+  constructor(
+    questId: number,
+    conflicts: Extract<
+      AcceptResult,
+      { outcome: "lane-conflict" | "lane-conflict-stale" }
+    >["lane_conflicts"],
+  ) {
+    const details = conflicts
+      .map(
+        (conflict) =>
+          `quest ${questId} predicted_files overlap with in-flight quest ${conflict.quest_id}: ${conflict.files.join(", ")}`,
+      )
+      .join("; ");
+    super(`quest ${questId} has a concurrent lane conflict: ${details}`);
+    this.name = "LaneConflictCommandError";
+    this.conflicts = conflicts;
+  }
+}
+
 function missingVerificationEvidenceWarning(id: number): string {
   return `quest ${id} has no verify-stage evidence; attach evidence with --evidence <path>`;
 }
@@ -152,6 +178,9 @@ async function hasCurrentVerificationEvidence(store: QuestStore, id: number): Pr
 type QuestAcceptanceMode = "normal" | "force";
 
 interface AcceptLifecycleQuestOptions {
+  readonly laneConflictGuard?: boolean;
+  readonly laneConflictAcknowledged?: readonly LaneConflictReference[];
+  readonly laneConflictOverride?: boolean;
   readonly mode?: QuestAcceptanceMode;
   readonly sessionAttribution?: SessionAttribution;
   readonly sessionGuild?: string | null;
@@ -465,12 +494,26 @@ async function acceptLifecycleQuestWithOperation(
 ): Promise<QuestMutationResult> {
   const sessionGuild = options.sessionGuild ?? null;
   const sessionAttribution = options.sessionAttribution ?? {};
+  const laneConflictGuard = options.laneConflictGuard === true;
+  const laneConflictAcknowledged = options.laneConflictAcknowledged ?? [];
+  const laneConflictOverride = options.laneConflictOverride === true;
   const force = options.mode === "force";
   const current = await requireScopedQuest(store, id, scope);
   const warning = guildMismatchWarning(current, id, sessionGuild);
   if (warning !== undefined) {
     return force
-      ? acceptMismatchedGuild(current, id, owner, sessionGuild, sessionAttribution, warning, accept)
+      ? acceptMismatchedGuild(
+          current,
+          id,
+          owner,
+          sessionGuild,
+          sessionAttribution,
+          laneConflictGuard,
+          laneConflictAcknowledged,
+          laneConflictOverride,
+          warning,
+          accept,
+        )
       : {
           changed: false,
           evidence: [],
@@ -485,6 +528,9 @@ async function acceptLifecycleQuestWithOperation(
     owner,
     sessionGuild,
     sessionAttribution,
+    laneConflictGuard,
+    laneConflictAcknowledged,
+    laneConflictOverride,
     force ? "force" : "normal",
     accept,
   );
@@ -510,6 +556,9 @@ async function acceptMismatchedGuild(
   owner: string,
   sessionGuild: string | null,
   sessionAttribution: SessionAttribution,
+  laneConflictGuard: boolean,
+  laneConflictAcknowledged: readonly LaneConflictReference[],
+  laneConflictOverride: boolean,
   warning: string,
   accept: AcceptOperation,
 ): Promise<QuestMutationResult> {
@@ -530,11 +579,19 @@ async function acceptMismatchedGuild(
     id,
     owner,
     ...sessionAttribution,
+    ...(laneConflictGuard ? { lane_conflict_guard: true } : {}),
+    ...(laneConflictAcknowledged.length > 0
+      ? { lane_conflict_acknowledged: [...laneConflictAcknowledged] }
+      : {}),
+    ...(laneConflictOverride ? { lane_conflict_override: true } : {}),
     session_guild: sessionGuild,
   });
   const result = accepted.acceptance;
   if (result.outcome === "guild-mismatch") {
     return guildMismatchMutation(id, result.quest, sessionGuild);
+  }
+  if (result.outcome === "lane-conflict" || result.outcome === "lane-conflict-stale") {
+    throw new LaneConflictCommandError(id, result.lane_conflicts);
   }
   if (result.outcome === "conflict") {
     if (result.quest.status === "accepted" && result.quest.assignee === owner) {
@@ -565,6 +622,9 @@ async function acceptMatchingGuild(
   owner: string,
   sessionGuild: string | null,
   sessionAttribution: SessionAttribution,
+  laneConflictGuard: boolean,
+  laneConflictAcknowledged: readonly LaneConflictReference[],
+  laneConflictOverride: boolean,
   mode: QuestAcceptanceMode,
   accept: AcceptOperation,
 ): Promise<QuestMutationResult> {
@@ -586,11 +646,19 @@ async function acceptMatchingGuild(
     id,
     owner,
     ...sessionAttribution,
+    ...(laneConflictGuard ? { lane_conflict_guard: true } : {}),
+    ...(laneConflictAcknowledged.length > 0
+      ? { lane_conflict_acknowledged: [...laneConflictAcknowledged] }
+      : {}),
+    ...(laneConflictOverride ? { lane_conflict_override: true } : {}),
     session_guild: sessionGuild,
   });
   const result = accepted.acceptance;
   if (result.outcome === "guild-mismatch") {
     return guildMismatchMutation(id, result.quest, sessionGuild);
+  }
+  if (result.outcome === "lane-conflict" || result.outcome === "lane-conflict-stale") {
+    throw new LaneConflictCommandError(id, result.lane_conflicts);
   }
   if (result.outcome === "conflict") {
     if (result.quest.status === "accepted" && result.quest.assignee === owner) {

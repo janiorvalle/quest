@@ -9,6 +9,7 @@ import { v } from "convex/values";
 import {
   allocateDisplayId,
   canApplyVerdict,
+  computeQuestPlan,
   findChainCyclePath,
   isLeaseExpired,
   isLegalStatusTransition,
@@ -32,6 +33,7 @@ import {
   eventFilterSchema,
   eventSchema,
   evidenceSchema,
+  type LaneConflictReference,
   newEvidenceSchema,
   newQuestSchema,
   type Quest,
@@ -617,6 +619,98 @@ async function exportDump(ctx: QueryContext, timestamp: string): Promise<QuestDu
   return questDumpSchema.parse(dump);
 }
 
+function hardLaneConflictsForQuest(
+  quests: readonly Quest[],
+  questId: number,
+  timestamp: string,
+): Array<{ readonly files: string[]; readonly quest_id: number }> {
+  const plan = computeQuestPlan({ chains: [], now: timestamp, quests });
+  const inFlightQuestIds = new Set(
+    plan.quests.filter((quest) => quest.computed_state === "in_flight").map((quest) => quest.id),
+  );
+  const planQuestsById = new Map(plan.quests.map((quest) => [quest.id, quest]));
+  const candidate = planQuestsById.get(questId);
+  if (candidate === undefined) {
+    return [];
+  }
+  const conflicts = new Map<string, { readonly files: string[]; readonly quest_id: number }>();
+  for (const cluster of plan.lane_clusters) {
+    if (cluster.kind !== "shared_files" || !cluster.quest_ids.includes(questId)) {
+      continue;
+    }
+    for (const candidateId of cluster.quest_ids) {
+      const inFlight = planQuestsById.get(candidateId);
+      if (
+        candidateId === questId ||
+        !inFlightQuestIds.has(candidateId) ||
+        inFlight === undefined ||
+        inFlight.repo !== candidate.repo
+      ) {
+        continue;
+      }
+      const conflict = { files: [...cluster.files], quest_id: candidateId };
+      conflicts.set(`${candidateId}:${cluster.files.join("\0")}`, conflict);
+    }
+  }
+  return [...conflicts.values()].sort(
+    (left, right) =>
+      left.quest_id - right.quest_id || left.files.join("\0").localeCompare(right.files.join("\0")),
+  );
+}
+
+async function readRepositoryQuests(
+  ctx: QueryContext,
+  repository: string,
+  timestamp: string,
+): Promise<Quest[]> {
+  const documents = await ctx.db
+    .query("quests")
+    .withIndex("by_repo", (query) => query.eq("repo", repository))
+    .collect();
+  return documents
+    .map(parseQuestDocument)
+    .map((quest) => materializeExpiredLease(quest, timestamp))
+    .sort((left, right) => left.id - right.id);
+}
+
+function laneConflictsMatch(
+  actual: readonly LaneConflictReference[],
+  acknowledged: readonly LaneConflictReference[],
+): boolean {
+  if (actual.length !== acknowledged.length) {
+    return false;
+  }
+  const key = (conflict: LaneConflictReference) =>
+    `${conflict.quest_id}:${[...conflict.files].sort().join("\0")}`;
+  const acknowledgedKeys = new Set(acknowledged.map(key));
+  return actual.every((conflict) => acknowledgedKeys.has(key(conflict)));
+}
+
+async function unacknowledgedLaneConflict(
+  ctx: MutationContext,
+  input: AcceptQuestInput,
+  timestamp: string,
+  current: Quest,
+): Promise<Extract<AcceptResult, { outcome: "lane-conflict" | "lane-conflict-stale" }> | null> {
+  if (input.lane_conflict_guard !== true || input.lane_conflict_override === true) {
+    return null;
+  }
+  const laneConflicts = hardLaneConflictsForQuest(
+    await readRepositoryQuests(ctx, current.repo, timestamp),
+    input.id,
+    timestamp,
+  );
+  if (laneConflictsMatch(laneConflicts, input.lane_conflict_acknowledged ?? [])) {
+    return null;
+  }
+  return {
+    outcome: laneConflicts.length > 0 ? "lane-conflict" : "lane-conflict-stale",
+    lane_conflicts: laneConflicts,
+    lease_expires_at: current.lease_expires_at,
+    quest: current,
+  };
+}
+
 async function clearRestoreStage(ctx: MutationContext, token: string): Promise<void> {
   const tables: readonly RestoreStageTable[] = [
     "restore_staged_events",
@@ -1146,6 +1240,10 @@ async function accept(
   ) {
     return { outcome: "conflict", lease_expires_at: current.lease_expires_at, quest: current };
   }
+  const laneConflict = await unacknowledgedLaneConflict(ctx, input, timestamp, current);
+  if (laneConflict !== null) {
+    return laneConflict;
+  }
   const updated = questSchema.parse({
     ...stored,
     assignee: input.owner,
@@ -1165,6 +1263,10 @@ async function accept(
       lease_expires_at: updated.lease_expires_at,
       ...(expired && stored.assignee !== null ? { reclaimed_from: stored.assignee } : {}),
       status: "accepted",
+      ...(input.lane_conflict_override === true ||
+      (input.lane_conflict_acknowledged?.length ?? 0) > 0
+        ? { lane_conflict_acknowledged: true }
+        : {}),
       ...(input.session_effort === undefined ? {} : { session_effort: input.session_effort }),
       session_guild: input.session_guild ?? null,
       ...(input.session_model === undefined ? {} : { session_model: input.session_model }),
