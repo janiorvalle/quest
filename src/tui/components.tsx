@@ -1,4 +1,5 @@
 import { stringWidth } from "bun";
+import type { PlanLaneCluster } from "../domain/plan";
 import type {
   QuestLogChainRef,
   QuestLogDetail,
@@ -243,10 +244,10 @@ export function TabsRow({
   );
 }
 
-function listHeader(showKind: boolean, showAssignee: boolean): string {
+function listHeader(showKind: boolean, showAssignee: boolean, statusWidth: number): string {
   return [
     pad("ID", 5, "right"),
-    pad("STATUS", 13),
+    pad("STATUS", statusWidth),
     ...(showKind ? [pad("KIND", 7)] : []),
     pad("PRI", 4),
     ...(showAssignee ? [pad("ASSIGNEE", 16)] : []),
@@ -254,31 +255,156 @@ function listHeader(showKind: boolean, showAssignee: boolean): string {
   ].join(" ");
 }
 
+export function blockedStatusText(item: QuestLogItem): string | null {
+  if (item.computedState !== "blocked") {
+    return null;
+  }
+  return item.blockerId === undefined ? "○ blocked" : `○ blocked ${item.blockerId}`;
+}
+
+export interface QuestLogLaneMarker {
+  readonly edge: "end" | "start";
+  readonly label: "same lane" | "shared files";
+}
+
+export function laneMarkerFor(
+  index: number,
+  items: readonly QuestLogItem[],
+  clusters: readonly PlanLaneCluster[],
+): QuestLogLaneMarker | null {
+  const item = items[index];
+  if (item === undefined || item.computedState === undefined) {
+    return null;
+  }
+  const previous = items[index - 1];
+  const next = items[index + 1];
+  const previousCluster =
+    previous === undefined
+      ? undefined
+      : clusters.find(
+          (cluster) =>
+            cluster.quest_ids.includes(previous.id) && cluster.quest_ids.includes(item.id),
+        );
+  if (previousCluster !== undefined) {
+    return {
+      edge: "end",
+      label: previousCluster.kind === "shared_files" ? "shared files" : "same lane",
+    };
+  }
+  const nextCluster =
+    next === undefined
+      ? undefined
+      : clusters.find(
+          (cluster) => cluster.quest_ids.includes(item.id) && cluster.quest_ids.includes(next.id),
+        );
+  return nextCluster === undefined
+    ? null
+    : {
+        edge: "start",
+        label: "same lane",
+      };
+}
+
+function blockedStatusCell(
+  theme: QuestTheme,
+  item: QuestLogItem,
+  selected: boolean,
+  blockedStatus: string,
+  statusWidth: number,
+) {
+  const blockerText = item.blockerId === undefined ? "" : String(item.blockerId);
+  if (item.blockerId === undefined) {
+    return (
+      <span fg={selected ? theme.palette.selectionInk : theme.palette.textDim}>
+        {`${pad(blockedStatus, statusWidth)} `}
+      </span>
+    );
+  }
+  const prefix = blockedStatus.slice(0, blockedStatus.lastIndexOf(" "));
+  const blockerWidth = Math.max(1, statusWidth - stringWidth(prefix) - 1);
+  const visibleBlocker = fit(blockerText, blockerWidth);
+  const contentWidth = stringWidth(`${prefix} ${visibleBlocker}`);
+  return (
+    <span>
+      <span fg={selected ? theme.palette.selectionInk : theme.palette.textDim}>{`${prefix} `}</span>
+      <span fg={selected ? theme.palette.selectionInk : theme.palette.warn}>{visibleBlocker}</span>
+      <span>{" ".repeat(Math.max(0, statusWidth + 1 - contentWidth))}</span>
+    </span>
+  );
+}
+
+function rowColors(theme: QuestTheme, item: QuestLogItem, selected: boolean) {
+  if (selected) {
+    return {
+      muted: theme.palette.selectionInk,
+      primary: theme.palette.selectionInk,
+      status: theme.palette.selectionInk,
+    };
+  }
+  if (item.computedState === "blocked") {
+    return {
+      muted: theme.palette.textDim,
+      primary: theme.palette.textDim,
+      status: theme.palette.textDim,
+    };
+  }
+  return {
+    muted: theme.palette.textMuted,
+    primary: theme.palette.textPrimary,
+    status: theme.status[item.status].color,
+  };
+}
+
+function laneText(theme: QuestTheme, marker: QuestLogLaneMarker | null): string {
+  if (marker === null) {
+    return "";
+  }
+  const glyph = marker.edge === "start" ? theme.glyphs.laneStart : theme.glyphs.laneEnd;
+  return `${glyph} ${marker.label}`;
+}
+
 function rowText(
   theme: QuestTheme,
   item: QuestLogItem,
   titleWidth: number,
+  statusWidth: number,
   showKind: boolean,
   showAssignee: boolean,
   selected: boolean,
+  laneMarker: QuestLogLaneMarker | null,
 ) {
   const status = theme.status[item.status];
-  const muted = selected ? theme.palette.selectionInk : theme.palette.textMuted;
-  const primary = selected ? theme.palette.selectionInk : theme.palette.textPrimary;
-  const statusColor = selected ? theme.palette.selectionInk : status.color;
-  const title = `${item.blocked ? `${theme.glyphs.blocked} ` : ""}${item.title}`;
+  const colors = rowColors(theme, item, selected);
+  const title = `${item.computedState === "blocked" ? "" : item.blocked ? `${theme.glyphs.blocked} ` : ""}${item.title}`;
+  const markerText = laneText(theme, laneMarker);
+  const visibleMarkerText =
+    markerText === "" || titleWidth <= 2 ? "" : fit(markerText, titleWidth - 2);
+  const markerSuffix = visibleMarkerText === "" ? "" : ` ${visibleMarkerText}`;
+  const fittedTitleWidth = Math.max(1, titleWidth - stringWidth(markerSuffix));
+  const blockedStatus = blockedStatusText(item);
   return (
     <span>
-      <span fg={muted}>{`${pad(String(item.id), 5, "right")} `}</span>
-      <span fg={statusColor}>{`${pad(status.label, 13)} `}</span>
-      {showKind ? <span fg={muted}>{`${pad(item.kind, 7)} `}</span> : null}
-      <span fg={selected || item.priority !== 1 ? muted : theme.status.open.color}>
+      <span fg={colors.muted}>{`${pad(String(item.id), 5, "right")} `}</span>
+      {blockedStatus === null ? (
+        <span fg={colors.status}>{`${pad(status.label, statusWidth)} `}</span>
+      ) : (
+        blockedStatusCell(theme, item, selected, blockedStatus, statusWidth)
+      )}
+      {showKind ? <span fg={colors.muted}>{`${pad(item.kind, 7)} `}</span> : null}
+      <span
+        fg={
+          selected || item.priority !== 1 || item.computedState === "blocked"
+            ? colors.muted
+            : theme.status.open.color
+        }
+      >
         {`${pad(`${theme.glyphs.priority}${item.priority}`, 4)} `}
       </span>
-      {showAssignee ? <span fg={muted}>{`${pad(item.assignee ?? "—", 16)} `}</span> : null}
-      <span fg={item.blocked && !selected ? theme.status.open.color : primary}>
-        {fit(title, titleWidth)}
-      </span>
+      {showAssignee ? <span fg={colors.muted}>{`${pad(item.assignee ?? "—", 16)} `}</span> : null}
+      <span fg={colors.primary}>{fit(title, fittedTitleWidth)}</span>
+      {visibleMarkerText === "" ? null : (
+        <span fg={selected ? theme.palette.selectionInk : theme.palette.lane}>{markerSuffix}</span>
+      )}
     </span>
   );
 }
@@ -287,6 +413,7 @@ export function QuestListPane({
   height,
   hiddenDoneCount,
   items,
+  laneClusters,
   loading,
   paneWidth,
   selectedIndex,
@@ -296,6 +423,7 @@ export function QuestListPane({
   readonly height: number;
   readonly hiddenDoneCount: number;
   readonly items: readonly QuestLogItem[];
+  readonly laneClusters: readonly PlanLaneCluster[];
   readonly loading: boolean;
   readonly paneWidth: number;
   readonly selectedIndex: number;
@@ -305,9 +433,14 @@ export function QuestListPane({
   const theme = useQuestTheme();
   const showAssignee = terminalWidth >= 100;
   const showKind = terminalWidth >= 90;
+  const statusWidth = items.reduce(
+    (width, item) =>
+      Math.max(width, stringWidth(blockedStatusText(item) ?? theme.status[item.status].label)),
+    13,
+  );
   const titleWidth = Math.max(
     8,
-    paneWidth - 5 - 1 - 13 - 1 - (showKind ? 8 : 0) - 4 - 1 - (showAssignee ? 17 : 0),
+    paneWidth - 5 - 1 - statusWidth - 1 - (showKind ? 8 : 0) - 4 - 1 - (showAssignee ? 17 : 0),
   );
   const rowCapacity = Math.max(1, height - 3);
   const start = Math.max(0, Math.min(selectedIndex - rowCapacity + 1, items.length - rowCapacity));
@@ -318,7 +451,7 @@ export function QuestListPane({
   return (
     <box style={{ flexDirection: "column", height: "100%", overflow: "hidden", width: "100%" }}>
       <text fg={theme.palette.sectionLabel}>
-        <strong>{listHeader(showKind, showAssignee)}</strong>
+        <strong>{listHeader(showKind, showAssignee, statusWidth)}</strong>
       </text>
       <text fg={theme.palette.borderIdle}>
         {theme.glyphs.ruleHorizontal.repeat(Math.max(1, paneWidth))}
@@ -331,6 +464,7 @@ export function QuestListPane({
         visible.map((item, index) => {
           const actualIndex = start + index;
           const selected = actualIndex === selectedIndex;
+          const laneMarker = laneMarkerFor(actualIndex, items, laneClusters);
           return (
             <box
               key={item.id}
@@ -347,10 +481,32 @@ export function QuestListPane({
             >
               {selected ? (
                 <text fg={theme.palette.selectionInk}>
-                  <strong>{rowText(theme, item, titleWidth, showKind, showAssignee, true)}</strong>
+                  <strong>
+                    {rowText(
+                      theme,
+                      item,
+                      titleWidth,
+                      statusWidth,
+                      showKind,
+                      showAssignee,
+                      true,
+                      laneMarker,
+                    )}
+                  </strong>
                 </text>
               ) : (
-                <text>{rowText(theme, item, titleWidth, showKind, showAssignee, false)}</text>
+                <text>
+                  {rowText(
+                    theme,
+                    item,
+                    titleWidth,
+                    statusWidth,
+                    showKind,
+                    showAssignee,
+                    false,
+                    laneMarker,
+                  )}
+                </text>
               )}
             </box>
           );
@@ -1435,11 +1591,18 @@ export function StatusRow({
   );
 }
 
-export function FooterKeymap() {
+export function FooterKeymap({
+  planAvailable = false,
+  sortMode = "plan",
+}: {
+  readonly planAvailable?: boolean;
+  readonly sortMode?: "flat" | "plan";
+} = {}) {
   const theme = useQuestTheme();
   const actions = [
     ["tab", "areas"],
     ["r", "repo"],
+    ...(planAvailable ? [["o", sortMode === "plan" ? "flat" : "plan"] as const] : []),
     ["d", "done"],
     ["j/k", "move"],
     ["E", "evidence"],

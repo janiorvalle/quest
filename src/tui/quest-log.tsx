@@ -19,6 +19,7 @@ import { openEvidenceWithNotice } from "./evidence";
 import {
   INITIAL_QUEST_LOG_INTERACTION,
   type QuestLogInteractionState,
+  type QuestLogSortMode,
   reduceReadOnlyInteraction,
 } from "./interaction";
 import { MAIN_CHROME_ROWS, mainPaneGeometry } from "./layout";
@@ -156,7 +157,9 @@ function ReadOnlyLayout({
   activeSelectedIndex,
   notice,
   policyItems,
+  planAvailable,
   runtime,
+  sortMode,
   snapshot,
   visibleItems,
   width,
@@ -172,7 +175,9 @@ function ReadOnlyLayout({
   readonly activeSelectedIndex: number;
   readonly notice: string;
   readonly policyItems: readonly QuestLogItem[];
+  readonly planAvailable: boolean;
   readonly runtime: QuestLogRuntime;
+  readonly sortMode: QuestLogSortMode;
   readonly snapshot: QuestLogSnapshot;
   readonly visibleItems: readonly QuestLogItem[];
   readonly width: number;
@@ -211,6 +216,7 @@ function ReadOnlyLayout({
             height={geometry.narrow ? listHeight : mainHeight}
             hiddenDoneCount={hiddenDoneCount}
             items={visibleItems}
+            laneClusters={snapshot.plan?.laneClusters ?? []}
             loading={snapshot.loading}
             paneWidth={geometry.listWidth}
             selectedIndex={activeSelectedIndex}
@@ -238,7 +244,7 @@ function ReadOnlyLayout({
       </box>
       <HorizontalRule width={width} />
       <StatusRow notice={notice} pollIntervalMs={runtime.pollIntervalMs} width={width} />
-      <FooterKeymap />
+      <FooterKeymap planAvailable={planAvailable} sortMode={sortMode} />
     </box>
   );
 }
@@ -260,6 +266,7 @@ export function QuestLogApp({
     currentRepo: null,
     items: [],
     loading: true,
+    plan: null,
     scope: "all",
   });
   const [interaction, setInteraction] = useState(INITIAL_QUEST_LOG_INTERACTION);
@@ -268,11 +275,17 @@ export function QuestLogApp({
 
   useEffect(() => runtime.subscribe(setSnapshot), [runtime]);
 
-  const policyItems = useMemo(
-    () => visibleQuestLogItems(snapshot.items, interaction.showDone),
-    [interaction.showDone, snapshot.items],
+  const planAvailable = snapshot.plan !== null;
+  const sortMode = snapshot.plan === null ? "flat" : interaction.sortMode;
+  const orderedItems = useMemo(
+    () => (sortMode === "plan" && snapshot.plan !== null ? snapshot.plan.items : snapshot.items),
+    [snapshot.items, snapshot.plan, sortMode],
   );
-  const hiddenDoneCount = snapshot.items.length - policyItems.length;
+  const policyItems = useMemo(
+    () => visibleQuestLogItems(orderedItems, interaction.showDone),
+    [interaction.showDone, orderedItems],
+  );
+  const hiddenDoneCount = orderedItems.length - policyItems.length;
   const areas = useMemo(() => [undefined, ...areaTabs(policyItems)], [policyItems]);
   const areaKeys = useMemo(() => areas.map(areaTabKey), [areas]);
   const activeAreaIndex = Math.max(0, areaKeys.indexOf(interaction.areaKey));
@@ -328,8 +341,10 @@ export function QuestLogApp({
     const active = interactionRef.current;
     const activeAreaIndex = Math.max(0, areaKeys.indexOf(active.areaKey));
     const activeArea = areas[activeAreaIndex];
+    const activeOrderedItems =
+      active.sortMode === "plan" && snapshot.plan !== null ? snapshot.plan.items : snapshot.items;
     const activeItems = itemsForArea(
-      visibleQuestLogItems(snapshot.items, active.showDone),
+      visibleQuestLogItems(activeOrderedItems, active.showDone),
       activeArea,
     );
     const activeQuest = selectedQuest(activeItems, selectedIndexForQuest(activeItems, active));
@@ -371,6 +386,9 @@ export function QuestLogApp({
       case "toggle-done":
         setNotice(result.state.showDone ? "Showing done quests" : "Hiding done quests");
         return;
+      case "toggle-sort":
+        setNotice(result.state.sortMode === "plan" ? "Plan order" : "Flat sort");
+        return;
       case "open-evidence":
         openEvidenceWithNotice(runtime.openEvidence, result.intent.id, setNotice);
         return;
@@ -394,7 +412,9 @@ export function QuestLogApp({
         activeSelectedIndex={activeSelectedIndex}
         notice={notice}
         policyItems={policyItems}
+        planAvailable={planAvailable}
         runtime={runtime}
+        sortMode={sortMode}
         snapshot={snapshot}
         visibleItems={visibleItems}
         width={dimensions.width}
