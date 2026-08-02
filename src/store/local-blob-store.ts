@@ -87,22 +87,49 @@ async function writeTemporaryBlob(temporary: string, snapshot: Uint8Array): Prom
 }
 
 type PublicationResult =
-  | { readonly status: "published" }
+  | { readonly status: "published"; readonly quarantined: string | null }
+  | { readonly status: "already-published" }
   | { readonly status: "failed"; readonly error: unknown };
 
-async function publishOrFindExisting(
+// Renaming onto an existing name replaces it atomically on POSIX, but on Windows that is not
+// atomic-replace: the filesystem rejects the rename while another publisher still holds the
+// destination open. Content addressing makes the collision benign — the destination filename IS
+// the sha256 of its bytes, so a rival publisher writing this address wrote byte-identical content
+// — which means a failed publication is a real failure only when the destination does not hold
+// those bytes.
+const PUBLICATION_ATTEMPTS = 3;
+
+// These are the codes a rival publisher can provoke by moving the destination underneath this one:
+// a rejected replace while it holds the destination open, or a destination that changed between
+// the corruption check and the quarantine link. They are worth another quarantine-then-replace
+// cycle; any other error is this publisher's own problem and fails immediately.
+function isPublicationRace(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error.code === "EPERM" ||
+      error.code === "EACCES" ||
+      error.code === "EBUSY" ||
+      error.code === "EEXIST" ||
+      error.code === "ENOENT")
+  );
+}
+
+async function quarantineCorruptDestination(
   destination: string,
   sha256: Sha256,
-  publish: () => Promise<void>,
-): Promise<PublicationResult> {
-  try {
-    await publish();
-    return { status: "published" };
-  } catch (error: unknown) {
-    return (await matchesContentAddress(destination, sha256))
-      ? { status: "published" }
-      : { status: "failed", error };
+): Promise<string | null> {
+  if (!(await isRegularFile(destination)) || (await matchesContentAddress(destination, sha256))) {
+    return null;
   }
+  const quarantined = `${destination}.corrupt-${randomUUID()}`;
+  await link(destination, quarantined);
+  if (await matchesContentAddress(quarantined, sha256)) {
+    // Another publisher repaired the destination between the corruption check and the link.
+    await removeQuarantinedDestination(quarantined);
+    return null;
+  }
+  return quarantined;
 }
 
 async function removeQuarantinedDestination(quarantined: string | null): Promise<void> {
@@ -154,52 +181,66 @@ export class LocalBlobStore implements BlobStore {
     }
 
     const temporary = join(this.#evidenceDirectory, `.${sha256}.${randomUUID()}.tmp`);
-    let quarantined: string | null = null;
-    let published = false;
-    let failure: unknown;
+    let publication: PublicationResult;
     try {
       await writeTemporaryBlob(temporary, snapshot);
-      const publication = await publishOrFindExisting(destination, sha256, async () => {
-        await this.publishStagedSnapshot(temporary, destination, sha256, (path) => {
-          quarantined = path;
-        });
-      });
-      published = publication.status === "published";
-      if (publication.status === "failed") {
-        failure = publication.error;
-      }
+      publication = await this.#publishStagedSnapshotWithRepairs(temporary, destination, sha256);
     } catch (error: unknown) {
-      failure = error;
+      publication = { status: "failed", error };
     }
 
-    const cleanupFailure = await captureCleanupFailure(() => this.removeTemporaryBlob(temporary));
-    if (!published && failure === undefined && cleanupFailure !== undefined) {
-      failure = cleanupFailure;
-    }
+    // A temporary file left behind by failed cleanup never invalidates a published blob, and a
+    // failed publication already carries the more useful error.
+    await captureCleanupFailure(() => this.removeTemporaryBlob(temporary));
 
-    if (failure !== undefined) {
-      await removeQuarantinedDestination(quarantined);
-      throw failure;
+    switch (publication.status) {
+      case "failed":
+        throw publication.error;
+      case "already-published":
+        return { copied: false, quarantined: null };
+      default:
+        return { copied: true, quarantined: publication.quarantined };
     }
-    return { copied: true, quarantined };
+  }
+
+  async #publishStagedSnapshotWithRepairs(
+    temporary: string,
+    destination: string,
+    sha256: Sha256,
+  ): Promise<PublicationResult> {
+    let race: unknown;
+    for (let attempt = 0; attempt < PUBLICATION_ATTEMPTS; attempt += 1) {
+      try {
+        const quarantined = await this.publishStagedSnapshot(temporary, destination, sha256);
+        return { status: "published", quarantined };
+      } catch (error: unknown) {
+        // Whatever the filesystem raised, a destination holding these exact bytes means a rival
+        // publisher already wrote them.
+        if (await matchesContentAddress(destination, sha256)) {
+          return { status: "already-published" };
+        }
+        if (!isPublicationRace(error)) {
+          return { status: "failed", error };
+        }
+        race = error;
+      }
+    }
+    return { status: "failed", error: race };
   }
 
   private async publishStagedSnapshot(
     temporary: string,
     destination: string,
     sha256: Sha256,
-    onQuarantine: (path: string | null) => void,
-  ): Promise<void> {
-    if ((await isRegularFile(destination)) && !(await matchesContentAddress(destination, sha256))) {
-      const quarantined = `${destination}.corrupt-${randomUUID()}`;
-      await link(destination, quarantined);
-      onQuarantine(quarantined);
-      if (await matchesContentAddress(quarantined, sha256)) {
-        await removeQuarantinedDestination(quarantined);
-        onQuarantine(null);
-      }
+  ): Promise<string | null> {
+    const quarantined = await quarantineCorruptDestination(destination, sha256);
+    try {
+      await this.publishTemporaryBlob(temporary, destination);
+    } catch (error: unknown) {
+      await removeQuarantinedDestination(quarantined);
+      throw error;
     }
-    await this.publishTemporaryBlob(temporary, destination);
+    return quarantined;
   }
 
   protected removeTemporaryBlob(filePath: string): Promise<void> {

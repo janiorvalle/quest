@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { copyFile, mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,6 +8,56 @@ import { createPlatform } from "../platform";
 import { type Sha256, sha256Schema } from "../schema";
 import { type BlobStoreFactory, defineBlobStoreContract } from "./contract";
 import { LocalBlobStore } from "./local-blob-store";
+
+// Windows rejects a rename onto a destination another publisher still holds open.
+function rejectedReplaceError(): Error {
+  const error = new Error("EPERM: operation not permitted, rename");
+  Object.defineProperty(error, "code", { value: "EPERM" });
+  return error;
+}
+
+function missingFileError(): Error {
+  const error = new Error("ENOENT: no such file or directory, link");
+  Object.defineProperty(error, "code", { value: "ENOENT" });
+  return error;
+}
+
+class RejectedReplaceBlobStore extends LocalBlobStore {
+  #remainingRejectedReplaces: number;
+  attemptedReplaces = 0;
+
+  constructor(evidenceDirectory: string, rejectedReplaces: number) {
+    super(evidenceDirectory);
+    this.#remainingRejectedReplaces = rejectedReplaces;
+  }
+
+  protected override publishTemporaryBlob(temporary: string, destination: string): Promise<void> {
+    this.attemptedReplaces += 1;
+    if (this.#remainingRejectedReplaces > 0) {
+      this.#remainingRejectedReplaces -= 1;
+      return Promise.reject(rejectedReplaceError());
+    }
+    return super.publishTemporaryBlob(temporary, destination);
+  }
+}
+
+// A rival publisher lands the identical bytes while this publication fails.
+class RivalPublisherBlobStore extends LocalBlobStore {
+  readonly #failure: Error;
+
+  constructor(evidenceDirectory: string, failure: Error) {
+    super(evidenceDirectory);
+    this.#failure = failure;
+  }
+
+  protected override async publishTemporaryBlob(
+    temporary: string,
+    destination: string,
+  ): Promise<void> {
+    await copyFile(temporary, destination);
+    throw this.#failure;
+  }
+}
 
 class FailableLocalBlobStore extends LocalBlobStore {
   #failNextPublish = false;
@@ -118,6 +169,67 @@ test("repairs a corrupt destination with concurrent publishers", async () => {
       expect(await readFile(join(evidenceDirectory, quarantine), "utf8")).toBe("corrupt content");
     }
   });
+});
+
+// The second case is the one Linux caught: a rival's rename can make the quarantine link fail with
+// ENOENT, which is not a rejected replace, so the content-address check has to cover every error.
+test.each([
+  ["a rejected replace", rejectedReplaceError()],
+  ["a lost quarantine race", missingFileError()],
+])("treats %s as published when the destination holds the same bytes", async (_name, failure) => {
+  const evidenceDirectory = await mkdtemp(join(tmpdir(), "quest-blob-rival-"));
+  try {
+    const store = new RivalPublisherBlobStore(evidenceDirectory, failure);
+    const bytes = new TextEncoder().encode("rival publication");
+    const address = sha256Schema.parse(createHash("sha256").update(bytes).digest("hex"));
+
+    const result = await store.restore(address, bytes);
+
+    expect(result).toEqual({ copied: false, quarantined: null });
+    expect(await store.get(address)).toEqual(bytes);
+    expect(await readdir(evidenceDirectory)).toEqual([address]);
+  } finally {
+    await rm(evidenceDirectory, { force: true, recursive: true });
+  }
+});
+
+test("repairs a corrupt destination after a rejected replace", async () => {
+  const evidenceDirectory = await mkdtemp(join(tmpdir(), "quest-blob-rejected-"));
+  try {
+    const store = new RejectedReplaceBlobStore(evidenceDirectory, 1);
+    const bytes = new TextEncoder().encode("repaired after rejection");
+    const sha256 = await new LocalBlobStore(evidenceDirectory).put(bytes);
+    await Bun.write(join(evidenceDirectory, sha256), "corrupt content");
+
+    expect(await store.put(bytes)).toBe(sha256);
+
+    expect(store.attemptedReplaces).toBe(2);
+    expect(await store.get(sha256)).toEqual(bytes);
+    const quarantines = (await readdir(evidenceDirectory)).filter((name) =>
+      name.startsWith(`${sha256}.corrupt-`),
+    );
+    expect(quarantines).toHaveLength(1);
+    for (const quarantine of quarantines) {
+      expect(await readFile(join(evidenceDirectory, quarantine), "utf8")).toBe("corrupt content");
+    }
+  } finally {
+    await rm(evidenceDirectory, { force: true, recursive: true });
+  }
+});
+
+test("stops repairing after a bounded number of rejected replaces", async () => {
+  const evidenceDirectory = await mkdtemp(join(tmpdir(), "quest-blob-bounded-"));
+  try {
+    const store = new RejectedReplaceBlobStore(evidenceDirectory, Number.MAX_SAFE_INTEGER);
+    const bytes = new TextEncoder().encode("never lands");
+
+    await expect(store.put(bytes)).rejects.toThrow("operation not permitted");
+
+    expect(store.attemptedReplaces).toBe(3);
+    expect(await readdir(evidenceDirectory)).toEqual([]);
+  } finally {
+    await rm(evidenceDirectory, { force: true, recursive: true });
+  }
 });
 
 test("snapshots caller-owned bytes before asynchronous publication", async () => {
