@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # Dependabot's bun ecosystem reads bun.lock directly (version updates only;
+  # bun has no security-update support yet).
+  - package-ecosystem: bun
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
