@@ -80,6 +80,79 @@ describe("read-only quest log runtime", () => {
     }
   });
 
+  test("derives PR markers from quest status and local completion events", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-log-pr-state-"));
+    const store = createSqliteStore(join(directory, "quest.db"));
+    const snapshots: QuestLogSnapshot[] = [];
+    const runtime = createQuestLogRuntime({ initialScope: { repo: null }, store });
+    const unsubscribe = runtime.subscribe((snapshot) => snapshots.push(snapshot));
+
+    try {
+      const review = await store.addQuest(questInput("quest", "Awaiting review"));
+      await store.acceptQuest({ id: review.id, owner: "worker" });
+      await store.transition(review.id, {
+        action: "turnin",
+        actor: "worker",
+        pr: "https://github.com/janiorvalle/quest/pull/101",
+      });
+
+      const merged = await store.addQuest(questInput("quest", "Merged PR"));
+      await store.acceptQuest({ id: merged.id, owner: "worker" });
+      await store.transition(merged.id, {
+        action: "turnin",
+        actor: "worker",
+        pr: "https://github.com/janiorvalle/quest/pull/102",
+      });
+      await store.transition(merged.id, {
+        action: "complete",
+        actor: "worker",
+        pr_verified_merged: true,
+      });
+
+      await store.addQuest({
+        ...questInput("quest", "PR on another status"),
+        pr: "https://github.com/janiorvalle/quest/pull/103",
+      });
+      await store.addQuest(questInput("quest", "No PR"));
+
+      await runtime.start();
+      await waitFor(
+        () => latest(snapshots).loading === false && latest(snapshots).items.length === 4,
+      );
+
+      const itemsByTitle = new Map(latest(snapshots).items.map((item) => [item.title, item]));
+      expect(itemsByTitle.get("Awaiting review")?.prState).toBe("awaiting-review");
+      expect(itemsByTitle.get("Merged PR")?.prState).toBe("merged");
+      expect(itemsByTitle.get("PR on another status")?.prState).toBe("quiet");
+      expect(itemsByTitle.get("No PR")?.prState).toBeNull();
+
+      await store.transition(merged.id, {
+        action: "reopen",
+        actor: "worker",
+        notes: "retest the merged PR",
+      });
+      await store.acceptQuest({ id: merged.id, owner: "worker" });
+      await store.transition(merged.id, {
+        action: "turnin",
+        actor: "worker",
+        pr: "https://github.com/janiorvalle/quest/pull/104",
+      });
+      await store.transition(merged.id, {
+        action: "complete",
+        actor: "worker",
+        pr_unverified: true,
+      });
+      await waitFor(
+        () => latest(snapshots).items.find((item) => item.id === merged.id)?.prState === "quiet",
+      );
+    } finally {
+      unsubscribe();
+      await runtime.stop();
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
   test("uses the shared plan for the default order and keeps the flat stream available", async () => {
     const directory = await mkdtemp(join(tmpdir(), "quest-log-plan-"));
     const store = createSqliteStore(join(directory, "quest.db"), {

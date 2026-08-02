@@ -6,6 +6,8 @@ import { showQuestDetail } from "./query";
 
 export type QuestLogScope = "all" | "current";
 
+export type QuestLogPrState = "awaiting-review" | "merged" | "quiet";
+
 export interface QuestLogItem {
   readonly area: string | null;
   readonly assignee: string | null;
@@ -18,6 +20,7 @@ export interface QuestLogItem {
   readonly kind: Quest["kind"];
   readonly openedBy: string;
   readonly pr: string | null;
+  readonly prState: QuestLogPrState | null;
   readonly predictedFiles: readonly string[];
   readonly priority: number;
   readonly repo: string;
@@ -114,6 +117,7 @@ export const EMPTY_QUEST_LOG_SNAPSHOT: QuestLogSnapshot = {
 function toQuestLogItem(
   quest: Quest,
   blockedIds: ReadonlySet<number>,
+  mergedPrQuestIds: ReadonlySet<number>,
   planQuest: PlanQuest | undefined = undefined,
 ): QuestLogItem {
   const planMetadata =
@@ -134,6 +138,7 @@ function toQuestLogItem(
     kind: quest.kind,
     openedBy: quest.opened_by,
     pr: quest.pr,
+    prState: prStateForQuest(quest, mergedPrQuestIds),
     predictedFiles: quest.predicted_files,
     priority: quest.priority,
     repo: quest.repo,
@@ -186,6 +191,7 @@ export function summarizeEventDetail(detail: unknown): string | null {
 }
 
 type EventDetailRecord = Readonly<Record<string, unknown>> & {
+  readonly pr_verified_merged?: unknown;
   readonly session_effort?: unknown;
   readonly session_guild?: unknown;
   readonly session_model?: unknown;
@@ -197,6 +203,38 @@ function isEventDetailRecord(detail: unknown): detail is EventDetailRecord {
 
 function eventDetailRecord(detail: unknown): EventDetailRecord | null {
   return isEventDetailRecord(detail) ? detail : null;
+}
+
+function prStateForQuest(
+  quest: Quest,
+  mergedPrQuestIds: ReadonlySet<number>,
+): QuestLogPrState | null {
+  if (quest.pr === null) {
+    return null;
+  }
+  if (quest.status === "turned_in") {
+    return "awaiting-review";
+  }
+  if (quest.status === "complete" && mergedPrQuestIds.has(quest.id)) {
+    return "merged";
+  }
+  return "quiet";
+}
+
+function mergedPrQuestIdsFromEvents(events: readonly Event[]): ReadonlySet<number> {
+  const latestCompletionState = new Map<number, boolean>();
+  for (const event of [...events].sort((left, right) => left.id - right.id)) {
+    if (event.action !== "complete") {
+      continue;
+    }
+    latestCompletionState.set(
+      event.quest_id,
+      eventDetailRecord(event.detail)?.pr_verified_merged === true,
+    );
+  }
+  return new Set(
+    [...latestCompletionState].filter(([, merged]) => merged).map(([questId]) => questId),
+  );
 }
 
 function nonEmptyEventText(value: unknown): string | undefined {
@@ -273,11 +311,13 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
   let scope: QuestLogScope = currentRepo === null ? "all" : "current";
   let quests: readonly Quest[] = [];
   let blockedIds: ReadonlySet<number> = new Set();
+  let mergedPrQuestIds: ReadonlySet<number> = new Set();
   let planSnapshot: QuestPlanSnapshot | null = null;
   let planRevision = 0;
   let loading = true;
   let generation = 0;
   let generationSequence = 0;
+  let mergedPrRefreshRevision = 0;
   let subscriptions: readonly WatchSubscription[] = [];
   let scopeTransitions: Promise<void> = Promise.resolve();
   const pendingActions = new Set<Promise<void>>();
@@ -298,6 +338,16 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
       await (options.clock?.now() ?? Promise.resolve(new Date().toISOString())),
     );
 
+  const loadMergedPrQuestIds = async (
+    targetScope: QuestLogScope,
+    targetRepo: string | null,
+  ): Promise<ReadonlySet<number>> =>
+    mergedPrQuestIdsFromEvents(
+      await options.store.queryEvents(
+        targetScope === "current" && targetRepo !== null ? { repo: targetRepo } : {},
+      ),
+    );
+
   const enqueueScopeTransition = <Result>(operation: () => Promise<Result>): Promise<Result> => {
     const transition = scopeTransitions.then(operation);
     scopeTransitions = transition.then(
@@ -314,7 +364,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
         : [],
     );
     const items = quests.map((quest) =>
-      toQuestLogItem(quest, blockedIds, planQuestsById.get(quest.id)),
+      toQuestLogItem(quest, blockedIds, mergedPrQuestIds, planQuestsById.get(quest.id)),
     );
     return {
       currentRepo,
@@ -405,6 +455,36 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     });
   };
 
+  const requestMergedPrQuestIdsRefresh = (
+    activeGeneration: number,
+    targetScope: QuestLogScope,
+    targetRepo: string | null,
+  ): void => {
+    const refreshRevision = ++mergedPrRefreshRevision;
+    const action = loadMergedPrQuestIds(targetScope, targetRepo).then(
+      (nextMergedPrQuestIds) => {
+        if (
+          activeGeneration !== generation ||
+          scopeSetupGeneration !== null ||
+          refreshRevision !== mergedPrRefreshRevision
+        ) {
+          return;
+        }
+        mergedPrQuestIds = nextMergedPrQuestIds;
+        emit();
+      },
+      () => undefined,
+    );
+    const completion = action.then(
+      () => undefined,
+      () => undefined,
+    );
+    pendingActions.add(completion);
+    void completion.then(() => {
+      pendingActions.delete(completion);
+    });
+  };
+
   const unsubscribeCurrent = async (): Promise<void> => {
     const current = new Set([...subscriptions, ...retiredSubscriptions]);
     subscriptions = [];
@@ -427,15 +507,16 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     const filter = filterForScope(targetScope, targetRepo);
     let nextQuests: readonly Quest[] = [];
     let nextBlockedIds: ReadonlySet<number> = new Set();
+    let nextMergedPrQuestIds: ReadonlySet<number> = new Set();
     let nextLoading = true;
     const nextSubscriptions: WatchSubscription[] = [];
-    let nextPlanSnapshot: QuestPlanSnapshot | null = null;
     const planRevisionBeforeSetup = planRevision;
-    try {
-      nextPlanSnapshot = await loadPlan(targetScope, targetRepo);
-    } catch {
-      // Plan computation is optional; keep the flat live stream available while it recovers.
-    }
+    const [loadedPlanSnapshot, loadedMergedPrQuestIds] = await Promise.all([
+      loadPlan(targetScope, targetRepo).catch(() => null),
+      loadMergedPrQuestIds(targetScope, targetRepo).catch(() => new Set<number>()),
+    ]);
+    const nextPlanSnapshot = loadedPlanSnapshot;
+    nextMergedPrQuestIds = loadedMergedPrQuestIds;
     try {
       nextSubscriptions.push(
         await options.store.watch(filter, (watchedQuests) => {
@@ -448,6 +529,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
           loading = false;
           emit();
           requestPlanRefresh(activeGeneration, targetScope, targetRepo);
+          requestMergedPrQuestIdsRefresh(activeGeneration, targetScope, targetRepo);
         }),
       );
       nextSubscriptions.push(
@@ -474,6 +556,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     subscriptions = nextSubscriptions;
     quests = nextQuests;
     blockedIds = nextBlockedIds;
+    mergedPrQuestIds = nextMergedPrQuestIds;
     if (planRevision === planRevisionBeforeSetup) {
       planSnapshot = nextPlanSnapshot;
     }
@@ -481,6 +564,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     loading = nextLoading;
     emit();
     requestPlanRefresh(activeGeneration, targetScope, targetRepo);
+    requestMergedPrQuestIdsRefresh(activeGeneration, targetScope, targetRepo);
     await disposeSubscriptions(previousSubscriptions);
   };
 

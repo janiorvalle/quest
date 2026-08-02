@@ -35,6 +35,7 @@ export interface QuestThemeGlyphs {
   readonly evidencePending: string;
   readonly laneEnd: string;
   readonly laneStart: string;
+  readonly pullRequest: string;
   readonly priority: string;
   readonly ruleHorizontal: string;
   readonly ruleVertical: string;
@@ -95,6 +96,7 @@ export const DENSE_THEME: QuestTheme = {
     evidencePending: "◌",
     laneEnd: "┘",
     laneStart: "┐",
+    pullRequest: "↗",
     priority: "▲",
     ruleHorizontal: "─",
     ruleVertical: "│",
