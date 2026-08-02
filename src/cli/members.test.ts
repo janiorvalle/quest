@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { createCliOutputBoundary } from "../output";
 import type { Config } from "../schema";
@@ -86,6 +89,30 @@ test("join stores the personal token and reports the whoami round-trip without e
     { deployment: "https://team.convex.cloud", repositories: ["api", "web-app"] },
   ]);
   expect(stdout.join("")).not.toContain("personal-token");
+});
+
+test("join suggests installing the agent skill when neither agent has it", async () => {
+  const home = await mkdtemp(join(tmpdir(), "quest-join-skill-"));
+  const stdout: string[] = [];
+  try {
+    const code = await executeMembersCli({
+      config,
+      configWriter: configWriter(),
+      environment: { HOME: home },
+      format: "human",
+      onboarding: onboarding(),
+      output: createCliOutputBoundary({ stdout: (text) => stdout.push(text) }),
+      prompter: { ask: async () => "invite-token" },
+      request: { command: "join", deployment: "dev:quest", routing: false },
+    });
+
+    expect(code).toBe(0);
+    expect(stdout.join("")).toContain(
+      "Quest agent skill not detected; run `quest skill install` to install it for Claude Code and Codex.",
+    );
+  } finally {
+    await rm(home, { force: true, recursive: true });
+  }
 });
 
 test("join checks token persistence before consuming the invite", async () => {

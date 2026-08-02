@@ -131,6 +131,7 @@ Hector. The admin secret never travels to the member.
 Hector joins from the repository where Quest is installed:
 
 ```sh
+quest skill install
 quest join <deployment-url>
 ```
 

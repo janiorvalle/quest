@@ -104,6 +104,14 @@ import {
   type WorkingDirectoryValidator,
 } from "./scope";
 import {
+  executeSkillCli,
+  isSkillCliRequest,
+  registerSkillCommands,
+  SkillCliConflictError,
+  type SkillCliRequest,
+  SkillCliUsageError,
+} from "./skill";
+import {
   executeUpgradeCli,
   isUpgradeCliRequest,
   registerUpgradeCommand,
@@ -119,6 +127,7 @@ export type QuestCliRequest =
   | LifecycleCliRequest
   | MembersCliRequest
   | QueryCliRequest
+  | SkillCliRequest
   | UpgradeCliRequest
   | MigrateCliRequest;
 
@@ -128,6 +137,7 @@ type OperationalQuestCliRequest = Exclude<
   | DoctorCliRequest
   | MembersCliRequest
   | MigrateCliRequest
+  | SkillCliRequest
   | UpgradeCliRequest
 >;
 
@@ -253,6 +263,8 @@ const CLI_ERROR_DISPATCH: readonly CliErrorDispatchRule[] = [
   { kind: "usage", matches: (error) => error instanceof ExportCliUsageError },
   { kind: "usage", matches: (error) => error instanceof BackupCliUsageError },
   { kind: "usage", matches: (error) => error instanceof MembersCliUsageError },
+  { kind: "usage", matches: (error) => error instanceof SkillCliUsageError },
+  { kind: "domain", matches: (error) => error instanceof SkillCliConflictError },
   { kind: "usage", matches: (error) => error instanceof MigrateCliUsageError },
   { kind: "domain", matches: isLifecycleCommandError },
   { kind: "domain", matches: isChainCommandError },
@@ -461,6 +473,7 @@ function isOperationalQuestCliRequest(
 ): request is OperationalQuestCliRequest {
   return (
     !isMembersCliRequest(request) &&
+    !isSkillCliRequest(request) &&
     request.command !== "completions" &&
     request.command !== "doctor" &&
     request.command !== "migrate" &&
@@ -717,6 +730,19 @@ function executeMembersRequest(
   });
 }
 
+function executeSkillRequest(
+  flags: GlobalCliOptions,
+  request: SkillCliRequest,
+  dependencies: QuestCliDependencies,
+): Promise<ExitCode> {
+  return executeSkillCli({
+    environment: dependencies.environment ?? process.env,
+    format: flags.format,
+    output: dependencies.output,
+    request,
+  });
+}
+
 async function resolveMembersConfig(
   flags: GlobalCliOptions,
   dependencies: QuestCliDependencies,
@@ -829,6 +855,9 @@ async function executeQuestCli(
   request: QuestCliRequest | undefined,
   dependencies: QuestCliDependencies,
 ): Promise<ExitCode> {
+  if (request !== undefined && isSkillCliRequest(request)) {
+    return executeSkillRequest(flags, request, dependencies);
+  }
   const preScopeResult = await executePreScopeRequest(flags, request, dependencies);
   if (preScopeResult !== undefined) {
     return preScopeResult;
@@ -1003,6 +1032,7 @@ export function createQuestCommand(
   registerExportCommand(program, capture);
   registerBackupCommands(program, capture);
   registerMembersCommands(program, capture);
+  registerSkillCommands(program, capture);
   registerUpgradeCommand(program, capture);
   registerMigrateCommand(program, capture);
   program.action(() => undefined);
@@ -1058,6 +1088,7 @@ export async function parseQuestCliArguments(
       error instanceof ExportCliUsageError ||
       error instanceof BackupCliUsageError ||
       error instanceof MembersCliUsageError ||
+      error instanceof SkillCliUsageError ||
       error instanceof MigrateCliUsageError
     ) {
       return {

@@ -9,6 +9,10 @@ import { buildStandaloneExecutable } from "./standalone-build";
 const rootDirectory = resolve(import.meta.dir, "..");
 const distDirectory = join(rootDirectory, "dist");
 const entrypoint = join(rootDirectory, "src", "entrypoint.ts");
+const requiredAssets = [
+  join(rootDirectory, ".agents", "skills", "quest", "SKILL.md"),
+  join(rootDirectory, ".agents", "skills", "quest", "agents", "openai.yaml"),
+] as const;
 const {
   QUEST_RELEASE,
   QUEST_TARGET: environmentTarget,
@@ -34,6 +38,7 @@ for (const target of targets) {
     },
     entrypoint,
     outfile: outputPath,
+    requiredAssets,
     target: target.bunTarget,
   });
 
