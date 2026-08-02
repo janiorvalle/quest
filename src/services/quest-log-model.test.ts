@@ -201,6 +201,7 @@ describe("read-only quest log runtime", () => {
       expect(snapshot.items.find((item) => item.id === dependent.id)).toMatchObject({
         blocked: true,
         blockerId: root.id,
+        blockerIds: [root.id],
         chainDepth: 1,
         computedState: "blocked",
       });

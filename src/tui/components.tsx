@@ -259,12 +259,43 @@ export function blockedStatusText(item: QuestLogItem): string | null {
   if (item.computedState !== "blocked") {
     return null;
   }
-  return item.blockerId === undefined ? "○ blocked" : `○ blocked ${item.blockerId}`;
+  const blockerIds = item.blockerIds ?? (item.blockerId === undefined ? [] : [item.blockerId]);
+  const firstBlocker = blockerIds[0];
+  if (firstBlocker === undefined) {
+    return "○ blocked";
+  }
+  const additionalBlockers = blockerIds.length - 1;
+  return `○ blocked ${firstBlocker}${additionalBlockers > 0 ? ` +${additionalBlockers}` : ""}`;
 }
 
 export interface QuestLogLaneMarker {
   readonly edge: "end" | "start";
   readonly label: "same lane" | "shared files";
+  readonly partnerIds: readonly number[];
+}
+
+function laneLabel(kind: PlanLaneCluster["kind"]): QuestLogLaneMarker["label"] {
+  return kind === "shared_files" ? "shared files" : "same lane";
+}
+
+function lanePartnerIds(
+  itemId: number,
+  kind: PlanLaneCluster["kind"],
+  clusters: readonly PlanLaneCluster[],
+): readonly number[] {
+  return [
+    ...new Set(
+      clusters
+        .filter((cluster) => cluster.kind === kind && cluster.quest_ids.includes(itemId))
+        .flatMap((cluster) => cluster.quest_ids.filter((questId) => questId !== itemId)),
+    ),
+  ].sort((left, right) => left - right);
+}
+
+function compactLanePartners(partnerIds: readonly number[]): string {
+  const visible = partnerIds.slice(0, 2).join("+");
+  const additional = partnerIds.length - 2;
+  return visible === "" ? "" : `${visible}${additional > 0 ? ` +${additional}` : ""}`;
 }
 
 export function laneMarkerFor(
@@ -288,7 +319,8 @@ export function laneMarkerFor(
   if (previousCluster !== undefined) {
     return {
       edge: "end",
-      label: previousCluster.kind === "shared_files" ? "shared files" : "same lane",
+      label: laneLabel(previousCluster.kind),
+      partnerIds: lanePartnerIds(item.id, previousCluster.kind, clusters),
     };
   }
   const nextCluster =
@@ -301,7 +333,8 @@ export function laneMarkerFor(
     ? null
     : {
         edge: "start",
-        label: "same lane",
+        label: laneLabel(nextCluster.kind),
+        partnerIds: lanePartnerIds(item.id, nextCluster.kind, clusters),
       };
 }
 
@@ -312,22 +345,33 @@ function blockedStatusCell(
   blockedStatus: string,
   statusWidth: number,
 ) {
-  const blockerText = item.blockerId === undefined ? "" : String(item.blockerId);
-  if (item.blockerId === undefined) {
+  const blockerIds = item.blockerIds ?? (item.blockerId === undefined ? [] : [item.blockerId]);
+  const firstBlocker = blockerIds[0];
+  if (firstBlocker === undefined) {
     return (
       <span fg={selected ? theme.palette.selectionInk : theme.palette.textDim}>
         {`${pad(blockedStatus, statusWidth)} `}
       </span>
     );
   }
-  const prefix = blockedStatus.slice(0, blockedStatus.lastIndexOf(" "));
-  const blockerWidth = Math.max(1, statusWidth - stringWidth(prefix) - 1);
-  const visibleBlocker = fit(blockerText, blockerWidth);
-  const contentWidth = stringWidth(`${prefix} ${visibleBlocker}`);
+  const prefix = "○ blocked ";
+  const suffix = blockerIds.length > 1 ? ` +${blockerIds.length - 1}` : "";
+  const blockerWidth = statusWidth - stringWidth(prefix) - stringWidth(suffix);
+  if (blockerWidth <= 0) {
+    const fittedStatus = fit(blockedStatus, statusWidth);
+    return (
+      <span fg={selected ? theme.palette.selectionInk : theme.palette.textDim}>
+        {`${fittedStatus}${" ".repeat(Math.max(0, statusWidth + 1 - stringWidth(fittedStatus)))}`}
+      </span>
+    );
+  }
+  const visibleBlocker = fit(String(firstBlocker), blockerWidth);
+  const contentWidth = stringWidth(`${prefix}${visibleBlocker}${suffix}`);
   return (
     <span>
-      <span fg={selected ? theme.palette.selectionInk : theme.palette.textDim}>{`${prefix} `}</span>
+      <span fg={selected ? theme.palette.selectionInk : theme.palette.textDim}>{prefix}</span>
       <span fg={selected ? theme.palette.selectionInk : theme.palette.warn}>{visibleBlocker}</span>
+      <span fg={selected ? theme.palette.selectionInk : theme.palette.textDim}>{suffix}</span>
       <span>{" ".repeat(Math.max(0, statusWidth + 1 - contentWidth))}</span>
     </span>
   );
@@ -426,7 +470,8 @@ function laneText(theme: QuestTheme, marker: QuestLogLaneMarker | null): string 
     return "";
   }
   const glyph = marker.edge === "start" ? theme.glyphs.laneStart : theme.glyphs.laneEnd;
-  return `${glyph} ${marker.label}`;
+  const partners = compactLanePartners(marker.partnerIds);
+  return `${glyph} ${marker.label}${partners === "" ? "" : ` ${partners}`}`;
 }
 
 function rowText(
@@ -715,6 +760,83 @@ function keyedTextLines(lines: readonly string[], prefix: string): readonly Deta
   return lines.map((text, index) => ({ key: `${prefix}:${index}`, text }));
 }
 
+interface LaneConflictGroup {
+  readonly area: string | null;
+  readonly files: readonly string[];
+  readonly kind: PlanLaneCluster["kind"];
+  readonly partnerIds: readonly number[];
+}
+
+function laneConflictGroupsFor(
+  itemId: number,
+  clusters: readonly PlanLaneCluster[],
+): readonly LaneConflictGroup[] {
+  const groups = new Map<
+    string,
+    {
+      readonly area: string | null;
+      readonly files: readonly string[];
+      readonly kind: PlanLaneCluster["kind"];
+      readonly partnerIds: Set<number>;
+    }
+  >();
+  for (const cluster of clusters) {
+    if (!cluster.quest_ids.includes(itemId)) {
+      continue;
+    }
+    const partnerIds = cluster.quest_ids.filter((questId) => questId !== itemId);
+    if (partnerIds.length === 0) {
+      continue;
+    }
+    const key = `${cluster.kind}\0${cluster.area ?? ""}\0${cluster.files.join("\0")}`;
+    const existing = groups.get(key);
+    if (existing === undefined) {
+      groups.set(key, {
+        area: cluster.area,
+        files: cluster.files,
+        kind: cluster.kind,
+        partnerIds: new Set(partnerIds),
+      });
+      continue;
+    }
+    for (const partnerId of partnerIds) {
+      existing.partnerIds.add(partnerId);
+    }
+  }
+  return [...groups.values()]
+    .map((group) => ({
+      area: group.area,
+      files: group.files,
+      kind: group.kind,
+      partnerIds: [...group.partnerIds].sort((left, right) => left - right),
+    }))
+    .sort((left, right) => {
+      const leftPartner = left.partnerIds[0] ?? 0;
+      const rightPartner = right.partnerIds[0] ?? 0;
+      return leftPartner - rightPartner || left.kind.localeCompare(right.kind);
+    });
+}
+
+function laneConflictGroupText(group: LaneConflictGroup): string {
+  const partners = group.partnerIds.join(", ");
+  if (group.kind === "shared_files") {
+    return `${partners} via ${group.files.join(", ") || "<unknown file>"}`;
+  }
+  return `${partners} same lane${group.area === null ? "" : ` (${group.area})`}`;
+}
+
+export function laneConflictLinesFor(
+  itemId: number,
+  clusters: readonly PlanLaneCluster[],
+  width: number,
+): readonly string[] {
+  const groups = laneConflictGroupsFor(itemId, clusters);
+  if (groups.length === 0) {
+    return [];
+  }
+  return wrapText(`conflicts: ${groups.map(laneConflictGroupText).join("; ")}`, width);
+}
+
 function wrapPath(path: string, firstWidth: number, continuationWidth: number): readonly string[] {
   const lines: string[] = [];
   let remaining = path;
@@ -993,6 +1115,7 @@ function detailActivityRows(
 }
 
 function detailRowsForLayout(
+  laneConflictRows: number,
   showFiles: boolean,
   fileBlockRows: number,
   showEvidence: boolean,
@@ -1006,6 +1129,7 @@ function detailRowsForLayout(
 ): number {
   return (
     DETAIL_HEADER_ROWS +
+    laneConflictRows +
     (showFiles ? fileBlockRows : 0) +
     1 +
     descriptionBodyRows +
@@ -1024,6 +1148,7 @@ export interface DetailPaneLayout {
   readonly evidenceRows: readonly DetailEvidenceRow[];
   readonly fileBlocks: readonly DetailFileBlock[];
   readonly headerRows: number;
+  readonly laneConflictLines: readonly DetailTextLine[];
   readonly showActivity: boolean;
   readonly showChain: boolean;
   readonly showDescription: boolean;
@@ -1038,6 +1163,8 @@ interface DetailLayoutState {
   currentChainBlocks: readonly DetailChainBlock[];
   currentEvidenceRows: readonly DetailEvidenceRow[];
   currentFileBlocks: readonly DetailFileBlock[];
+  currentLaneConflictLines: readonly DetailTextLine[];
+  laneConflictWidth: number;
   showActivity: boolean;
   showChain: boolean;
   showEvidence: boolean;
@@ -1047,6 +1174,7 @@ interface DetailLayoutState {
 
 function detailRowsForState(state: DetailLayoutState, descriptionBodyRows: number): number {
   return detailRowsForLayout(
+    state.currentLaneConflictLines.length,
     state.showFiles,
     state.currentFileBlocks.reduce((total, block) => total + block.lines.length, 0),
     state.showEvidence,
@@ -1109,6 +1237,29 @@ function reduceActivitySection(state: DetailLayoutState): boolean {
     return false;
   }
   state.showActivity = false;
+  return true;
+}
+
+function reduceLaneConflictLines(state: DetailLayoutState): boolean {
+  if (state.currentLaneConflictLines.length === 0) {
+    return false;
+  }
+  if (state.currentLaneConflictLines.length === 1) {
+    state.currentLaneConflictLines = [];
+    return true;
+  }
+  const retained = state.currentLaneConflictLines.slice(0, -1);
+  const last = retained.at(-1);
+  if (last === undefined) {
+    return false;
+  }
+  state.currentLaneConflictLines = [
+    ...retained.slice(0, -1),
+    {
+      ...last,
+      text: appendEllipsis(last.text, state.laneConflictWidth),
+    },
+  ];
   return true;
 }
 
@@ -1229,6 +1380,7 @@ function reduceDetailLayout(
     () => reduceFileSection(state),
     () => reduceActivityRows(state),
     () => reduceActivitySection(state),
+    () => reduceLaneConflictLines(state),
   ];
   let reductionIndex = 0;
   while (
@@ -1247,10 +1399,15 @@ export function buildDetailLayout(
   paneWidth: number,
   rows: number,
   theme: QuestTheme = DENSE_THEME,
+  laneClusters: readonly PlanLaneCluster[] = [],
 ): DetailPaneLayout {
   const rowBudget = Math.max(1, Math.floor(rows));
   const width = Math.max(1, Math.floor(paneWidth) - 2);
   const description = wrapText(item.description || "—", width);
+  const naturalLaneConflictLines = keyedTextLines(
+    laneConflictLinesFor(item.id, laneClusters, width),
+    "lane-conflict",
+  );
   const headerRows = Math.min(DETAIL_HEADER_ROWS, rowBudget);
   if (rowBudget < DETAIL_HEADER_ROWS + 2) {
     const showDescription = rowBudget > headerRows;
@@ -1266,6 +1423,7 @@ export function buildDetailLayout(
       evidenceRows: [],
       fileBlocks: [],
       headerRows,
+      laneConflictLines: [],
       showActivity: false,
       showChain: false,
       showDescription,
@@ -1286,6 +1444,8 @@ export function buildDetailLayout(
     currentChainBlocks: naturalChainBlocks,
     currentEvidenceRows: naturalEvidenceRows,
     currentFileBlocks: naturalFileBlocks,
+    currentLaneConflictLines: naturalLaneConflictLines,
+    laneConflictWidth: width,
     showActivity: true,
     showChain: naturalChainBlocks.length > 0,
     showEvidence: true,
@@ -1309,6 +1469,7 @@ export function buildDetailLayout(
     evidenceRows: state.showEvidence ? state.currentEvidenceRows : [],
     fileBlocks: state.showFiles ? state.currentFileBlocks : [],
     headerRows,
+    laneConflictLines: state.currentLaneConflictLines,
     showActivity: state.showActivity,
     showChain: state.showChain,
     showDescription: true,
@@ -1515,11 +1676,13 @@ function DetailHeader({
 export function DetailPane({
   detail,
   item,
+  laneClusters = [],
   paneWidth,
   rows,
 }: {
   readonly detail: QuestLogDetail | null;
   readonly item: QuestLogItem | undefined;
+  readonly laneClusters?: readonly PlanLaneCluster[];
   readonly paneWidth: number;
   readonly rows: number;
 }) {
@@ -1540,7 +1703,7 @@ export function DetailPane({
   }
 
   const status = theme.status[item.status];
-  const layout = buildDetailLayout(item, detail, paneWidth, rows, theme);
+  const layout = buildDetailLayout(item, detail, paneWidth, rows, theme, laneClusters);
   return (
     <box
       style={{
@@ -1561,6 +1724,15 @@ export function DetailPane({
         status={status}
         theme={theme}
       />
+      {layout.laneConflictLines.length === 0 ? null : (
+        <box style={{ flexDirection: "column", width: "100%" }}>
+          {layout.laneConflictLines.map((line) => (
+            <text fg={theme.palette.warn} key={line.key} wrapMode="none">
+              {line.text}
+            </text>
+          ))}
+        </box>
+      )}
       {layout.showFiles ? (
         <box style={{ flexDirection: "column", width: "100%" }}>
           {layout.fileBlocks.map((block) => (

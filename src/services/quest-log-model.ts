@@ -13,6 +13,7 @@ export interface QuestLogItem {
   readonly assignee: string | null;
   readonly blocked: boolean;
   readonly blockerId?: number;
+  readonly blockerIds?: readonly number[];
   readonly chainDepth?: number;
   readonly computedState?: PlanComputedState;
   readonly description: string;
@@ -125,6 +126,7 @@ function toQuestLogItem(
       ? {}
       : {
           ...(planQuest.blockers[0] === undefined ? {} : { blockerId: planQuest.blockers[0] }),
+          blockerIds: planQuest.blockers,
           chainDepth: planQuest.chain_depth,
           computedState: planQuest.computed_state,
         };

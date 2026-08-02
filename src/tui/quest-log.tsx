@@ -237,6 +237,7 @@ function ReadOnlyLayout({
           <DetailPane
             detail={detail}
             item={current}
+            laneClusters={snapshot.plan?.laneClusters ?? []}
             paneWidth={geometry.detailWidth}
             rows={geometry.detailRows}
           />
