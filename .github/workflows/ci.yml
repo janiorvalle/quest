@@ -44,10 +44,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - macos-latest
-          - ubuntu-latest
-          - windows-latest
+        include:
+          - os: macos-latest
+            target: darwin-arm64
+          - os: ubuntu-latest
+            target: linux-x64
+          - os: windows-latest
+            target: windows-x64
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -65,6 +68,24 @@ jobs:
         # same lint, typecheck, and test sequence as the Makefile target.
         if: runner.os == 'Windows'
         run: bun run check
+      # Keep the required Build (...) checks stable while exercising each
+      # installer on its native runner. Installer smoke remains the full
+      # cross-target distribution gate below.
+      - name: Build native artifact
+        run: bun run scripts/dist.ts
+        env:
+          QUEST_TARGET: ${{ matrix.target }}
+          QUEST_VERSION: 0.0.0-ci
+      - name: Verify native artifact
+        run: bun run scripts/verify-dist.ts
+        env:
+          QUEST_TARGET: ${{ matrix.target }}
+          QUEST_VERSION: 0.0.0-ci
+      - name: Exercise native installer
+        run: bun run scripts/install-smoke.ts
+        env:
+          QUEST_TARGET: ${{ matrix.target }}
+          QUEST_VERSION: 0.0.0-ci
 
   install-smoke:
     name: Installer smoke
