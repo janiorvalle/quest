@@ -1899,6 +1899,8 @@ model = "gpt-5-slow"
     const root = await mkdtemp(join(tmpdir(), "quest-dispatch-heartbeat-timeout-test-"));
     let claimed = false;
     let cancelled = false;
+    let workerStarted = false;
+    let releaseTouchStall: (() => void) | undefined;
     let resolveWorker: ((exitCode: number) => void) | undefined;
     try {
       const runtime: DispatchRuntime = {
@@ -1914,15 +1916,15 @@ model = "gpt-5-slow"
           await prepareFakeWorktree(spec);
           if (spec.args.includes("touch")) {
             return new Promise<CommandResult>((resolve) => {
-              setTimeout(
-                () =>
-                  resolve({
-                    exitCode: 124,
-                    stderr: `command timed out after ${spec.timeoutMs ?? 0}ms`,
-                    stdout: "",
-                  }),
-                spec.timeoutMs ?? 5,
-              );
+              releaseTouchStall = () =>
+                resolve({
+                  exitCode: 124,
+                  stderr: `command timed out after ${spec.timeoutMs ?? 0}ms`,
+                  stdout: "",
+                });
+              if (workerStarted) {
+                releaseTouchStall();
+              }
             });
           }
           return fakeCommandResponse(spec, [
@@ -1945,6 +1947,8 @@ model = "gpt-5-slow"
           ]);
         },
         spawnWorker() {
+          workerStarted = true;
+          releaseTouchStall?.();
           const completion = new Promise<number>((resolve) => {
             resolveWorker = resolve;
           });
