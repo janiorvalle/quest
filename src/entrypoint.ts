@@ -25,6 +25,7 @@ function currentGitBranch(workingDirectory: string): Promise<string | undefined>
 const launchReadOnlyViewer = async (context: FutureTuiContext): Promise<void> => {
   const branch = await currentGitBranch(context.workingDirectory);
   const runtime = createQuestLogRuntime({
+    clock: context.ports.clock,
     initialScope: context.scope,
     openEvidence: async (id) => {
       const detail = await showQuestDetail(context.ports.questStore, { repo: null }, id);

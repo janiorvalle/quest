@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { stringWidth } from "bun";
 
 import type { QuestLogDetail, QuestLogEventEntry, QuestLogItem } from "../services/quest-log-model";
-import { buildDetailLayout, sessionAttributionText, wrapText } from "./components";
+import {
+  blockedStatusText,
+  buildDetailLayout,
+  laneMarkerFor,
+  sessionAttributionText,
+  wrapText,
+} from "./components";
 
 const item: QuestLogItem = {
   area: "cli",
@@ -170,5 +176,46 @@ describe("detail pane layout", () => {
       expect(layout.usedRows).toBeLessThanOrEqual(rowBudget);
       expect(layout.headerRows).toBeLessThanOrEqual(rowBudget);
     }
+  });
+});
+
+describe("plan list annotations", () => {
+  const items: readonly QuestLogItem[] = [
+    { ...item, computedState: "dispatchable", id: 87 },
+    {
+      ...item,
+      blocked: true,
+      blockerId: 87,
+      chainDepth: 1,
+      computedState: "blocked",
+      id: 93,
+    },
+  ];
+  const sharedFiles = [
+    {
+      area: null,
+      files: ["src/tui/quest-log.tsx"],
+      heuristic: false,
+      kind: "shared_files",
+      quest_ids: [87, 93],
+    },
+  ] as const;
+  const [dispatchable, blocked] = items;
+  if (dispatchable === undefined || blocked === undefined) {
+    throw new Error("plan list fixture is incomplete");
+  }
+
+  test("labels a blocked row with its nearest blocker", () => {
+    expect(blockedStatusText(blocked)).toBe("○ blocked 87");
+    expect(blockedStatusText(dispatchable)).toBeNull();
+  });
+
+  test("marks only adjacent plan-lane rows", () => {
+    expect(laneMarkerFor(0, items, sharedFiles)).toEqual({ edge: "start", label: "same lane" });
+    expect(laneMarkerFor(1, items, sharedFiles)).toEqual({
+      edge: "end",
+      label: "shared files",
+    });
+    expect(laneMarkerFor(0, [dispatchable, { ...blocked, id: 101 }], sharedFiles)).toBeNull();
   });
 });

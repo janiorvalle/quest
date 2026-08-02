@@ -17,6 +17,7 @@ describe("dense theme", () => {
       borderActive: "#3d5866",
       borderIdle: "#24313a",
       hint: "#62c4c9",
+      lane: "#bc8cff",
       sectionLabel: "#7fa3b8",
       selection: "#c9d4d9",
       selectionInk: "#0b0f12",

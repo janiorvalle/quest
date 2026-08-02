@@ -61,11 +61,16 @@ function scopedPlanInput(dump: QuestDump, scope: QuestScope, now: string): Quest
   };
 }
 
-export async function getQuestPlan(
+export interface QuestPlanSnapshot {
+  readonly has_requirements: boolean;
+  readonly plan: QuestPlan;
+}
+
+export async function getQuestPlanSnapshot(
   store: QuestStore,
   scope: QuestScope,
   now: string,
-): Promise<QuestPlan> {
+): Promise<QuestPlanSnapshot> {
   const dump = await store.exportAll();
   const input = scopedPlanInput(dump, scope, now);
   const scopedQuestIds = new Set(
@@ -73,9 +78,20 @@ export async function getQuestPlan(
   );
   const plan = computeQuestPlan(input);
   return {
-    lane_clusters: plan.lane_clusters.filter((cluster) =>
-      cluster.quest_ids.every((questId) => scopedQuestIds.has(questId)),
-    ),
-    quests: plan.quests.filter((quest) => isInScope(quest, scope)),
+    has_requirements: input.chains.length > 0,
+    plan: {
+      lane_clusters: plan.lane_clusters.filter((cluster) =>
+        cluster.quest_ids.every((questId) => scopedQuestIds.has(questId)),
+      ),
+      quests: plan.quests.filter((quest) => isInScope(quest, scope)),
+    },
   };
+}
+
+export async function getQuestPlan(
+  store: QuestStore,
+  scope: QuestScope,
+  now: string,
+): Promise<QuestPlan> {
+  return (await getQuestPlanSnapshot(store, scope, now)).plan;
 }

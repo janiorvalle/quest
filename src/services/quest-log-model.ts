@@ -1,5 +1,7 @@
+import type { PlanComputedState, PlanLaneCluster, PlanQuest } from "../domain/plan";
 import type { Event, Quest, QuestScope, QuestStatus } from "../schema";
-import type { QuestStore, WatchSubscription } from "../store";
+import type { Clock, QuestStore, WatchSubscription } from "../store";
+import { getQuestPlanSnapshot, type QuestPlanSnapshot } from "./plan";
 import { showQuestDetail } from "./query";
 
 export type QuestLogScope = "all" | "current";
@@ -8,6 +10,9 @@ export interface QuestLogItem {
   readonly area: string | null;
   readonly assignee: string | null;
   readonly blocked: boolean;
+  readonly blockerId?: number;
+  readonly chainDepth?: number;
+  readonly computedState?: PlanComputedState;
   readonly description: string;
   readonly id: number;
   readonly kind: Quest["kind"];
@@ -21,10 +26,16 @@ export interface QuestLogItem {
   readonly updatedAt: string;
 }
 
+export interface QuestLogPlan {
+  readonly items: readonly QuestLogItem[];
+  readonly laneClusters: readonly PlanLaneCluster[];
+}
+
 export interface QuestLogSnapshot {
   readonly currentRepo: string | null;
   readonly items: readonly QuestLogItem[];
   readonly loading: boolean;
+  readonly plan: QuestLogPlan | null;
   readonly scope: QuestLogScope;
 }
 
@@ -84,6 +95,7 @@ export interface QuestLogRuntime {
 }
 
 export interface QuestLogRuntimeOptions {
+  readonly clock?: Clock;
   readonly initialScope: QuestScope;
   readonly openEvidence?: (id: number) => Promise<string>;
   readonly openPr?: (url: string) => Promise<string>;
@@ -95,14 +107,28 @@ export const EMPTY_QUEST_LOG_SNAPSHOT: QuestLogSnapshot = {
   currentRepo: null,
   items: [],
   loading: true,
+  plan: null,
   scope: "all",
 };
 
-function toQuestLogItem(quest: Quest, blockedIds: ReadonlySet<number>): QuestLogItem {
+function toQuestLogItem(
+  quest: Quest,
+  blockedIds: ReadonlySet<number>,
+  planQuest: PlanQuest | undefined = undefined,
+): QuestLogItem {
+  const planMetadata =
+    planQuest === undefined
+      ? {}
+      : {
+          ...(planQuest.blockers[0] === undefined ? {} : { blockerId: planQuest.blockers[0] }),
+          chainDepth: planQuest.chain_depth,
+          computedState: planQuest.computed_state,
+        };
   return {
     area: quest.area,
     assignee: quest.assignee,
-    blocked: blockedIds.has(quest.id),
+    blocked:
+      planQuest === undefined ? blockedIds.has(quest.id) : planQuest.computed_state === "blocked",
     description: quest.description,
     id: quest.id,
     kind: quest.kind,
@@ -114,6 +140,27 @@ function toQuestLogItem(quest: Quest, blockedIds: ReadonlySet<number>): QuestLog
     status: quest.status,
     title: quest.title,
     updatedAt: quest.updated_at,
+    ...planMetadata,
+  };
+}
+
+function planForItems(
+  planSnapshot: QuestPlanSnapshot,
+  flatItems: readonly QuestLogItem[],
+): QuestLogPlan | null {
+  if (!planSnapshot.has_requirements) {
+    return null;
+  }
+  const itemsById = new Map(flatItems.map((item) => [item.id, item]));
+  const plannedIds = new Set(planSnapshot.plan.quests.map((quest) => quest.id));
+  const plannedItems = planSnapshot.plan.quests.flatMap((quest) => {
+    const item = itemsById.get(quest.id);
+    return item === undefined ? [] : [item];
+  });
+  const unplannedItems = flatItems.filter((item) => !plannedIds.has(item.id));
+  return {
+    items: [...plannedItems, ...unplannedItems],
+    laneClusters: planSnapshot.plan.lane_clusters,
   };
 }
 
@@ -138,11 +185,17 @@ export function summarizeEventDetail(detail: unknown): string | null {
   return summary === "" ? null : summary;
 }
 
-function isEventDetailRecord(detail: unknown): detail is Readonly<Record<string, unknown>> {
+type EventDetailRecord = Readonly<Record<string, unknown>> & {
+  readonly session_effort?: unknown;
+  readonly session_guild?: unknown;
+  readonly session_model?: unknown;
+};
+
+function isEventDetailRecord(detail: unknown): detail is EventDetailRecord {
   return typeof detail === "object" && detail !== null && !Array.isArray(detail);
 }
 
-function eventDetailRecord(detail: unknown): Readonly<Record<string, unknown>> | null {
+function eventDetailRecord(detail: unknown): EventDetailRecord | null {
   return isEventDetailRecord(detail) ? detail : null;
 }
 
@@ -161,9 +214,9 @@ function sessionAttributionFromEvent(event: Event): QuestLogSessionAttribution |
   if (detail === null) {
     return null;
   }
-  const effort = nonEmptyEventText(detail["session_effort"]);
-  const guild = nonEmptyEventText(detail["session_guild"]);
-  const model = nonEmptyEventText(detail["session_model"]);
+  const effort = nonEmptyEventText(detail.session_effort);
+  const guild = nonEmptyEventText(detail.session_guild);
+  const model = nonEmptyEventText(detail.session_model);
   const attribution: QuestLogSessionAttribution = {
     ...(effort === undefined ? {} : { effort }),
     ...(guild === undefined ? {} : { guild }),
@@ -220,6 +273,8 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
   let scope: QuestLogScope = currentRepo === null ? "all" : "current";
   let quests: readonly Quest[] = [];
   let blockedIds: ReadonlySet<number> = new Set();
+  let planSnapshot: QuestPlanSnapshot | null = null;
+  let planRevision = 0;
   let loading = true;
   let generation = 0;
   let generationSequence = 0;
@@ -228,6 +283,20 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
   const pendingActions = new Set<Promise<void>>();
   const retiredSubscriptions = new Set<WatchSubscription>();
   const listeners = new Set<(snapshot: QuestLogSnapshot) => void>();
+
+  const planScope = (targetScope: QuestLogScope, targetRepo: string | null): QuestScope => ({
+    repo: targetScope === "current" && targetRepo !== null ? targetRepo : null,
+  });
+
+  const loadPlan = async (
+    targetScope: QuestLogScope,
+    targetRepo: string | null,
+  ): Promise<QuestPlanSnapshot> =>
+    getQuestPlanSnapshot(
+      options.store,
+      planScope(targetScope, targetRepo),
+      await (options.clock?.now() ?? Promise.resolve(new Date().toISOString())),
+    );
 
   const enqueueScopeTransition = <Result>(operation: () => Promise<Result>): Promise<Result> => {
     const transition = scopeTransitions.then(operation);
@@ -238,12 +307,23 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     return transition;
   };
 
-  const snapshot = (): QuestLogSnapshot => ({
-    currentRepo,
-    items: quests.map((quest) => toQuestLogItem(quest, blockedIds)),
-    loading,
-    scope,
-  });
+  const snapshot = (): QuestLogSnapshot => {
+    const planQuestsById = new Map(
+      planSnapshot?.has_requirements
+        ? planSnapshot.plan.quests.map((quest) => [quest.id, quest])
+        : [],
+    );
+    const items = quests.map((quest) =>
+      toQuestLogItem(quest, blockedIds, planQuestsById.get(quest.id)),
+    );
+    return {
+      currentRepo,
+      items,
+      loading,
+      plan: planSnapshot === null ? null : planForItems(planSnapshot, items),
+      scope,
+    };
+  };
 
   const emit = (): void => {
     const value = snapshot();
@@ -270,6 +350,61 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     return failures;
   };
 
+  let pendingPlanRefresh: {
+    readonly generation: number;
+    readonly scope: QuestLogScope;
+    readonly repo: string | null;
+  } | null = null;
+  let planRefreshRunning = false;
+  let scopeSetupGeneration: number | null = null;
+
+  const clearPlanAfterRefreshFailure = (requestGeneration: number): void => {
+    if (requestGeneration !== generation || scopeSetupGeneration !== null) {
+      return;
+    }
+    planSnapshot = null;
+    planRevision += 1;
+    emit();
+  };
+
+  const requestPlanRefresh = (
+    activeGeneration: number,
+    targetScope: QuestLogScope,
+    targetRepo: string | null,
+  ): void => {
+    pendingPlanRefresh = { generation: activeGeneration, repo: targetRepo, scope: targetScope };
+    if (planRefreshRunning) {
+      return;
+    }
+    planRefreshRunning = true;
+    const action = (async () => {
+      while (pendingPlanRefresh !== null) {
+        const request = pendingPlanRefresh;
+        pendingPlanRefresh = null;
+        try {
+          const nextPlan = await loadPlan(request.scope, request.repo);
+          if (request.generation !== generation || scopeSetupGeneration !== null) {
+            continue;
+          }
+          planSnapshot = nextPlan;
+          planRevision += 1;
+          emit();
+        } catch {
+          clearPlanAfterRefreshFailure(request.generation);
+        }
+      }
+      planRefreshRunning = false;
+    })();
+    const completion = action.then(
+      () => undefined,
+      () => undefined,
+    );
+    pendingActions.add(completion);
+    void completion.then(() => {
+      pendingActions.delete(completion);
+    });
+  };
+
   const unsubscribeCurrent = async (): Promise<void> => {
     const current = new Set([...subscriptions, ...retiredSubscriptions]);
     subscriptions = [];
@@ -288,11 +423,19 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     targetRepo: string | null = currentRepo,
   ): Promise<void> => {
     const activeGeneration = ++generationSequence;
+    scopeSetupGeneration = activeGeneration;
     const filter = filterForScope(targetScope, targetRepo);
     let nextQuests: readonly Quest[] = [];
     let nextBlockedIds: ReadonlySet<number> = new Set();
     let nextLoading = true;
     const nextSubscriptions: WatchSubscription[] = [];
+    let nextPlanSnapshot: QuestPlanSnapshot | null = null;
+    const planRevisionBeforeSetup = planRevision;
+    try {
+      nextPlanSnapshot = await loadPlan(targetScope, targetRepo);
+    } catch {
+      // Plan computation is optional; keep the flat live stream available while it recovers.
+    }
     try {
       nextSubscriptions.push(
         await options.store.watch(filter, (watchedQuests) => {
@@ -304,6 +447,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
           quests = nextQuests;
           loading = false;
           emit();
+          requestPlanRefresh(activeGeneration, targetScope, targetRepo);
         }),
       );
       nextSubscriptions.push(
@@ -314,9 +458,11 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
           }
           blockedIds = nextBlockedIds;
           emit();
+          requestPlanRefresh(activeGeneration, targetScope, targetRepo);
         }),
       );
     } catch (error) {
+      scopeSetupGeneration = null;
       await disposeSubscriptions(nextSubscriptions);
       throw error;
     }
@@ -328,8 +474,13 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     subscriptions = nextSubscriptions;
     quests = nextQuests;
     blockedIds = nextBlockedIds;
+    if (planRevision === planRevisionBeforeSetup) {
+      planSnapshot = nextPlanSnapshot;
+    }
+    scopeSetupGeneration = null;
     loading = nextLoading;
     emit();
+    requestPlanRefresh(activeGeneration, targetScope, targetRepo);
     await disposeSubscriptions(previousSubscriptions);
   };
 

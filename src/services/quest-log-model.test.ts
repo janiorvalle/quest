@@ -71,6 +71,162 @@ describe("read-only quest log runtime", () => {
       expect(snapshot.currentRepo).toBe("quest");
       expect(snapshot.items.map((item) => item.title)).toEqual(["Inside scope"]);
       expect(snapshot.items[0]?.predictedFiles).toEqual(["src/tui/quest-log.tsx"]);
+      expect(snapshot.plan).toBeNull();
+    } finally {
+      unsubscribe();
+      await runtime.stop();
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("uses the shared plan for the default order and keeps the flat stream available", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-log-plan-"));
+    const store = createSqliteStore(join(directory, "quest.db"), {
+      now: () => "2026-08-02T16:00:00Z",
+    });
+    const snapshots: QuestLogSnapshot[] = [];
+    const runtime = createQuestLogRuntime({
+      clock: { now: () => Promise.resolve("2026-08-02T16:00:00Z") },
+      initialScope: { repo: "quest" },
+      store,
+    });
+    const unsubscribe = runtime.subscribe((snapshot) => snapshots.push(snapshot));
+
+    try {
+      const root = await store.addQuest({
+        ...questInput("quest", "Root"),
+        predicted_files: ["src/root.ts"],
+      });
+      const dependent = await store.addQuest({
+        ...questInput("quest", "Dependent"),
+        predicted_files: ["src/dependent.ts"],
+      });
+      const live = await store.addQuest({
+        ...questInput("quest", "Live"),
+        assignee: "worker",
+        lease_expires_at: "2026-08-02T17:00:00Z",
+        predicted_files: ["src/live.ts"],
+        status: "accepted",
+      });
+      await store.addChainLink({
+        actor: "fixture",
+        link: { quest_id: dependent.id, target_id: root.id, type: "requires" },
+      });
+
+      await runtime.start();
+      await waitFor(
+        () =>
+          latest(snapshots).loading === false &&
+          latest(snapshots).plan !== null &&
+          latest(snapshots).plan?.items.some((item) => item.id === dependent.id) === true,
+      );
+
+      const snapshot = latest(snapshots);
+      expect(snapshot.items.map((item) => item.id)).toEqual([root.id, dependent.id, live.id]);
+      expect(snapshot.plan?.items.map((item) => item.id)).toEqual([live.id, root.id, dependent.id]);
+      expect(snapshot.items.find((item) => item.id === dependent.id)).toMatchObject({
+        blocked: true,
+        blockerId: root.id,
+        chainDepth: 1,
+        computedState: "blocked",
+      });
+    } finally {
+      unsubscribe();
+      await runtime.stop();
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("falls back to the flat live stream when a plan refresh fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-log-plan-refresh-"));
+    const store = createSqliteStore(join(directory, "quest.db"), {
+      now: () => "2026-08-02T16:00:00Z",
+    });
+    const snapshots: QuestLogSnapshot[] = [];
+    const runtime = createQuestLogRuntime({
+      clock: { now: () => Promise.resolve("2026-08-02T16:00:00Z") },
+      initialScope: { repo: "quest" },
+      store,
+    });
+    const unsubscribe = runtime.subscribe((snapshot) => snapshots.push(snapshot));
+
+    try {
+      const root = await store.addQuest({
+        ...questInput("quest", "Refresh root"),
+        predicted_files: ["src/root.ts"],
+      });
+      const dependent = await store.addQuest({
+        ...questInput("quest", "Refresh dependent"),
+        predicted_files: ["src/dep.ts"],
+      });
+      await store.addChainLink({
+        actor: "fixture",
+        link: { quest_id: dependent.id, target_id: root.id, type: "requires" },
+      });
+      await runtime.start();
+      await waitFor(() => latest(snapshots).loading === false && latest(snapshots).plan !== null);
+
+      const exportAll = store.exportAll.bind(store);
+      store.exportAll = async () => {
+        throw new Error("fixture plan refresh failed");
+      };
+      const incoming = await store.addQuest({
+        ...questInput("quest", "New live quest"),
+        predicted_files: ["src/new.ts"],
+      });
+      await waitFor(
+        () =>
+          latest(snapshots).plan === null &&
+          latest(snapshots).items.some((item) => item.id === incoming.id),
+      );
+      expect(latest(snapshots).items.map((item) => item.id)).toContain(incoming.id);
+      store.exportAll = exportAll;
+    } finally {
+      unsubscribe();
+      await runtime.stop();
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("starts the viewer in flat mode when the initial plan load fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-log-plan-start-"));
+    const store = createSqliteStore(join(directory, "quest.db"), {
+      now: () => "2026-08-02T16:00:00Z",
+    });
+    const snapshots: QuestLogSnapshot[] = [];
+    const runtime = createQuestLogRuntime({
+      clock: { now: () => Promise.resolve("2026-08-02T16:00:00Z") },
+      initialScope: { repo: "quest" },
+      store,
+    });
+    const unsubscribe = runtime.subscribe((snapshot) => snapshots.push(snapshot));
+    const exportAll = store.exportAll.bind(store);
+    let shouldFail = true;
+    store.exportAll = async () => {
+      if (shouldFail) {
+        throw new Error("fixture initial plan load failed");
+      }
+      return exportAll();
+    };
+
+    try {
+      const root = await store.addQuest(questInput("quest", "Initial root"));
+      const dependent = await store.addQuest(questInput("quest", "Initial dependent"));
+      await store.addChainLink({
+        actor: "fixture",
+        link: { quest_id: dependent.id, target_id: root.id, type: "requires" },
+      });
+
+      await runtime.start();
+      await waitFor(() => latest(snapshots).loading === false && latest(snapshots).plan === null);
+      expect(latest(snapshots).items.map((item) => item.id)).toEqual([root.id, dependent.id]);
+
+      shouldFail = false;
+      await store.addQuest(questInput("quest", "Retry plan load"));
+      await waitFor(() => latest(snapshots).plan !== null);
     } finally {
       unsubscribe();
       await runtime.stop();

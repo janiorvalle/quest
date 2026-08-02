@@ -51,6 +51,7 @@ describe("read-only quest log keymap", () => {
         selectedIndex: 0,
         selectedQuestId: undefined,
         showDone: true,
+        sortMode: "plan",
       },
     });
     expect(reduce(INITIAL_QUEST_LOG_INTERACTION, "E")).toEqual({
@@ -74,7 +75,12 @@ describe("read-only quest log keymap", () => {
     });
     expect(reduce(INITIAL_QUEST_LOG_INTERACTION, "q").intent).toEqual({ type: "quit" });
 
-    for (const forbidden of ["return", "a", "c", "o", "s", "t", "v", "y", "/"]) {
+    const flat = reduce(INITIAL_QUEST_LOG_INTERACTION, "o");
+    expect(flat.intent).toEqual({ type: "toggle-sort" });
+    expect(flat.state.sortMode).toBe("flat");
+    expect(reduce(flat.state, "o").state.sortMode).toBe("plan");
+
+    for (const forbidden of ["return", "a", "c", "s", "t", "v", "y", "/"]) {
       expect(reduce(INITIAL_QUEST_LOG_INTERACTION, forbidden).intent).toEqual({ type: "none" });
     }
   });

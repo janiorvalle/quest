@@ -6,7 +6,10 @@ export interface QuestLogInteractionState {
   readonly selectedIndex: number;
   readonly selectedQuestId: number | undefined;
   readonly showDone: boolean;
+  readonly sortMode: QuestLogSortMode;
 }
+
+export type QuestLogSortMode = "flat" | "plan";
 
 export interface QuestLogKey {
   readonly name: string;
@@ -31,6 +34,7 @@ export type QuestLogIntent =
   | { readonly type: "open-evidence"; readonly id: number }
   | { readonly type: "open-pr"; readonly url: string }
   | { readonly type: "quit" }
+  | { readonly type: "toggle-sort" }
   | { readonly type: "toggle-done" };
 
 export interface QuestLogInteractionResult {
@@ -44,6 +48,7 @@ export const INITIAL_QUEST_LOG_INTERACTION: QuestLogInteractionState = {
   selectedIndex: 0,
   selectedQuestId: undefined,
   showDone: false,
+  sortMode: "plan",
 };
 
 function isKey(key: QuestLogKey, value: string): boolean {
@@ -63,6 +68,7 @@ function normalizeState(
     selectedIndex: selection.index,
     selectedQuestId: selection.questId,
     showDone: state.showDone,
+    sortMode: state.sortMode,
   };
 }
 
@@ -211,6 +217,15 @@ export function reduceReadOnlyInteraction(
         selectedIndex: 0,
         selectedQuestId: context.visibleQuestIds?.[0],
         showDone: !normalized.showDone,
+      },
+    };
+  }
+  if (isKey(key, "o")) {
+    return {
+      intent: { type: "toggle-sort" },
+      state: {
+        ...normalized,
+        sortMode: normalized.sortMode === "plan" ? "flat" : "plan",
       },
     };
   }

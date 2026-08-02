@@ -89,7 +89,7 @@ export {
   selectNextQuest,
   strictPriorityThenAgePolicy,
 } from "./next";
-export { getQuestPlan } from "./plan";
+export { getQuestPlan, getQuestPlanSnapshot, type QuestPlanSnapshot } from "./plan";
 export {
   type ChainQuestReference,
   type ListQuestQuery,
@@ -105,6 +105,7 @@ export {
   EMPTY_QUEST_LOG_SNAPSHOT,
   type QuestLogDetail,
   type QuestLogItem,
+  type QuestLogPlan,
   type QuestLogRuntime,
   type QuestLogRuntimeOptions,
   type QuestLogSnapshot,

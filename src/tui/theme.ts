@@ -6,6 +6,7 @@ export interface QuestThemePalette {
   readonly borderActive: string;
   readonly borderIdle: string;
   readonly hint: string;
+  readonly lane: string;
   readonly sectionLabel: string;
   readonly selection: string;
   readonly selectionInk: string;
@@ -32,6 +33,8 @@ export interface QuestThemeGlyphs {
   readonly chainTurnedIn: string;
   readonly evidenceComplete: string;
   readonly evidencePending: string;
+  readonly laneEnd: string;
+  readonly laneStart: string;
   readonly priority: string;
   readonly ruleHorizontal: string;
   readonly ruleVertical: string;
@@ -90,6 +93,8 @@ export const DENSE_THEME: QuestTheme = {
     chainTurnedIn: "◆",
     evidenceComplete: "✓",
     evidencePending: "◌",
+    laneEnd: "┘",
+    laneStart: "┐",
     priority: "▲",
     ruleHorizontal: "─",
     ruleVertical: "│",
@@ -126,6 +131,7 @@ export const DENSE_THEME: QuestTheme = {
     borderActive: "#3d5866",
     borderIdle: "#24313a",
     hint: "#62c4c9",
+    lane: "#bc8cff",
     sectionLabel: "#7fa3b8",
     selection: "#c9d4d9",
     selectionInk: "#0b0f12",
