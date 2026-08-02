@@ -85,6 +85,7 @@ import {
   type RepositoryMigrationOperations,
   registerMigrateCommand,
 } from "./migrate";
+import { executePlanCli, isPlanCliRequest, type PlanCliRequest, registerPlanCommand } from "./plan";
 import type { CliPrompter } from "./prompt";
 import {
   executeQueryCli,
@@ -127,6 +128,7 @@ export type QuestCliRequest =
   | LifecycleCliRequest
   | MembersCliRequest
   | QueryCliRequest
+  | PlanCliRequest
   | SkillCliRequest
   | UpgradeCliRequest
   | MigrateCliRequest;
@@ -359,6 +361,23 @@ function executeQueryRequest(
   });
 }
 
+function executePlanRequest(
+  context: CliRequestExecutionContext,
+  request: QuestCliRequest,
+): Promise<ExitCode> {
+  if (!isPlanCliRequest(request)) {
+    throw new Error(`plan dispatcher received ${request.command}`);
+  }
+  return executePlanCli({
+    clock: context.ports.clock,
+    format: context.flags.format,
+    output: context.dependencies.output,
+    ports: requireOperationalPorts(context.ports),
+    request,
+    scope: context.resolved.scope,
+  });
+}
+
 function executeChainRequest(
   context: CliRequestExecutionContext,
   request: QuestCliRequest,
@@ -458,6 +477,7 @@ const CLI_REQUEST_DISPATCH = {
   stats: executeQueryRequest,
   events: executeQueryRequest,
   brief: executeQueryRequest,
+  plan: executePlanRequest,
   export: executeExportRequest,
   "backup-run": executeBackupRequest,
   "backup-verify": executeBackupRequest,
@@ -1054,6 +1074,7 @@ export function createQuestCommand(
   registerDoctorCommand(program, capture);
   registerCompletionCommand(program, capture);
   registerQueryCommands(program, capture);
+  registerPlanCommand(program, capture);
   registerExportCommand(program, capture);
   registerBackupCommands(program, capture);
   registerMembersCommands(program, capture);

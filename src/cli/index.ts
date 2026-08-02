@@ -48,6 +48,14 @@ export {
   registerMembersCommands,
 } from "./members";
 export {
+  type ExecutePlanCliOptions,
+  executePlanCli,
+  isPlanCliRequest,
+  type PlanCliRequest,
+  planDataSchema,
+  registerPlanCommand,
+} from "./plan";
+export {
   type CliApplicationPorts,
   createQuestCommand,
   type FutureTuiContext,
