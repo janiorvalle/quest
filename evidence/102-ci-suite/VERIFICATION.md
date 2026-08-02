@@ -33,6 +33,25 @@ Workflow lint	pass	17s	https://github.com/janiorvalle/quest/actions/runs/3072873
 completed	failure	quest 102: CI + check suite — sibling parity for the baseline gate	CI	claude/quest-102-ci	pull_request	30728738022	1m16s	2026-08-02T02:22:14Z
 ```
 
+Reproduced identically on the follow-up commit `edbee6a` (run 30728887353): the
+same six jobs pass and `Build (windows-latest)` fails the same way, so the
+failure is deterministic rather than flaky.
+
+### Proof the Windows failure is pre-existing
+
+This branch changes no product or test code at all. `git diff --stat origin/main...HEAD`:
+
+```
+ .github/dependabot.yml                |  16 +++
+ .github/workflows/ci.yml              | 155 ++++++++++++++++--------
+ .github/workflows/cla.yml             |  38 ++++++
+ .github/workflows/scorecard.yml       |  42 +++++++
+ evidence/102-ci-suite/VERIFICATION.md | 218 ++++++++++++++++++++++++++++++++++
+```
+
+Every failing test is `main`'s code running unmodified. The previous `ci.yml` was
+`workflow_dispatch`-only, so these failures were never surfaced before.
+
 ### Match against the Terraform contract
 
 `module "quest"` in `oss-baseline/main.tf` lists eight `required_status_checks`.
