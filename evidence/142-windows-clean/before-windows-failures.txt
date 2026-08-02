@@ -1,0 +1,11 @@
+(fail) config loading > reclaims stale config locks before recovering an interrupted file
+(fail) config loading > recovers a config left beside the path by an interrupted migration
+(fail) config loading > waits for a config writer lock before recovering an interrupted file
+(fail) dispatcher > allows common user CLI roots without exposing the rest of host home
+(fail) dispatcher > allows the canonical target of a symlinked worker CLI [16.00ms]
+(fail) dispatcher > allows the lexical node_modules root for symlinked Node worker CLIs
+(fail) dispatcher > claims through quest, locks before creating worktrees, and respects concurrency [16.00ms]
+(fail) dispatcher > uses native full and guarded trust modes for both worker CLIs
+(fail) repairs a corrupt destination with concurrent publishers [94.00ms]
+(fail) writeConvexToken creates a missing config file [16.00ms]
+(fail) writeConvexToken preserves config and writes a private token file [31.00ms]

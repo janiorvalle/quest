@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import { loadConfig } from "../src/config";
 import { createPlatform } from "../src/platform";
@@ -43,6 +44,33 @@ function trustOptions(trust: "full" | "guarded", yes = false): DispatchOptions {
     parseDispatchArguments(["--trust", trust, ...(yes ? ["--yes"] : [])]),
     defaultDispatchConfig,
   );
+}
+
+// The dispatcher builds worker paths with the host's rules, so expectations have to be
+// built the same way: a literal POSIX string only describes the arguments on a POSIX host.
+// Guarded Claude encodes a directory as //<resolved path, forward slashes>/**.
+function permissionGlob(path: string): string {
+  return `//${resolve(path).replaceAll("\\", "/").replace(/^\/+/u, "")}/**`;
+}
+
+// Guarded Codex encodes a directory as a TOML string, which escapes Windows backslashes.
+function tomlPathLiteral(path: string): string {
+  return JSON.stringify(resolve(path));
+}
+
+// Reading the sandbox allowlist back out of the settings argument compares real paths
+// instead of searching a JSON blob for a substring that Windows escapes differently.
+function claudeSandboxReadPaths(invocation: {
+  readonly args: readonly string[];
+}): readonly string[] {
+  const settings = invocation.args[invocation.args.indexOf("--settings") + 1];
+  if (settings === undefined) {
+    throw new Error("guarded Claude invocation did not include native sandbox settings");
+  }
+  const parsed = JSON.parse(settings) as {
+    sandbox: { filesystem: { allowRead: readonly string[] } };
+  };
+  return parsed.sandbox.filesystem.allowRead;
 }
 
 function quest(id: number, title: string): Quest {
@@ -147,6 +175,57 @@ async function prepareFakeWorktree(spec: CommandSpec): Promise<void> {
   await writeFile(join(worktreePath, ".git"), "gitdir: fake/.git-worktree\n");
 }
 
+// The dispatcher seeds the worker config where the worker's own Quest will look for it,
+// which is APPDATA on Windows rather than XDG_CONFIG_HOME. Ask the platform module the
+// same question the worker would ask instead of assuming the POSIX location.
+function workerQuestConfigFile(spec: CommandSpec): string | null {
+  const configHome = spec.env?.["XDG_CONFIG_HOME"];
+  if (configHome === undefined) {
+    return null;
+  }
+  const workerPlatform = createPlatform({
+    environment: spec.env ?? {},
+    homeDirectory: dirname(configHome),
+  });
+  return join(workerPlatform.directories.config, "config.toml");
+}
+
+// Concurrency is proven by an overlap that has to happen, not by a sleep long enough for a
+// fast host to win the race: every worker parks here until the expected number have started,
+// so a dispatcher that serialized them fails with a named error instead of a quiet pass.
+function workerStartBarrier(expectedWorkers: number): () => Promise<void> {
+  let release: () => void = () => {};
+  const allStarted = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let startedWorkers = 0;
+  return async () => {
+    startedWorkers += 1;
+    if (startedWorkers >= expectedWorkers) {
+      release();
+    }
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        allStarted,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `the dispatcher ran ${startedWorkers} of ${expectedWorkers} workers at once`,
+                ),
+              ),
+            2_000,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+}
+
 async function workerArtifacts(spec: CommandSpec): Promise<{
   readonly brief: string;
   readonly questConfig: string;
@@ -157,20 +236,18 @@ async function workerArtifacts(spec: CommandSpec): Promise<{
     briefPath === undefined
       ? ""
       : await readFile(isAbsolute(briefPath) ? briefPath : join(spec.cwd, briefPath), "utf8");
-  const questConfig =
-    spec.env?.["XDG_CONFIG_HOME"] === undefined
-      ? ""
-      : await readFile(join(spec.env["XDG_CONFIG_HOME"], "quest", "config.toml"), "utf8");
+  const questConfigFile = workerQuestConfigFile(spec);
+  const questConfig = questConfigFile === null ? "" : await readFile(questConfigFile, "utf8");
   return { brief, questConfig };
 }
 
 async function loadWorkerQuestConfig(spec: CommandSpec): Promise<Config | null> {
-  const configHome = spec.env?.["XDG_CONFIG_HOME"];
-  if (configHome === undefined) {
+  const configFile = workerQuestConfigFile(spec);
+  if (configFile === null) {
     return null;
   }
   return loadConfig({
-    configFile: join(configHome, "quest", "config.toml"),
+    configFile,
     environment: {},
     platform: createPlatform({ environment: {}, homeDirectory: spec.cwd }),
   });
@@ -717,6 +794,7 @@ model = "gpt-5-slow"
   test("uses native full and guarded trust modes for both worker CLIs", () => {
     const workerQuest = quest(42, "Make the queue sing");
     const hostHomePath = "/Users/subscription-user";
+    const workerHomePath = "/tmp/quest-worker-home";
     const fullClaude = createWorkerInvocation({
       agent: "claude",
       claudeArgs: ["--model", "sonnet", "--effort", "high"],
@@ -724,7 +802,7 @@ model = "gpt-5-slow"
       hostHomePath,
       trust: "full",
       workerCliPath: "/opt/bin/claude",
-      workerHomePath: "/tmp/quest-worker-home",
+      workerHomePath,
       owner: "quest-dispatch/9/1",
       quest: workerQuest,
       worktreePath: "/tmp/quest-42",
@@ -734,7 +812,7 @@ model = "gpt-5-slow"
       hostClaudeConfigPath: "/Users/subscription-user/.claude-work",
       hostHomePath,
       trust: "full",
-      workerHomePath: "/tmp/quest-worker-home",
+      workerHomePath,
       owner: "quest-dispatch/9/1",
       quest: workerQuest,
       worktreePath: "/tmp/quest-42",
@@ -749,7 +827,7 @@ model = "gpt-5-slow"
       questRepositoryName: "quest",
       trust: "guarded",
       workerCliPath: "/opt/bin/claude",
-      workerHomePath: "/tmp/quest-worker-home",
+      workerHomePath,
       workerSupportPaths: [`${hostHomePath}/.codex/bin/node`],
       owner: "quest-dispatch/9/1",
       quest: workerQuest,
@@ -763,7 +841,7 @@ model = "gpt-5-slow"
       hostHomePath,
       trust: "full",
       workerCliPath: "/opt/bin/codex",
-      workerHomePath: "/tmp/quest-worker-home",
+      workerHomePath,
       owner: "quest-dispatch/9/1",
       quest: workerQuest,
       worktreePath: "/tmp/quest-42",
@@ -774,7 +852,7 @@ model = "gpt-5-slow"
       hostHomePath,
       trust: "full",
       workerCliPath: "/opt/bin/codex",
-      workerHomePath: "/tmp/quest-worker-home",
+      workerHomePath,
       owner: "quest-dispatch/9/1",
       quest: workerQuest,
       worktreePath: "/tmp/quest-42",
@@ -788,7 +866,7 @@ model = "gpt-5-slow"
       questRepositoryName: "quest",
       trust: "guarded",
       workerCliPath: "/opt/bin/codex",
-      workerHomePath: "/tmp/quest-worker-home",
+      workerHomePath,
       owner: "quest-dispatch/9/1",
       quest: workerQuest,
       worktreePath: "/tmp/quest-42",
@@ -809,10 +887,10 @@ model = "gpt-5-slow"
     expect(fullClaude.args).not.toContain("sandbox-exec");
     expect(fullClaude.args).toContain("--model");
     expect(fullClaude.env).toMatchObject({
-      GH_CONFIG_DIR: "/tmp/quest-worker-home/.config/gh",
-      GIT_CONFIG_GLOBAL: "/tmp/quest-worker-home/.gitconfig",
+      GH_CONFIG_DIR: join(workerHomePath, ".config", "gh"),
+      GIT_CONFIG_GLOBAL: join(workerHomePath, ".gitconfig"),
       HOME: hostHomePath,
-      BUN_INSTALL_CACHE_DIR: "/tmp/quest-worker-home/.bun/install/cache",
+      BUN_INSTALL_CACHE_DIR: join(workerHomePath, ".bun", "install", "cache"),
       QUEST_GUILD: "codex",
       QUEST_EFFORT: "high",
       QUEST_IDENTITY: "quest-dispatch/9/1",
@@ -846,7 +924,7 @@ model = "gpt-5-slow"
     ).toBeTrue();
     expect(
       guardedClaude.args.some((argument) =>
-        argument.includes(`//${hostHomePath.slice(1)}/.codex/**`),
+        argument.includes(permissionGlob(`${hostHomePath}/.codex`)),
       ),
     ).toBeFalse();
     expect(
@@ -857,20 +935,26 @@ model = "gpt-5-slow"
     ).toBeTrue();
     expect(guardedClaude.args.some((argument) => argument.includes("Bash(git *)"))).toBeFalse();
     expect(
-      guardedClaude.args.some((argument) => argument.includes("Read(//tmp/read-only-git/**)")),
+      guardedClaude.args.some((argument) =>
+        argument.includes(`Read(${permissionGlob("/tmp/read-only-git")})`),
+      ),
     ).toBeTrue();
     expect(
-      guardedClaude.args.some((argument) => argument.includes("Edit(//tmp/read-only-git/**)")),
+      guardedClaude.args.some((argument) =>
+        argument.includes(`Edit(${permissionGlob("/tmp/read-only-git")})`),
+      ),
     ).toBeFalse();
     expect(
-      guardedClaude.args.some((argument) => argument.includes("Write(//tmp/read-only-git/**)")),
+      guardedClaude.args.some((argument) =>
+        argument.includes(`Write(${permissionGlob("/tmp/read-only-git")})`),
+      ),
     ).toBeFalse();
     expect(() =>
       createWorkerInvocation({
         agent: "claude",
         hostHomePath,
         trust: "guarded",
-        workerHomePath: "/tmp/quest-worker-home",
+        workerHomePath,
         owner: "quest-dispatch/9/1",
         quest: workerQuest,
         worktreePath: "/tmp/quest,unsafe",
@@ -882,7 +966,7 @@ model = "gpt-5-slow"
         hostHomePath,
         questCliPath: "/opt/quest,unsafe",
         trust: "guarded",
-        workerHomePath: "/tmp/quest-worker-home",
+        workerHomePath,
         owner: "quest-dispatch/9/1",
         quest: workerQuest,
         worktreePath: "/tmp/quest-safe",
@@ -894,7 +978,7 @@ model = "gpt-5-slow"
           agent: "claude",
           hostHomePath,
           trust: "guarded",
-          workerHomePath: "/tmp/quest-worker-home",
+          workerHomePath,
           owner: "quest-dispatch/9/1",
           quest: workerQuest,
           worktreePath: "/tmp/quest\\unsafe",
@@ -927,8 +1011,8 @@ model = "gpt-5-slow"
     expect(guardedCodex.args).toContain("--add-dir");
     expect(guardedCodex.args).toContain("/tmp/quest-42");
     const guardedCodexDirectoryIndex = guardedCodex.args.indexOf("--cd");
-    expect(guardedCodex.args[guardedCodexDirectoryIndex + 1]).toBe("/tmp/quest-worker-home");
-    expect(guardedCodex.cwd).toBe("/tmp/quest-worker-home");
+    expect(guardedCodex.args[guardedCodexDirectoryIndex + 1]).toBe(workerHomePath);
+    expect(guardedCodex.cwd).toBe(workerHomePath);
     expect(guardedCodex.args).toContain("notify=[]");
     expect(guardedCodex.args).toContain("features.plugins=false");
     expect(guardedCodex.args).toContain("features.hooks=false");
@@ -950,12 +1034,16 @@ model = "gpt-5-slow"
       ),
     ).toBeTrue();
     expect(guardedCodex.args.some((argument) => argument.includes("network.domains."))).toBeFalse();
-    expect(guardedCodex.args.some((argument) => argument.includes("/tmp/worktree-git"))).toBeTrue();
-    expect(guardedCodex.args.some((argument) => argument.includes("/tmp/repo-git"))).toBeTrue();
+    expect(
+      guardedCodex.args.some((argument) => argument.includes(tomlPathLiteral("/tmp/worktree-git"))),
+    ).toBeTrue();
+    expect(
+      guardedCodex.args.some((argument) => argument.includes(tomlPathLiteral("/tmp/repo-git"))),
+    ).toBeTrue();
     expect(guardedCodex.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(fullCodex.env).toMatchObject({
       HOME: hostHomePath,
-      GIT_CONFIG_GLOBAL: "/tmp/quest-worker-home/.gitconfig",
+      GIT_CONFIG_GLOBAL: join(workerHomePath, ".gitconfig"),
       QUEST_MODEL: "gpt-5",
     });
     expect(fullCodex.env).not.toHaveProperty("CODEX_HOME");
@@ -964,8 +1052,8 @@ model = "gpt-5-slow"
       HOME: hostHomePath,
     });
     expect(guardedCodex.env).toMatchObject({
-      CODEX_HOME: `${hostHomePath}/.codex`,
-      HOME: "/tmp/quest-worker-home",
+      CODEX_HOME: join(hostHomePath, ".codex"),
+      HOME: workerHomePath,
     });
     expect(guardedCodex.env?.["QUEST_EFFORT"]).toBeUndefined();
     expect(guardedCodex.env?.["QUEST_MODEL"]).toBeUndefined();
@@ -975,7 +1063,7 @@ model = "gpt-5-slow"
     ).toBeTrue();
     expect(
       fullCodex.args.some((argument) =>
-        argument.includes("/tmp/quest-42/.quest-dispatch-brief-42-test.json"),
+        argument.includes(resolve("/tmp/quest-42", "./.quest-dispatch-brief-42-test.json")),
       ),
     ).toBeTrue();
     expect(reopened.branch).toBe("quest/42-make-the-queue-sing-attempt-2");
@@ -1004,7 +1092,9 @@ model = "gpt-5-slow"
         worktreePath: join(root, "worktree"),
       });
 
-      expect(invocation.args.some((argument) => argument.includes(targetPath))).toBeTrue();
+      // The dispatcher canonicalizes with realpathSync, which on Windows keeps the 8.3 short
+      // form that the async realpath expands; canonicalize the expectation the same way.
+      expect(claudeSandboxReadPaths(invocation)).toContain(realpathSync(targetPath));
     } finally {
       await rm(root, { force: true, recursive: true });
     }
@@ -1034,12 +1124,9 @@ model = "gpt-5-slow"
         worktreePath: join(root, "worktree"),
       });
 
-      expect(invocation.args.some((argument) => argument.includes(dependencyRoot))).toBeTrue();
-      const settings = invocation.args[invocation.args.indexOf("--settings") + 1];
-      if (settings === undefined) {
-        throw new Error("guarded Claude invocation did not include native sandbox settings");
-      }
-      expect(settings).toContain(JSON.stringify(await realpath(dependencyRoot)));
+      const readPaths = claudeSandboxReadPaths(invocation);
+      expect(readPaths).toContain(dependencyRoot);
+      expect(readPaths).toContain(realpathSync(dependencyRoot));
     } finally {
       await rm(root, { force: true, recursive: true });
     }
@@ -1070,12 +1157,12 @@ model = "gpt-5-slow"
       worktreePath: "/tmp/quest-42",
     });
 
-    expect(
-      commonInstall.args.some((argument) => argument.includes(`${hostHomePath}/.local/bin`)),
-    ).toBeTrue();
+    expect(claudeSandboxReadPaths(commonInstall)).toContain(
+      resolve(`${hostHomePath}/.local/bin/node`),
+    );
     expect(
       credentialInstall.args.some((argument) =>
-        argument.includes(`//${hostHomePath.slice(1)}/.codex/**`),
+        argument.includes(permissionGlob(`${hostHomePath}/.codex`)),
       ),
     ).toBeFalse();
 
@@ -1089,7 +1176,11 @@ model = "gpt-5-slow"
       quest: quest(42, "Make the queue sing"),
       worktreePath: "/tmp/quest-42",
     });
-    expect(credentialHomeCli.args.some((argument) => argument.includes("/.claude/**"))).toBeFalse();
+    expect(
+      credentialHomeCli.args.some((argument) =>
+        argument.includes(permissionGlob(`${hostHomePath}/.claude`)),
+      ),
+    ).toBeFalse();
   });
 
   test("warns and confirms guarded trust for interactive and non-interactive dispatch", async () => {
@@ -1412,6 +1503,7 @@ model = "gpt-5-slow"
     const commands: CommandSpec[] = [];
     const workerSpecs: CommandSpec[] = [];
     const workers = [quest(1, "First lane"), quest(2, "Second lane")];
+    const waitForAllWorkers = workerStartBarrier(workers.length);
     let claimIndex = 0;
     let showIndex = 0;
     let activeWorkers = 0;
@@ -1470,7 +1562,7 @@ model = "gpt-5-slow"
               }
               activeWorkers += 1;
               maximumWorkers = Math.max(maximumWorkers, activeWorkers);
-              await new Promise((resolve) => setTimeout(resolve, 5));
+              await waitForAllWorkers();
               activeWorkers -= 1;
               return 0;
             })(),
