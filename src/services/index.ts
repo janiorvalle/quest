@@ -1,4 +1,16 @@
 export {
+  computeQuestPlan,
+  type PlanBlockerPath,
+  type PlanComputedState,
+  type PlanLaneCluster,
+  type PlanLaneClusterKind,
+  PlanModelError,
+  type PlanQuest,
+  planComputedStateValues,
+  type QuestPlan,
+  type QuestPlanInput,
+} from "../domain/plan";
+export {
   type BackupOperations,
   type BackupPruneResult,
   type BackupRestoreResult,
@@ -77,6 +89,7 @@ export {
   selectNextQuest,
   strictPriorityThenAgePolicy,
 } from "./next";
+export { getQuestPlan } from "./plan";
 export {
   type ChainQuestReference,
   type ListQuestQuery,

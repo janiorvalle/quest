@@ -15,3 +15,15 @@ export {
   statusForRetestVerdict,
   statusForVerdict,
 } from "./lifecycle";
+export {
+  computeQuestPlan,
+  type PlanBlockerPath,
+  type PlanComputedState,
+  type PlanLaneCluster,
+  type PlanLaneClusterKind,
+  PlanModelError,
+  type PlanQuest,
+  planComputedStateValues,
+  type QuestPlan,
+  type QuestPlanInput,
+} from "./plan";

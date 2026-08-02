@@ -220,6 +220,48 @@ quest chain show [<id>]                  Render the chain tree (repo-scoped).
 
 Only two link types exist. This is law.
 
+### Dispatch plan
+
+```
+quest plan                         Compute the agent dispatch plan without writing.
+```
+
+The plan reads one consistent store snapshot in the selected scope. Its JSON
+`data` contains `quests` in dispatch order and `lane_clusters`:
+
+```json
+{
+  "quests": [
+    {
+      "id": 101,
+      "computed_state": "blocked",
+      "blockers": [100],
+      "root_blockers": [87],
+      "blocker_paths": [[101, 100, 87]],
+      "chain_depth": 2
+    }
+  ],
+  "lane_clusters": [
+    {
+      "quest_ids": [101, 102],
+      "kind": "same_area",
+      "area": "cli",
+      "files": [],
+      "heuristic": true
+    }
+  ]
+}
+```
+
+`computed_state` is `in_flight` for an accepted quest with a live lease,
+`dispatchable` for ready work whose requirements are complete or dropped, and
+`blocked` otherwise. `blockers` are direct incomplete requirements;
+`blocker_paths` preserve every path from the quest to a root blocker.
+`shared_files` clusters are hard overlap signals. `same_area` clusters only
+apply when both quests have no predicted files and are labeled as heuristics.
+Completed, dropped, open, turned-in, and expired accepted quests are not
+dispatch entries.
+
 ### Viewing
 
 ```
