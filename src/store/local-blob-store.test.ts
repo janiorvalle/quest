@@ -8,6 +8,30 @@ import { type Sha256, sha256Schema } from "../schema";
 import { type BlobStoreFactory, defineBlobStoreContract } from "./contract";
 import { LocalBlobStore } from "./local-blob-store";
 
+function contendedFileError(): Error {
+  const error = new Error("EPERM: operation not permitted, rename");
+  Object.defineProperty(error, "code", { value: "EPERM" });
+  return error;
+}
+
+// Windows reports EPERM while another publisher still holds the destination open.
+class ContendedLocalBlobStore extends LocalBlobStore {
+  #remainingContendedPublishes: number;
+
+  constructor(evidenceDirectory: string, contendedPublishes: number) {
+    super(evidenceDirectory);
+    this.#remainingContendedPublishes = contendedPublishes;
+  }
+
+  protected override publishTemporaryBlob(temporary: string, destination: string): Promise<void> {
+    if (this.#remainingContendedPublishes > 0) {
+      this.#remainingContendedPublishes -= 1;
+      return Promise.reject(contendedFileError());
+    }
+    return super.publishTemporaryBlob(temporary, destination);
+  }
+}
+
 class FailableLocalBlobStore extends LocalBlobStore {
   #failNextPublish = false;
   #failNextCleanup = false;
@@ -118,6 +142,21 @@ test("repairs a corrupt destination with concurrent publishers", async () => {
       expect(await readFile(join(evidenceDirectory, quarantine), "utf8")).toBe("corrupt content");
     }
   });
+});
+
+test("publishes through a destination another publisher still holds open", async () => {
+  const evidenceDirectory = await mkdtemp(join(tmpdir(), "quest-blob-contended-"));
+  try {
+    const store = new ContendedLocalBlobStore(evidenceDirectory, 3);
+    const bytes = new TextEncoder().encode("contended publication");
+
+    const sha256 = await store.put(bytes);
+
+    expect(await store.get(sha256)).toEqual(bytes);
+    expect(await readdir(evidenceDirectory)).toEqual([sha256]);
+  } finally {
+    await rm(evidenceDirectory, { force: true, recursive: true });
+  }
 });
 
 test("snapshots caller-owned bytes before asynchronous publication", async () => {

@@ -20,6 +20,38 @@ async function isRegularFile(filePath: string): Promise<boolean> {
   }
 }
 
+// Windows refuses to link or replace a file that another publisher still holds open and
+// reports EPERM, EACCES, or EBUSY instead of waiting. The contention clears as soon as the
+// other publisher closes its handle, so concurrent publication stays recoverable there.
+const CONTENDED_FILE_RETRY_DELAYS_MS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512] as const;
+
+function isContendedFile(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error.code === "EPERM" || error.code === "EACCES" || error.code === "EBUSY")
+  );
+}
+
+function afterDelay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function retryWhileContended(operation: () => Promise<void>): Promise<void> {
+  for (const delayMilliseconds of CONTENDED_FILE_RETRY_DELAYS_MS) {
+    try {
+      await operation();
+      return;
+    } catch (error: unknown) {
+      if (!isContendedFile(error)) {
+        throw error;
+      }
+      await afterDelay(delayMilliseconds);
+    }
+  }
+  await operation();
+}
+
 async function removeTemporaryFile(filePath: string): Promise<void> {
   try {
     await unlink(filePath);
@@ -192,14 +224,14 @@ export class LocalBlobStore implements BlobStore {
   ): Promise<void> {
     if ((await isRegularFile(destination)) && !(await matchesContentAddress(destination, sha256))) {
       const quarantined = `${destination}.corrupt-${randomUUID()}`;
-      await link(destination, quarantined);
+      await retryWhileContended(() => link(destination, quarantined));
       onQuarantine(quarantined);
       if (await matchesContentAddress(quarantined, sha256)) {
         await removeQuarantinedDestination(quarantined);
         onQuarantine(null);
       }
     }
-    await this.publishTemporaryBlob(temporary, destination);
+    await retryWhileContended(() => this.publishTemporaryBlob(temporary, destination));
   }
 
   protected removeTemporaryBlob(filePath: string): Promise<void> {

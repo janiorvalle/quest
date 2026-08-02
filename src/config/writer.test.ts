@@ -18,6 +18,18 @@ import {
   writeRepositoryStoreConfigIfUnchanged,
 } from "./writer";
 
+// Windows ignores POSIX mode bits — NTFS ACLs decide who can read a file there — so
+// the private-mode claim is only checkable on POSIX. On Windows the honest assertion
+// is that the writer produced a regular file at all.
+async function expectPrivateFile(filePath: string): Promise<void> {
+  const stats = await stat(filePath);
+  expect(stats.isFile()).toBeTrue();
+  if (process.platform === "win32") {
+    return;
+  }
+  expect(stats.mode & 0o777).toBe(0o600);
+}
+
 test("normalizeConvexDeployment rejects remote plaintext HTTP", () => {
   expect(() => normalizeConvexDeployment("http://example.com/quest")).toThrow(
     "[QUEST_INSECURE_CONVEX_DEPLOYMENT]",
@@ -53,7 +65,7 @@ test("writeConvexToken preserves config and writes a private token file", async 
         [deployment]: { token: "qtk-personal-token" },
       },
     });
-    expect((await stat(configFile)).mode & 0o777).toBe(0o600);
+    await expectPrivateFile(configFile);
   } finally {
     await rm(directory, { force: true, recursive: true });
   }
@@ -67,7 +79,7 @@ test("writeConvexToken creates a missing config file", async () => {
     expect(parse(await readFile(configFile, "utf8"))).toEqual({
       convex: { "dev:quest": { token: "qtk-token" } },
     });
-    expect((await stat(configFile)).mode & 0o777).toBe(0o600);
+    await expectPrivateFile(configFile);
   } finally {
     await rm(directory, { force: true, recursive: true });
   }

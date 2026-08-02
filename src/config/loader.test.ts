@@ -26,6 +26,13 @@ function textReader(contents: string): ConfigFileReader {
   return () => Promise.resolve(contents);
 }
 
+// A platform module resolves and validates paths with the rules of the platform it
+// is configured for, so a fixture that touches the real filesystem has to describe
+// the host: a darwin-configured module rejects a Windows temporary directory.
+function hostPlatformRootedAt(homeDirectory: string) {
+  return createPlatform({ environment: {}, homeDirectory });
+}
+
 const defaults = {
   identity: "defaults",
   repos: { quest: "defaults" },
@@ -178,7 +185,7 @@ describe("config loading", () => {
 
   test("reads config.toml from the platform config directory with smol-toml", async () => {
     const homeDirectory = await mkdtemp(join(tmpdir(), "quest-config-"));
-    const temporaryPlatform = createPlatform({ environment: {}, homeDirectory });
+    const temporaryPlatform = hostPlatformRootedAt(homeDirectory);
     const expectedConfigFile = join(temporaryPlatform.directories.config, "config.toml");
 
     try {
@@ -247,10 +254,7 @@ deployment = "https://happy-fox-123.convex.cloud"
 
   test("recovers a config left beside the path by an interrupted migration", async () => {
     const homeDirectory = await mkdtemp(join(tmpdir(), "quest-config-recovery-"));
-    const temporaryPlatform = createPlatform({
-      platform: "darwin",
-      homeDirectory,
-    });
+    const temporaryPlatform = hostPlatformRootedAt(homeDirectory);
     const temporaryConfigFile = join(temporaryPlatform.directories.config, "config.toml");
     const recoveryFile = `${temporaryConfigFile}.quest-migration-recovery`;
     try {
@@ -268,10 +272,7 @@ deployment = "https://happy-fox-123.convex.cloud"
 
   test("waits for a config writer lock before recovering an interrupted file", async () => {
     const homeDirectory = await mkdtemp(join(tmpdir(), "quest-config-recovery-lock-"));
-    const temporaryPlatform = createPlatform({
-      platform: "darwin",
-      homeDirectory,
-    });
+    const temporaryPlatform = hostPlatformRootedAt(homeDirectory);
     const temporaryConfigFile = join(temporaryPlatform.directories.config, "config.toml");
     const recoveryFile = `${temporaryConfigFile}.quest-migration-recovery`;
     const lockDirectory = `${temporaryConfigFile}.lock`;
@@ -295,10 +296,7 @@ deployment = "https://happy-fox-123.convex.cloud"
 
   test("reclaims stale config locks before recovering an interrupted file", async () => {
     const homeDirectory = await mkdtemp(join(tmpdir(), "quest-config-recovery-stale-lock-"));
-    const temporaryPlatform = createPlatform({
-      platform: "darwin",
-      homeDirectory,
-    });
+    const temporaryPlatform = hostPlatformRootedAt(homeDirectory);
     const temporaryConfigFile = join(temporaryPlatform.directories.config, "config.toml");
     const recoveryFile = `${temporaryConfigFile}.quest-migration-recovery`;
     const lockDirectory = `${temporaryConfigFile}.lock`;
