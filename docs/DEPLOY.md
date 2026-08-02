@@ -135,17 +135,25 @@ quest join <deployment-url>
 ```
 
 Quest prompts for the invite without echoing it, atomically consumes the
-one-time key, creates Hector's personal key, and writes it to:
+one-time key, creates Hector's personal key, and writes it to the local config.
+It then verifies the key, discovers the repositories hosted by the deployment,
+and writes their routes in the same file:
 
 ```toml
 [convex."<deployment-url>"]
 token = "<personal-key>"
+
+[repos.<repository-name>.store]
+backend = "convex"
+deployment = "<deployment-url>"
 ```
 
 The config file is created with mode `0600`, the personal key is never printed,
-and the command finishes with a `whoami` round-trip. `QUEST_CONVEX_TOKEN`, when
-non-empty, overrides the saved token for normal Convex commands without
-rewriting the file.
+and the command reports which routes it added. Existing routes that point to a
+different store are not overwritten; Quest names each conflict and the config
+block to review. Pass `--no-routing` to opt out when routes are intentionally
+managed by hand. `QUEST_CONVEX_TOKEN`, when non-empty, overrides the saved token
+for normal Convex commands without rewriting the file.
 
 If the local config write fails after the invite is consumed, the member is
 already active. Fix the config permissions, then ask the administrator to run

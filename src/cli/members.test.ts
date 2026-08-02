@@ -34,18 +34,34 @@ function onboarding(): ConvexOnboardingOperations {
     ],
     join: async () => ({ member: "alice", token: "personal-token" }),
     whoami: async () => ({ member: "alice" }),
+    repositories: async () => ["api", "web-app"],
+  };
+}
+
+function configWriter() {
+  return {
+    writeToken: async () => undefined,
+    writeRouting: async (_deployment: string, repositories: readonly string[]) => ({
+      added: repositories,
+      conflicts: [],
+    }),
   };
 }
 
 test("join stores the personal token and reports the whoami round-trip without exposing it", async () => {
   const stdout: string[] = [];
   const writes: Array<{ deployment: string; token: string }> = [];
+  const routeWrites: Array<{ deployment: string; repositories: readonly string[] }> = [];
   const calls: Array<{ deployment: string; token: string }> = [];
   const code = await executeMembersCli({
     config,
     configWriter: {
-      write: async (deployment, token) => {
+      writeToken: async (deployment, token) => {
         writes.push({ deployment, token });
+      },
+      writeRouting: async (deployment, repositories) => {
+        routeWrites.push({ deployment, repositories });
+        return { added: repositories, conflicts: [] };
       },
     },
     environment: {},
@@ -59,13 +75,16 @@ test("join stores the personal token and reports the whoami round-trip without e
     },
     output: createCliOutputBoundary({ stdout: (text) => stdout.push(text) }),
     prompter: { ask: async () => "invite-token" },
-    request: { command: "join", deployment: "https://team.convex.cloud/" },
+    request: { command: "join", deployment: "https://team.convex.cloud/", routing: true },
   });
 
   expect(code).toBe(0);
-  expect(stdout).toEqual(["Connected as alice\n"]);
+  expect(stdout).toEqual(["Connected as alice · routing added: api, web-app\n"]);
   expect(writes).toEqual([{ deployment: "https://team.convex.cloud", token: "personal-token" }]);
   expect(calls).toEqual([{ deployment: "https://team.convex.cloud", token: "invite-token" }]);
+  expect(routeWrites).toEqual([
+    { deployment: "https://team.convex.cloud", repositories: ["api", "web-app"] },
+  ]);
   expect(stdout.join("")).not.toContain("personal-token");
 });
 
@@ -85,7 +104,7 @@ test("join checks token persistence before consuming the invite", async () => {
       },
       output: createCliOutputBoundary(),
       prompter: { ask: async () => "invite-token" },
-      request: { command: "join", deployment: "dev:quest" },
+      request: { command: "join", deployment: "dev:quest", routing: true },
     }),
   ).rejects.toThrow("the invite was not consumed");
   expect(joins).toBe(0);
@@ -95,13 +114,16 @@ test("join write failures point to rotation recovery for the active member", asy
   await expect(
     executeMembersCli({
       config,
-      configWriter: { write: async () => Promise.reject(new Error("read-only config")) },
+      configWriter: {
+        ...configWriter(),
+        writeToken: async () => Promise.reject(new Error("read-only config")),
+      },
       environment: {},
       format: "human",
       onboarding: onboarding(),
       output: createCliOutputBoundary(),
       prompter: { ask: async () => "invite-token" },
-      request: { command: "join", deployment: "dev:quest" },
+      request: { command: "join", deployment: "dev:quest", routing: true },
     }),
   ).rejects.toThrow("quest members rotate alice");
 });
@@ -110,7 +132,7 @@ test("join keeps the saved token when whoami verification fails", async () => {
   const stdout: string[] = [];
   const code = await executeMembersCli({
     config,
-    configWriter: { write: async () => undefined },
+    configWriter: configWriter(),
     environment: {},
     format: "json",
     onboarding: {
@@ -119,16 +141,107 @@ test("join keeps the saved token when whoami verification fails", async () => {
     },
     output: createCliOutputBoundary({ stdout: (text) => stdout.push(text) }),
     prompter: { ask: async () => "invite-token" },
-    request: { command: "join", deployment: "dev:quest" },
+    request: { command: "join", deployment: "dev:quest", routing: true },
   });
 
   expect(code).toBe(0);
   expect(JSON.parse(stdout.join(""))).toMatchObject({
-    data: { connected_as: "alice", deployment: "dev:quest" },
+    data: {
+      connected_as: "alice",
+      deployment: "dev:quest",
+      routing_added: [],
+      routing_skipped: [],
+    },
     warnings: [
       "[QUEST_JOIN_VERIFICATION_FAILED] the personal token was saved, but server verification failed; retry a normal Quest command and do not run quest join again",
     ],
   });
+});
+
+test("join skips conflicting routes with an actionable warning", async () => {
+  const stdout: string[] = [];
+  const code = await executeMembersCli({
+    config,
+    configWriter: {
+      ...configWriter(),
+      writeRouting: async () => ({
+        added: ["api"],
+        conflicts: [{ repository: "web-app", configuredStore: { backend: "sqlite" } }],
+      }),
+    },
+    environment: {},
+    format: "json",
+    onboarding: onboarding(),
+    output: createCliOutputBoundary({ stdout: (text) => stdout.push(text) }),
+    prompter: { ask: async () => "invite-token" },
+    request: { command: "join", deployment: "dev:quest", routing: true },
+  });
+
+  expect(code).toBe(0);
+  expect(JSON.parse(stdout.join(""))).toMatchObject({
+    data: { routing_added: ["api"], routing_skipped: ["web-app"] },
+    warnings: [
+      expect.stringContaining(
+        "[QUEST_JOIN_ROUTE_CONFLICT] routing for web-app was not changed because it already points to local SQLite",
+      ),
+    ],
+  });
+});
+
+test("join conflict warnings quote repository names in the replacement TOML", async () => {
+  const stdout: string[] = [];
+  await executeMembersCli({
+    config,
+    configWriter: {
+      ...configWriter(),
+      writeRouting: async () => ({
+        added: [],
+        conflicts: [{ repository: "platform.api", configuredStore: { backend: "sqlite" } }],
+      }),
+    },
+    environment: {},
+    format: "json",
+    onboarding: onboarding(),
+    output: createCliOutputBoundary({ stdout: (text) => stdout.push(text) }),
+    prompter: { ask: async () => "invite-token" },
+    request: { command: "join", deployment: "dev:quest", routing: true },
+  });
+
+  expect(JSON.parse(stdout.join("")).warnings).toEqual([
+    expect.stringContaining(
+      '[repos."platform.api".store]\nbackend = "convex"\ndeployment = "dev:quest"',
+    ),
+  ]);
+});
+
+test("join --no-routing saves the token without querying repositories", async () => {
+  let repositoryQueries = 0;
+  let routeWrites = 0;
+  await executeMembersCli({
+    config,
+    configWriter: {
+      writeToken: async () => undefined,
+      writeRouting: async () => {
+        routeWrites += 1;
+        return { added: [], conflicts: [] };
+      },
+    },
+    environment: {},
+    format: "human",
+    onboarding: {
+      ...onboarding(),
+      repositories: async () => {
+        repositoryQueries += 1;
+        return ["web-app"];
+      },
+    },
+    output: createCliOutputBoundary({ stdout: () => undefined }),
+    prompter: { ask: async () => "invite-token" },
+    request: { command: "join", deployment: "dev:quest", routing: false },
+  });
+
+  expect(repositoryQueries).toBe(0);
+  expect(routeWrites).toBe(0);
 });
 
 test("admin invite uses the environment secret and returns the one-time token", async () => {
@@ -175,4 +288,15 @@ test("Commander captures member commands without opening a backend", async () =>
     deployment: "dev:quest",
     name: "alice",
   });
+});
+
+test("Commander captures the join routing opt-out", async () => {
+  const requests: unknown[] = [];
+  const command = createQuestCommand(createCliOutputBoundary(), {
+    set: (request) => requests.push(request),
+  });
+
+  await command.parseAsync(["join", "dev:quest", "--no-routing"], { from: "user" });
+
+  expect(requests).toEqual([{ command: "join", deployment: "dev:quest", routing: false }]);
 });

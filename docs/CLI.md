@@ -83,9 +83,12 @@ quest join <deployment-url>
 The invite prompt is hidden. Join consumes the finite-use invite in the same
 Convex mutation that creates the member key, writes the personal key to
 `[convex."<deployment-url>"] token` in `config.toml` with mode `0600`, and
-finishes by calling `whoami`. The personal key is never included in join's
-human or JSON output. A non-empty `QUEST_CONVEX_TOKEN` overrides the saved
-config token.
+finishes by calling `whoami`. After verification, it asks the deployment for
+its repositories and adds a `[repos.<name>.store]` Convex route for each one.
+An existing route to a different store is preserved and reported with the
+exact block to review. Use `--no-routing` only when repository routing will be
+managed manually. The personal key is never included in join's human or JSON
+output. A non-empty `QUEST_CONVEX_TOKEN` overrides the saved config token.
 
 If config persistence fails after join, the invite has already made the member
 active. Fix `config.toml`, then ask the administrator to run

@@ -14,6 +14,7 @@ import {
   verifyRepositoryConfigEntry,
   withConfigLock,
   writeConvexToken,
+  writeHostedRepositoryRoutes,
   writeRepositoryStoreConfig,
   writeRepositoryStoreConfigIfUnchanged,
 } from "./writer";
@@ -100,6 +101,54 @@ test("writeConvexToken serializes concurrent updates and canonicalizes deploymen
         "https://other.convex.cloud": { token: "qtk-two" },
       },
     });
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
+test("writeHostedRepositoryRoutes adds routes atomically and preserves conflicts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "quest-config-writer-join-routing-"));
+  const configFile = join(directory, "config.toml");
+  try {
+    await writeFile(
+      configFile,
+      '[store]\nbackend = "sqlite"\n\n[repos.web-app.store]\nbackend = "sqlite"\n',
+    );
+
+    const result = await writeHostedRepositoryRoutes(
+      configFile,
+      ["web-app", "api", "api"],
+      "dev:quest",
+    );
+
+    expect(result).toEqual({
+      added: ["api"],
+      conflicts: [{ repository: "web-app", configuredStore: { backend: "sqlite" } }],
+    });
+    const parsed = parse(await readFile(configFile, "utf8"));
+    expect(parsed).toMatchObject({
+      repos: {
+        api: { store: { backend: "convex", deployment: "dev:quest" } },
+        "web-app": { store: { backend: "sqlite" } },
+      },
+    });
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
+test("writeHostedRepositoryRoutes keeps matching routes without reporting them as added", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "quest-config-writer-join-existing-"));
+  const configFile = join(directory, "config.toml");
+  try {
+    await writeFile(
+      configFile,
+      '[repos.web-app.store]\nbackend = "convex"\ndeployment = "dev:quest"\n',
+    );
+
+    await expect(
+      writeHostedRepositoryRoutes(configFile, ["web-app"], "dev:quest"),
+    ).resolves.toEqual({ added: [], conflicts: [] });
   } finally {
     await rm(directory, { force: true, recursive: true });
   }

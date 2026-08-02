@@ -61,6 +61,20 @@ export interface RepositoryRoutingSnapshot {
   readonly sourceStore: StoreConfig;
 }
 
+export interface RepositoryRoutingConflict {
+  readonly repository: string;
+  readonly configuredStore: StoreConfig;
+}
+
+export interface HostedRepositoryRoutingResult {
+  readonly added: readonly string[];
+  readonly conflicts: readonly RepositoryRoutingConflict[];
+}
+
+interface HostedRepositoryRoutingUpdate extends HostedRepositoryRoutingResult {
+  readonly repos: TomlTable;
+}
+
 interface ConfigFileVersion {
   readonly dev: bigint;
   readonly ino: bigint;
@@ -512,6 +526,76 @@ export async function writeConvexToken(
   } finally {
     await configLock.release();
   }
+}
+
+export async function writeHostedRepositoryRoutes(
+  configFile: string,
+  repositories: readonly string[],
+  deployment: string,
+): Promise<HostedRepositoryRoutingResult> {
+  if (!isAbsolute(configFile)) {
+    throw new Error(`[CONFIG_WRITE_FAILED] config path must be absolute: ${configFile}`);
+  }
+  const normalizedDeployment = normalizeConvexDeployment(deployment);
+  const normalizedRepositories = [
+    ...new Set(repositories.map((repository) => repository.trim()).filter(Boolean)),
+  ].sort((left, right) => left.localeCompare(right));
+  if (normalizedDeployment === "") {
+    throw new ConfigWriteError("cannot write Convex routing without a deployment URL");
+  }
+
+  return withConfigLock(configFile, async (assertOwner) => {
+    const fileSnapshot = await readTomlFileSnapshot(configFile);
+    const config = fileSnapshot.value;
+    const update = hostedRepositoryRoutingUpdate(
+      config,
+      normalizedRepositories,
+      normalizedDeployment,
+    );
+
+    if (update.added.length > 0) {
+      await writeTomlFileIfCurrent(
+        configFile,
+        { ...config, repos: update.repos },
+        fileSnapshot,
+        assertOwner,
+      );
+    }
+    return { added: update.added, conflicts: update.conflicts };
+  });
+}
+
+function hostedRepositoryRoutingUpdate(
+  config: TomlTable,
+  repositories: readonly string[],
+  deployment: string,
+): HostedRepositoryRoutingUpdate {
+  const parsedConfig = configSchema.parse(config);
+  const currentRepos = isRecord(config["repos"]) ? config["repos"] : {};
+  const added: string[] = [];
+  const conflicts: RepositoryRoutingConflict[] = [];
+  let repos = currentRepos;
+
+  for (const repository of repositories) {
+    const canonicalRepository = resolveTomlRepositoryName(config, repository);
+    const configuredEntry = parsedConfig.repos[canonicalRepository];
+    const configuredStore = typeof configuredEntry === "object" ? configuredEntry.store : undefined;
+    if (configuredStore !== undefined) {
+      if (!storeRoutesMatch(configuredStore, { backend: "convex", deployment })) {
+        conflicts.push({ repository: canonicalRepository, configuredStore });
+      }
+      continue;
+    }
+    repos = {
+      ...repos,
+      [canonicalRepository]: tomlRepositoryEntryWithStore(repos[canonicalRepository], {
+        backend: "convex",
+        deployment,
+      }),
+    };
+    added.push(canonicalRepository);
+  }
+  return { added, conflicts, repos };
 }
 
 function repositoryEntriesMatch(actual: unknown, expected: RepoConfigEntry | undefined): boolean {

@@ -37,8 +37,8 @@ export {
   resolveIdentity,
 } from "./identity";
 export {
+  type ConvexJoinConfigWriter,
   type ConvexOnboardingOperations,
-  type ConvexTokenWriter,
   createConvexOnboardingOperations,
   type ExecuteMembersCliOptions,
   executeMembersCli,

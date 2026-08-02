@@ -13,6 +13,7 @@ import {
   verifyRepositoryConfigEntry,
   verifyRepositoryRoute,
   writeConvexToken,
+  writeHostedRepositoryRoutes,
   writeRepositoryStoreConfigIfUnchanged,
 } from "../config";
 import { cleanupStaleEvidenceMaterializations, createLocalEvidenceFileReader } from "../evidence";
@@ -902,7 +903,9 @@ function createCliDependencies(input: {
     environment,
     onboarding: createConvexOnboardingOperations(),
     configWriter: {
-      write: (deployment, token) => writeConvexToken(configFile, deployment, token),
+      writeToken: (deployment, token) => writeConvexToken(configFile, deployment, token),
+      writeRouting: (deployment, repositories) =>
+        writeHostedRepositoryRoutes(configFile, repositories, deployment),
     },
     evidenceFiles: createLocalEvidenceFileReader(),
     initialWorkingDirectory,
