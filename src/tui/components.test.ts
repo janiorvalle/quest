@@ -5,6 +5,7 @@ import type { QuestLogDetail, QuestLogEventEntry, QuestLogItem } from "../servic
 import {
   blockedStatusText,
   buildDetailLayout,
+  laneConflictLinesFor,
   laneMarkerFor,
   pullRequestGlyphColor,
   sessionAttributionText,
@@ -134,6 +135,7 @@ describe("detail pane layout", () => {
       "lease expires at 2026-08-01T01:41:00.000Z",
     );
     expect(layout.descriptionBodyRows).toBe(layout.descriptionLines.length);
+    expect(layout.laneConflictLines).toEqual([]);
     expect(layout.usedRows).toBeLessThan(32);
   });
 
@@ -211,15 +213,88 @@ describe("plan list annotations", () => {
   test("labels a blocked row with its nearest blocker", () => {
     expect(blockedStatusText(blocked)).toBe("○ blocked 87");
     expect(blockedStatusText(dispatchable)).toBeNull();
+    expect(blockedStatusText({ ...blocked, blockerIds: [87, 94, 95] })).toBe("○ blocked 87 +2");
   });
 
-  test("marks only adjacent plan-lane rows", () => {
-    expect(laneMarkerFor(0, items, sharedFiles)).toEqual({ edge: "start", label: "same lane" });
+  test("marks adjacent plan-lane rows with the kind and partner ids", () => {
+    expect(laneMarkerFor(0, items, sharedFiles)).toEqual({
+      edge: "start",
+      label: "shared files",
+      partnerIds: [93],
+    });
     expect(laneMarkerFor(1, items, sharedFiles)).toEqual({
       edge: "end",
       label: "shared files",
+      partnerIds: [87],
     });
     expect(laneMarkerFor(0, [dispatchable, { ...blocked, id: 101 }], sharedFiles)).toBeNull();
+  });
+
+  test("keeps every non-adjacent partner in the detail conflict line", () => {
+    const denseClusters = [
+      {
+        area: null,
+        files: ["TODO_TRACKER.md"],
+        heuristic: false,
+        kind: "shared_files",
+        quest_ids: [165, 169],
+      },
+      {
+        area: null,
+        files: ["TODO_TRACKER.md"],
+        heuristic: false,
+        kind: "shared_files",
+        quest_ids: [165, 170],
+      },
+      {
+        area: null,
+        files: ["tests/journeys/README.md"],
+        heuristic: false,
+        kind: "shared_files",
+        quest_ids: [165, 171],
+      },
+    ] as const;
+    const line = "conflicts: 169, 170 via TODO_TRACKER.md; 171 via tests/journeys/README.md";
+
+    expect(
+      laneMarkerFor(
+        0,
+        [
+          { ...item, computedState: "dispatchable", id: 165 },
+          { ...item, computedState: "dispatchable", id: 166 },
+          { ...item, computedState: "dispatchable", id: 167 },
+          { ...item, computedState: "dispatchable", id: 168 },
+          { ...item, computedState: "dispatchable", id: 169 },
+          { ...item, computedState: "dispatchable", id: 170 },
+          { ...item, computedState: "dispatchable", id: 171 },
+        ],
+        denseClusters,
+      ),
+    ).toBeNull();
+    expect(laneConflictLinesFor(165, denseClusters, 120)).toEqual([line]);
+
+    const layout = buildDetailLayout(
+      { ...item, computedState: "dispatchable", id: 165 },
+      detail,
+      120,
+      32,
+      DENSE_THEME,
+      denseClusters,
+    );
+    expect(layout.laneConflictLines.map((entry) => entry.text)).toEqual([line]);
+
+    for (const rowBudget of [8, 9, 10]) {
+      expect(
+        buildDetailLayout(
+          { ...item, computedState: "dispatchable", id: 165 },
+          detail,
+          40,
+          rowBudget,
+          DENSE_THEME,
+          denseClusters,
+        ).usedRows,
+      ).toBeLessThanOrEqual(rowBudget);
+    }
   });
 });
 
