@@ -23,6 +23,7 @@ import {
   type CliApplicationPorts,
   type FutureTuiContext,
   type FutureTuiLauncher,
+  type QuestCliDependencies,
   runQuestCli,
 } from "./program";
 
@@ -85,6 +86,7 @@ function harness(options: {
   readonly isTty?: boolean;
   readonly launchTui?: FutureTuiLauncher;
   readonly onboarding?: ConvexOnboardingOperations;
+  readonly openBackend?: QuestCliDependencies["openBackend"];
   readonly openApplicationPorts?: () => Promise<CliApplicationPorts>;
   readonly probe?: StoreCompatibilityProbe;
   readonly viewer?: EvidenceOpener;
@@ -106,6 +108,7 @@ function harness(options: {
     ...(options.launchTui === undefined ? {} : { launchTui: options.launchTui }),
     ...(options.onboarding === undefined ? {} : { onboarding: options.onboarding }),
     locateGitRoot: () => Promise.resolve(questWorkingDirectory),
+    ...(options.openBackend === undefined ? {} : { openBackend: options.openBackend }),
     openApplicationPorts:
       options.openApplicationPorts ??
       (() => Promise.reject(new Error("backend must not open for this command"))),
@@ -299,6 +302,73 @@ describe("Commander CLI wiring", () => {
       expect(stderr).toEqual([]);
     } finally {
       store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("closes the selected backend after viewer and list commands", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-cli-backend-close-"));
+    const stores: ReturnType<typeof createSqliteStore>[] = [];
+    const keepAliveTimers: ReturnType<typeof setInterval>[] = [];
+    const events: string[] = [];
+    const routedConfig = {
+      ...config,
+      repos: {
+        "other-app": {
+          store: { backend: "sqlite" },
+        },
+      },
+    } satisfies Config;
+    let opened = 0;
+    const openBackend: NonNullable<QuestCliDependencies["openBackend"]> = () => {
+      const id = opened;
+      opened += 1;
+      const store = createSqliteStore(join(directory, `quest-${id}.db`));
+      const keepAlive = setInterval(() => undefined, 60_000);
+      stores.push(store);
+      keepAliveTimers.push(keepAlive);
+      return Promise.resolve({
+        clock,
+        close: async () => {
+          events.push(`close:${id}`);
+          clearInterval(keepAlive);
+          store.close();
+        },
+        compatibilityProbe: compatibilityProbe(),
+        openApplicationPorts: () =>
+          Promise.resolve({
+            blobStore: new LocalBlobStore(join(directory, `evidence-${id}`)),
+            clock,
+            questStore: store,
+          }),
+      });
+    };
+
+    try {
+      const viewer = harness({
+        config: routedConfig,
+        isTty: true,
+        launchTui: async () => {
+          events.push("viewer-finished");
+        },
+        openBackend,
+        viewer: { openEvidence: () => Promise.resolve(), openUrl: () => Promise.resolve() },
+      });
+      expect(await runQuestCli(["--repo", "other-app"], viewer.dependencies)).toBe(EXIT_SUCCESS);
+      expect(events).toEqual(["viewer-finished", "close:0"]);
+
+      const list = harness({ config: routedConfig, openBackend });
+      expect(await runQuestCli(["--repo", "other-app", "list"], list.dependencies)).toBe(
+        EXIT_SUCCESS,
+      );
+      expect(events).toEqual(["viewer-finished", "close:0", "close:1"]);
+    } finally {
+      for (const store of stores) {
+        store.close();
+      }
+      for (const timer of keepAliveTimers) {
+        clearInterval(timer);
+      }
       await rm(directory, { force: true, recursive: true });
     }
   });

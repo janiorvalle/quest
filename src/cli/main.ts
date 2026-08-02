@@ -262,6 +262,9 @@ function createFederatedBackend(
   };
   return {
     clock: handles[0]?.ports.clock ?? createSystemClock(),
+    close: async () => {
+      await Promise.all(handles.map((handle) => closeBackend(handle.ports)));
+    },
     compatibilityProbe,
     openApplicationPorts: async () => {
       const applications = await Promise.all(

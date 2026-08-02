@@ -197,6 +197,7 @@ export type FutureTuiLauncher = (context: FutureTuiContext) => Promise<void>;
 
 interface CliBackendRuntime {
   readonly clock: Clock;
+  readonly close?: (() => Promise<void>) | undefined;
   readonly compatibilityProbe: StoreCompatibilityProbe;
   readonly doctor?: DoctorOperations | undefined;
   readonly openApplicationPorts: () => Promise<CliApplicationPorts>;
@@ -665,6 +666,14 @@ async function resolveMaintenanceScope(
   }
 }
 
+async function closeBackend(backend: Pick<CliBackendRuntime, "close">): Promise<void> {
+  try {
+    await backend.close?.();
+  } catch {
+    // Cleanup cannot replace the command result after a remote mutation may have committed.
+  }
+}
+
 async function openRequestBackend(
   dependencies: QuestCliDependencies,
   request: QuestCliRequest | undefined,
@@ -683,23 +692,27 @@ async function executeVersionRequest(
   dependencies: QuestCliDependencies,
 ): Promise<ExitCode> {
   const backend = await openDefaultBackend(dependencies);
-  const storeSchemaVersion = await requireCompatibleStore(backend.compatibilityProbe);
-  if (flags.format === "json") {
-    const report = buildQuestReport(versionDataSchema, {
-      command: "version",
-      generated_at: await backend.clock.now(),
-      filters: {},
-      warnings: [],
-      data: {
-        version: dependencies.applicationVersion,
-        store_schema_version: storeSchemaVersion,
-      },
-    });
-    dependencies.output.write(formatQuestReport(report));
-  } else {
-    dependencies.output.write(`quest ${dependencies.applicationVersion}\n`);
+  try {
+    const storeSchemaVersion = await requireCompatibleStore(backend.compatibilityProbe);
+    if (flags.format === "json") {
+      const report = buildQuestReport(versionDataSchema, {
+        command: "version",
+        generated_at: await backend.clock.now(),
+        filters: {},
+        warnings: [],
+        data: {
+          version: dependencies.applicationVersion,
+          store_schema_version: storeSchemaVersion,
+        },
+      });
+      dependencies.output.write(formatQuestReport(report));
+    } else {
+      dependencies.output.write(`quest ${dependencies.applicationVersion}\n`);
+    }
+    return EXIT_SUCCESS;
+  } finally {
+    await closeBackend(backend);
   }
-  return EXIT_SUCCESS;
 }
 
 function executeCompletionsRequest(
@@ -829,7 +842,18 @@ async function executePreScopeRequest(
   }
 
   if (request !== undefined && isDoctorCliRequest(request)) {
-    const backend = await openMaintenanceBackend(dependencies, flags, "doctor");
+    return executeDoctorRequest(flags, dependencies);
+  }
+
+  return undefined;
+}
+
+async function executeDoctorRequest(
+  flags: GlobalCliOptions,
+  dependencies: QuestCliDependencies,
+): Promise<ExitCode> {
+  const backend = await openMaintenanceBackend(dependencies, flags, "doctor");
+  try {
     let compatibility: StoreCompatibilityResult | undefined;
     let compatibilityError: unknown;
     try {
@@ -837,7 +861,7 @@ async function executePreScopeRequest(
     } catch (error: unknown) {
       compatibilityError = error;
     }
-    return executeDoctorCli({
+    return await executeDoctorCli({
       clock: backend.clock,
       compatibility,
       compatibilityError,
@@ -845,9 +869,9 @@ async function executePreScopeRequest(
       format: flags.format,
       output: dependencies.output,
     });
+  } finally {
+    await closeBackend(backend);
   }
-
-  return undefined;
 }
 
 async function executeQuestCli(
@@ -873,18 +897,18 @@ async function executeQuestCli(
   // Resolve identity once after scope detection so Git metadata is read only once per command.
   const resolvedIdentity = await resolveRequestIdentity(request, resolved, dependencies);
   const backend = await openRequestBackend(dependencies, request, resolved.scope);
-  if (!isBackupRecoveryRequest(request)) {
-    await requireCompatibleStore(backend.compatibilityProbe);
-  }
-  const ports = await backend.openApplicationPorts();
-  if (request === undefined) {
-    return executeBareQuestRequest(flags, dependencies, ports, resolved, backend.clock);
-  }
-  if (!isOperationalQuestCliRequest(request)) {
-    throw new Error(`request ${request.command} was not handled before backend dispatch`);
-  }
-  if (request !== undefined) {
-    return CLI_REQUEST_DISPATCH[request.command](
+  try {
+    if (!isBackupRecoveryRequest(request)) {
+      await requireCompatibleStore(backend.compatibilityProbe);
+    }
+    const ports = await backend.openApplicationPorts();
+    if (request === undefined) {
+      return await executeBareQuestRequest(flags, dependencies, ports, resolved, backend.clock);
+    }
+    if (!isOperationalQuestCliRequest(request)) {
+      throw new Error(`request ${request.command} was not handled before backend dispatch`);
+    }
+    return await CLI_REQUEST_DISPATCH[request.command](
       {
         dependencies,
         flags,
@@ -895,8 +919,9 @@ async function executeQuestCli(
       },
       request,
     );
+  } finally {
+    await closeBackend(backend);
   }
-  throw new Error("quest command dispatch received no request");
 }
 
 async function executeBareQuestRequest(
