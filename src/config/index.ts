@@ -15,6 +15,7 @@ export {
 export {
   ConfigWriteError,
   ConvexDeploymentError,
+  type HostedRepositoryRoutingResult,
   normalizeConvexDeployment,
   type RepositoryRoutingSnapshot,
   readRepositoryRoutingSnapshot,
@@ -24,6 +25,7 @@ export {
   verifyRepositoryRoute,
   verifyRepositoryStoreConfig,
   writeConvexToken,
+  writeHostedRepositoryRoutes,
   writeRepositoryStoreConfig,
   writeRepositoryStoreConfigIfUnchanged,
 } from "./writer";

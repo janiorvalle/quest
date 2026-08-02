@@ -1,4 +1,5 @@
 import { type Command, Option } from "commander";
+import { stringify } from "smol-toml";
 import { type JSONType, z } from "zod";
 
 import { normalizeConvexDeployment } from "../config";
@@ -32,6 +33,8 @@ const listDataSchema = z.strictObject({ members: z.array(memberSchema) });
 const joinDataSchema = z.strictObject({
   connected_as: nonEmptyTextSchema,
   deployment: nonEmptyTextSchema,
+  routing_added: z.array(nonEmptyTextSchema),
+  routing_skipped: z.array(nonEmptyTextSchema),
 });
 
 export type MembersCliRequest =
@@ -57,6 +60,7 @@ export type MembersCliRequest =
   | {
       readonly command: "join";
       readonly deployment: string;
+      readonly routing: boolean;
     };
 
 export interface MembersRequestCapture {
@@ -89,15 +93,26 @@ export interface ConvexOnboardingOperations {
     inviteToken: string,
   ) => Promise<{ readonly member: string; readonly token: string }>;
   readonly whoami: (deployment: string, authToken: string) => Promise<{ readonly member: string }>;
+  readonly repositories: (deployment: string, authToken: string) => Promise<readonly string[]>;
 }
 
-export interface ConvexTokenWriter {
-  readonly write: (deployment: string, token: string) => Promise<void>;
+export interface ConvexJoinConfigWriter {
+  readonly writeToken: (deployment: string, token: string) => Promise<void>;
+  readonly writeRouting: (
+    deployment: string,
+    repositories: readonly string[],
+  ) => Promise<{
+    readonly added: readonly string[];
+    readonly conflicts: readonly {
+      readonly repository: string;
+      readonly configuredStore: Config["store"];
+    }[];
+  }>;
 }
 
 export interface ExecuteMembersCliOptions {
   readonly config: Config;
-  readonly configWriter?: ConvexTokenWriter | undefined;
+  readonly configWriter?: ConvexJoinConfigWriter | undefined;
   readonly environment: Readonly<Record<string, string | undefined>>;
   readonly format: CliFormat;
   readonly onboarding?: ConvexOnboardingOperations | undefined;
@@ -161,8 +176,13 @@ export function registerMembersCommands(program: Command, capture: MembersReques
   program
     .command("join <deployment-url>")
     .description("join a Convex deployment with a one-time invite")
-    .action((deployment: string) => {
-      capture.set({ command: "join", deployment: nonEmptyTextSchema.parse(deployment) });
+    .option("--no-routing", "save the member token without adding repository routes")
+    .action(function (this: Command, deployment: string) {
+      capture.set({
+        command: "join",
+        deployment: nonEmptyTextSchema.parse(deployment),
+        routing: this.getOptionValue("routing") !== false,
+      });
     });
 }
 
@@ -252,8 +272,76 @@ function renderMembers(members: readonly ConvexMember[]): string {
   return `${members.map((member) => `${member.name}\t${member.status}\t${member.updated_at}`).join("\n")}\n`;
 }
 
-function renderJoin(member: string): string {
-  return `Connected as ${member}\n`;
+function renderJoin(member: string, routingAdded: readonly string[]): string {
+  const routing = routingAdded.length === 0 ? "" : ` · routing added: ${routingAdded.join(", ")}`;
+  return `Connected as ${member}${routing}\n`;
+}
+
+function describeStore(store: Config["store"]): string {
+  if (store.backend === "sqlite") {
+    return "local SQLite";
+  }
+  return `Convex deployment ${store.deployment ?? store.convex_deployment ?? "with no deployment"}`;
+}
+
+function routingConflictWarning(
+  deployment: string,
+  repository: string,
+  configuredStore: Config["store"],
+): string {
+  const replacement = stringify({
+    repos: { [repository]: { store: { backend: "convex", deployment } } },
+  }).trim();
+  return `[QUEST_JOIN_ROUTE_CONFLICT] routing for ${repository} was not changed because it already points to ${describeStore(configuredStore)}, not ${deployment}; keep the current route, or replace its block in config.toml with:\n${replacement}`;
+}
+
+async function verifyJoinedMember(
+  onboarding: ConvexOnboardingOperations,
+  deployment: string,
+  token: string,
+  fallbackMember: string,
+): Promise<{ readonly member: string; readonly warning?: string }> {
+  try {
+    return { member: (await onboarding.whoami(deployment, token)).member };
+  } catch {
+    return {
+      member: fallbackMember,
+      warning:
+        "[QUEST_JOIN_VERIFICATION_FAILED] the personal token was saved, but server verification failed; retry a normal Quest command and do not run quest join again",
+    };
+  }
+}
+
+async function addJoinRouting(
+  onboarding: ConvexOnboardingOperations,
+  writer: ConvexJoinConfigWriter,
+  deployment: string,
+  token: string,
+): Promise<{
+  readonly added: readonly string[];
+  readonly skipped: readonly string[];
+  readonly warnings: readonly string[];
+}> {
+  try {
+    const repositories = await onboarding.repositories(deployment, token);
+    const routing = await writer.writeRouting(deployment, repositories);
+    return {
+      added: routing.added,
+      skipped: routing.conflicts.map((conflict) => conflict.repository),
+      warnings: routing.conflicts.map((conflict) =>
+        routingConflictWarning(deployment, conflict.repository, conflict.configuredStore),
+      ),
+    };
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      added: [],
+      skipped: [],
+      warnings: [
+        `[QUEST_JOIN_ROUTING_FAILED] the personal token was saved and verified, but repository routing was not added: ${detail}. Add [repos.<name>.store] with backend = "convex" and deployment = "${deployment}" to config.toml before running Quest in a clone`,
+      ],
+    };
+  }
 }
 
 async function executeInvite(
@@ -346,29 +434,43 @@ async function executeJoin(
   const onboarding = requireOnboardingOperations(options.onboarding);
   const joined = await onboarding.join(deployment, inviteToken);
   try {
-    await writer.write(deployment, joined.token);
+    await writer.writeToken(deployment, joined.token);
   } catch {
     throw new Error(
       `[QUEST_JOIN_CONFIG_WRITE_FAILED] the invite was consumed but the personal token was not saved; fix config.toml permissions, then ask an administrator to run \`quest members rotate ${joined.member}\` and send the replacement token, or remove and reinvite ${joined.member}`,
     );
   }
-  let verificationWarning: string | undefined;
-  let connectedAs = joined.member;
-  try {
-    connectedAs = (await onboarding.whoami(deployment, joined.token)).member;
-  } catch {
-    verificationWarning =
-      "[QUEST_JOIN_VERIFICATION_FAILED] the personal token was saved, but server verification failed; retry a normal Quest command and do not run quest join again";
-  }
-  const data = joinDataSchema.parse({ connected_as: connectedAs, deployment });
+  const verification = await verifyJoinedMember(
+    onboarding,
+    deployment,
+    joined.token,
+    joined.member,
+  );
+  const routing =
+    verification.warning === undefined && request.routing
+      ? await addJoinRouting(onboarding, writer, deployment, joined.token)
+      : { added: [], skipped: [], warnings: [] };
+  const data = joinDataSchema.parse({
+    connected_as: verification.member,
+    deployment,
+    routing_added: routing.added,
+    routing_skipped: routing.skipped,
+  });
+  const warnings = [
+    ...(verification.warning === undefined ? [] : [verification.warning]),
+    ...routing.warnings,
+  ];
   if (options.format === "json") {
-    report(options, "join", data, verificationWarning === undefined ? [] : [verificationWarning]);
+    report(options, "join", data, warnings);
   } else {
     options.output.write(
-      verificationWarning === undefined
-        ? renderJoin(data.connected_as)
+      verification.warning === undefined
+        ? renderJoin(data.connected_as, data.routing_added)
         : `Connected as ${data.connected_as}; token saved, but server verification failed. Retry a normal Quest command; do not run quest join again.\n`,
     );
+    for (const warning of routing.warnings) {
+      options.output.write(`${warning}\n`);
+    }
   }
   return EXIT_SUCCESS;
 }
@@ -429,5 +531,13 @@ export function createConvexOnboardingOperations(): ConvexOnboardingOperations {
       createConvexHttpClient(deployment).mutation(convexApi.whoami, {
         auth_token: authToken,
       }),
+    repositories: async (deployment, authToken) => {
+      const stats = await createConvexHttpClient(deployment).query(convexApi.stats, {
+        auth_token: authToken,
+        lease_cutoff: new Date().toISOString(),
+        scope: { repo: null },
+      });
+      return stats.repos.map((repository) => repository.repo);
+    },
   };
 }

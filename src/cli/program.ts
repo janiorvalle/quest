@@ -69,8 +69,8 @@ import {
   registerLifecycleCommands,
 } from "./lifecycle";
 import {
+  type ConvexJoinConfigWriter,
   type ConvexOnboardingOperations,
-  type ConvexTokenWriter,
   executeMembersCli,
   isMembersCliRequest,
   type MembersCliRequest,
@@ -198,7 +198,7 @@ export interface QuestCliDependencies {
   readonly close?: (() => Promise<void>) | undefined;
   readonly compatibilityProbe: StoreCompatibilityProbe;
   readonly config: Config;
-  readonly configWriter?: ConvexTokenWriter | undefined;
+  readonly configWriter?: ConvexJoinConfigWriter | undefined;
   readonly doctor?: DoctorOperations | undefined;
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly evidenceFiles: EvidenceFileReader;

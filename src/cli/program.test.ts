@@ -205,6 +205,7 @@ describe("Commander CLI wiring", () => {
       },
       join: async () => ({ member: "alice", token: "member-token" }),
       whoami: async () => ({ member: "alice" }),
+      repositories: async () => [],
     };
     const { dependencies, stdout } = harness({
       config: scopedConfig,
