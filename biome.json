@@ -1,0 +1,40 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "files": { "includes": ["**", "!convex/_generated", "!.convex"] },
+  "formatter": { "enabled": true, "indentStyle": "space", "lineWidth": 100 },
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "suspicious": {
+        "noExplicitAny": "error",
+        "noConsole": "error"
+      },
+      "style": {
+        "noNonNullAssertion": "error",
+        "useConst": "error",
+        "useImportType": "error",
+        "noParameterAssign": "error"
+      },
+      "correctness": {
+        "noUnusedVariables": "error",
+        "noUnusedImports": "error",
+        "useExhaustiveDependencies": "error"
+      },
+      "complexity": { "noExcessiveCognitiveComplexity": "error" }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["src/output/errors.ts"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noConsole": { "level": "error", "options": { "allow": ["error"] } }
+          }
+        }
+      }
+    }
+  ]
+}

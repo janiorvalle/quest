@@ -1,0 +1,12 @@
+pre-commit:
+  parallel: true
+  commands:
+    biome:
+      run: bunx biome check --write --staged --no-errors-on-unmatched
+      stage_fixed: true          # auto-fix format/organize, re-stage, still fail on real lint errors
+    typecheck:
+      run: bunx tsc --noEmit    # whole project — cheap at this size, catches cross-file breaks
+pre-push:
+  commands:
+    test:
+      run: bun test

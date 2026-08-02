@@ -1,0 +1,448 @@
+import type { Event, Quest, QuestScope, QuestStatus } from "../schema";
+import type { QuestStore, WatchSubscription } from "../store";
+import { showQuestDetail } from "./query";
+
+export type QuestLogScope = "all" | "current";
+
+export interface QuestLogItem {
+  readonly area: string | null;
+  readonly assignee: string | null;
+  readonly blocked: boolean;
+  readonly description: string;
+  readonly id: number;
+  readonly kind: Quest["kind"];
+  readonly openedBy: string;
+  readonly pr: string | null;
+  readonly predictedFiles: readonly string[];
+  readonly priority: number;
+  readonly repo: string;
+  readonly status: QuestStatus;
+  readonly title: string;
+  readonly updatedAt: string;
+}
+
+export interface QuestLogSnapshot {
+  readonly currentRepo: string | null;
+  readonly items: readonly QuestLogItem[];
+  readonly loading: boolean;
+  readonly scope: QuestLogScope;
+}
+
+export interface QuestLogScopeSelection {
+  readonly currentRepo: string | null;
+  readonly scope: QuestLogScope;
+}
+
+export interface QuestLogChainRef {
+  readonly assignee: string | null;
+  readonly id: number;
+  readonly status: QuestStatus;
+  readonly title: string;
+}
+
+export interface QuestLogEvidenceEntry {
+  readonly actor: string;
+  readonly filename: string;
+  readonly id: number;
+  readonly kind: string;
+  readonly stage: string;
+}
+
+export interface QuestLogEventEntry {
+  readonly action: string;
+  readonly actor: string;
+  readonly at: string;
+  readonly detailSummary: string | null;
+  readonly id: number;
+}
+
+export interface QuestLogSessionAttribution {
+  readonly effort?: string;
+  readonly guild?: string;
+  readonly model?: string;
+}
+
+export interface QuestLogDetail {
+  readonly duplicateOf: readonly QuestLogChainRef[];
+  readonly events: readonly QuestLogEventEntry[];
+  readonly evidence: readonly QuestLogEvidenceEntry[];
+  readonly questId: number;
+  readonly requiredBy: readonly QuestLogChainRef[];
+  readonly requires: readonly QuestLogChainRef[];
+  readonly sessionAttribution: QuestLogSessionAttribution | null;
+}
+
+export interface QuestLogRuntime {
+  readonly cycleScope: () => Promise<QuestLogScopeSelection>;
+  readonly pollIntervalMs: number;
+  readonly loadDetail: (id: number) => Promise<QuestLogDetail>;
+  readonly openEvidence: (id: number) => Promise<string>;
+  readonly openPr: (url: string) => Promise<string>;
+  readonly start: () => Promise<void>;
+  readonly stop: () => Promise<void>;
+  readonly subscribe: (listener: (snapshot: QuestLogSnapshot) => void) => () => void;
+}
+
+export interface QuestLogRuntimeOptions {
+  readonly initialScope: QuestScope;
+  readonly openEvidence?: (id: number) => Promise<string>;
+  readonly openPr?: (url: string) => Promise<string>;
+  readonly pollIntervalMs?: number;
+  readonly store: QuestStore;
+}
+
+export const EMPTY_QUEST_LOG_SNAPSHOT: QuestLogSnapshot = {
+  currentRepo: null,
+  items: [],
+  loading: true,
+  scope: "all",
+};
+
+function toQuestLogItem(quest: Quest, blockedIds: ReadonlySet<number>): QuestLogItem {
+  return {
+    area: quest.area,
+    assignee: quest.assignee,
+    blocked: blockedIds.has(quest.id),
+    description: quest.description,
+    id: quest.id,
+    kind: quest.kind,
+    openedBy: quest.opened_by,
+    pr: quest.pr,
+    predictedFiles: quest.predicted_files,
+    priority: quest.priority,
+    repo: quest.repo,
+    status: quest.status,
+    title: quest.title,
+    updatedAt: quest.updated_at,
+  };
+}
+
+function detailValue(value: unknown): string {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return JSON.stringify(value) ?? String(value);
+}
+
+export function summarizeEventDetail(detail: unknown): string | null {
+  if (detail === null || detail === undefined) {
+    return null;
+  }
+  if (typeof detail !== "object" || Array.isArray(detail)) {
+    return detailValue(detail);
+  }
+  const summary = Object.entries(detail)
+    .slice(0, 2)
+    .map(([key, value]) => `${key.replaceAll("_", " ")} ${detailValue(value)}`)
+    .join(" · ");
+  return summary === "" ? null : summary;
+}
+
+function isEventDetailRecord(detail: unknown): detail is Readonly<Record<string, unknown>> {
+  return typeof detail === "object" && detail !== null && !Array.isArray(detail);
+}
+
+function eventDetailRecord(detail: unknown): Readonly<Record<string, unknown>> | null {
+  return isEventDetailRecord(detail) ? detail : null;
+}
+
+function nonEmptyEventText(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.trim() === "") {
+    return undefined;
+  }
+  return value.trim();
+}
+
+function sessionAttributionFromEvent(event: Event): QuestLogSessionAttribution | null {
+  if (event.action !== "accept" && event.action !== "turnin") {
+    return null;
+  }
+  const detail = eventDetailRecord(event.detail);
+  if (detail === null) {
+    return null;
+  }
+  const effort = nonEmptyEventText(detail["session_effort"]);
+  const guild = nonEmptyEventText(detail["session_guild"]);
+  const model = nonEmptyEventText(detail["session_model"]);
+  const attribution: QuestLogSessionAttribution = {
+    ...(effort === undefined ? {} : { effort }),
+    ...(guild === undefined ? {} : { guild }),
+    ...(model === undefined ? {} : { model }),
+  };
+  return Object.keys(attribution).length === 0 ? null : attribution;
+}
+
+function latestSessionAttribution(events: readonly Event[]): QuestLogSessionAttribution | null {
+  for (const event of [...events].sort((left, right) => right.id - left.id)) {
+    const attribution = sessionAttributionFromEvent(event);
+    if (attribution !== null) {
+      return attribution;
+    }
+  }
+  return null;
+}
+
+function filterForScope(scope: QuestLogScope, currentRepo: string | null) {
+  return scope === "current" && currentRepo !== null ? { repo: currentRepo } : {};
+}
+
+function nextScopeRepository(
+  scope: QuestLogScope,
+  currentRepo: string | null,
+  repositories: readonly string[],
+): string | null {
+  if (scope === "all") {
+    return repositories[0] ?? null;
+  }
+  if (currentRepo === null) {
+    return null;
+  }
+  const currentIndex = repositories.indexOf(currentRepo);
+  return currentIndex < 0 ? null : (repositories[currentIndex + 1] ?? null);
+}
+
+function toChainRef(reference: {
+  readonly assignee: string | null;
+  readonly id: number;
+  readonly status: QuestStatus;
+  readonly title: string;
+}): QuestLogChainRef {
+  return {
+    assignee: reference.assignee,
+    id: reference.id,
+    status: reference.status,
+    title: reference.title,
+  };
+}
+
+export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLogRuntime {
+  let currentRepo = options.initialScope.repo;
+  let scope: QuestLogScope = currentRepo === null ? "all" : "current";
+  let quests: readonly Quest[] = [];
+  let blockedIds: ReadonlySet<number> = new Set();
+  let loading = true;
+  let generation = 0;
+  let generationSequence = 0;
+  let subscriptions: readonly WatchSubscription[] = [];
+  let scopeTransitions: Promise<void> = Promise.resolve();
+  const pendingActions = new Set<Promise<void>>();
+  const retiredSubscriptions = new Set<WatchSubscription>();
+  const listeners = new Set<(snapshot: QuestLogSnapshot) => void>();
+
+  const enqueueScopeTransition = <Result>(operation: () => Promise<Result>): Promise<Result> => {
+    const transition = scopeTransitions.then(operation);
+    scopeTransitions = transition.then(
+      () => undefined,
+      () => undefined,
+    );
+    return transition;
+  };
+
+  const snapshot = (): QuestLogSnapshot => ({
+    currentRepo,
+    items: quests.map((quest) => toQuestLogItem(quest, blockedIds)),
+    loading,
+    scope,
+  });
+
+  const emit = (): void => {
+    const value = snapshot();
+    for (const listener of listeners) {
+      listener(value);
+    }
+  };
+
+  const disposeSubscriptions = async (
+    subscriptionsToDispose: readonly WatchSubscription[],
+  ): Promise<readonly WatchSubscription[]> => {
+    const failures: WatchSubscription[] = [];
+    await Promise.all(
+      subscriptionsToDispose.map(async (subscription) => {
+        try {
+          await subscription.unsubscribe();
+          retiredSubscriptions.delete(subscription);
+        } catch {
+          retiredSubscriptions.add(subscription);
+          failures.push(subscription);
+        }
+      }),
+    );
+    return failures;
+  };
+
+  const unsubscribeCurrent = async (): Promise<void> => {
+    const current = new Set([...subscriptions, ...retiredSubscriptions]);
+    subscriptions = [];
+    const failures = await disposeSubscriptions([...current]);
+    if (failures.length === 0) {
+      return;
+    }
+    const remaining = await disposeSubscriptions(failures);
+    if (remaining.length > 0) {
+      throw new Error("quest log could not stop its live subscriptions; retry shutdown");
+    }
+  };
+
+  const subscribeToScope = async (
+    targetScope: QuestLogScope = scope,
+    targetRepo: string | null = currentRepo,
+  ): Promise<void> => {
+    const activeGeneration = ++generationSequence;
+    const filter = filterForScope(targetScope, targetRepo);
+    let nextQuests: readonly Quest[] = [];
+    let nextBlockedIds: ReadonlySet<number> = new Set();
+    let nextLoading = true;
+    const nextSubscriptions: WatchSubscription[] = [];
+    try {
+      nextSubscriptions.push(
+        await options.store.watch(filter, (watchedQuests) => {
+          nextQuests = watchedQuests;
+          nextLoading = false;
+          if (activeGeneration !== generation) {
+            return;
+          }
+          quests = nextQuests;
+          loading = false;
+          emit();
+        }),
+      );
+      nextSubscriptions.push(
+        await options.store.watch({ ...filter, blocked: true }, (blockedQuests) => {
+          nextBlockedIds = new Set(blockedQuests.map((quest) => quest.id));
+          if (activeGeneration !== generation) {
+            return;
+          }
+          blockedIds = nextBlockedIds;
+          emit();
+        }),
+      );
+    } catch (error) {
+      await disposeSubscriptions(nextSubscriptions);
+      throw error;
+    }
+
+    const previousSubscriptions = subscriptions;
+    generation = activeGeneration;
+    currentRepo = targetRepo;
+    scope = targetScope;
+    subscriptions = nextSubscriptions;
+    quests = nextQuests;
+    blockedIds = nextBlockedIds;
+    loading = nextLoading;
+    emit();
+    await disposeSubscriptions(previousSubscriptions);
+  };
+
+  const knownRepositories = async (): Promise<readonly string[]> => {
+    const stats = await options.store.stats({ repo: null });
+    const repositories = new Set(stats.repos.map((repository) => repository.repo));
+    if (currentRepo !== null) {
+      repositories.add(currentRepo);
+    }
+    return [...repositories].sort((left, right) => left.localeCompare(right));
+  };
+
+  const currentSelection = (): QuestLogScopeSelection => ({ currentRepo, scope });
+
+  const cycleScope = (): Promise<QuestLogScopeSelection> =>
+    enqueueScopeTransition(async () => {
+      const repositories = await knownRepositories();
+      const nextRepo = nextScopeRepository(scope, currentRepo, repositories);
+      const nextScope: QuestLogScope = nextRepo === null ? "all" : "current";
+
+      if (nextScope === scope && nextRepo === currentRepo) {
+        return currentSelection();
+      }
+
+      await subscribeToScope(nextScope, nextRepo);
+      return currentSelection();
+    });
+
+  const start = (): Promise<void> => enqueueScopeTransition(() => subscribeToScope());
+
+  const loadDetail = async (id: number): Promise<QuestLogDetail> => {
+    const [detail, events] = await Promise.all([
+      showQuestDetail(options.store, { repo: null }, id),
+      options.store.events(id),
+    ]);
+    const orderedEvents = [...events].sort((left, right) => right.id - left.id);
+    return {
+      duplicateOf: detail.chain_position.duplicate_of.map(toChainRef),
+      events: orderedEvents.map((event) => ({
+        action: event.action,
+        actor: event.actor,
+        at: event.at,
+        detailSummary: summarizeEventDetail(event.detail),
+        id: event.id,
+      })),
+      evidence: detail.evidence.map((item) => ({
+        actor: item.added_by,
+        filename: item.filename,
+        id: item.id,
+        kind: item.kind,
+        stage: item.stage,
+      })),
+      questId: id,
+      requiredBy: detail.chain_position.required_by.map(toChainRef),
+      requires: detail.chain_position.requires.map(toChainRef),
+      sessionAttribution: latestSessionAttribution(orderedEvents),
+    };
+  };
+
+  const openEvidence = (id: number): Promise<string> => {
+    const action = (async () => {
+      if (options.openEvidence === undefined) {
+        return `Quest ${id} evidence opening is not available`;
+      }
+      return await options.openEvidence(id);
+    })();
+    const completion = action.then(
+      () => undefined,
+      () => undefined,
+    );
+    pendingActions.add(completion);
+    void completion.then(() => {
+      pendingActions.delete(completion);
+    });
+    return action;
+  };
+
+  const openPr = (url: string): Promise<string> => {
+    const action = (async () => {
+      if (options.openPr === undefined) {
+        return "PR opening is not available";
+      }
+      return await options.openPr(url);
+    })();
+    const completion = action.then(
+      () => undefined,
+      () => undefined,
+    );
+    pendingActions.add(completion);
+    void completion.then(() => {
+      pendingActions.delete(completion);
+    });
+    return action;
+  };
+
+  return {
+    cycleScope,
+    pollIntervalMs: options.pollIntervalMs ?? 250,
+    loadDetail,
+    openEvidence,
+    openPr,
+    start,
+    stop: async () => {
+      await Promise.all([scopeTransitions, ...pendingActions]);
+      generation = ++generationSequence;
+      await unsubscribeCurrent();
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      listener(snapshot());
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}

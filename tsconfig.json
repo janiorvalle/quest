@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    // Strictness — all of it
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "allowUnusedLabels": false,
+    "allowUnreachableCode": false,
+
+    // Module hygiene (Bun executes TS directly; tsc is check-only)
+    "noEmit": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "moduleResolution": "bundler",
+    "module": "esnext",
+    "target": "esnext",
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/react",
+    "types": ["bun"],
+
+    // Pragmatics
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}

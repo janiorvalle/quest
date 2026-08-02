@@ -1,0 +1,30 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`quest.report/v1 envelope builds and serializes a schema-validated report 1`] = `
+{
+  "command": "list",
+  "data": {
+    "quests": [
+      {
+        "id": 10,
+        "title": "Output layer: envelopes + tables",
+      },
+    ],
+    "total": 1,
+  },
+  "filters": {
+    "repo": "quest",
+    "status": "ready",
+  },
+  "generated_at": "2026-07-29T12:34:56Z",
+  "schema": "quest.report/v1",
+  "warnings": [
+    "quest 12 skipped: blocked by 11",
+  ],
+}
+`;
+
+exports[`quest.report/v1 envelope builds and serializes a schema-validated report 2`] = `
+"{"schema":"quest.report/v1","command":"list","generated_at":"2026-07-29T12:34:56Z","filters":{"repo":"quest","status":"ready"},"warnings":["quest 12 skipped: blocked by 11"],"data":{"quests":[{"id":10,"title":"Output layer: envelopes + tables"}],"total":1}}
+"
+`;

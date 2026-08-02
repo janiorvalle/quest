@@ -1,0 +1,4 @@
+interface:
+  display_name: "Quest"
+  short_description: "Operate Quest safely from coding agents"
+  default_prompt: "Use $quest to manage this work through the Quest CLI."
