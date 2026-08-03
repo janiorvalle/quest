@@ -2157,7 +2157,7 @@ interface SupportExecutable {
   readonly path: string | null;
 }
 
-const MINIMUM_QUEST_CLI_VERSION = "0.7.0";
+const MINIMUM_QUEST_CLI_VERSION = "0.15.0";
 const MINIMUM_GUARDED_CLAUDE_VERSION = "2.1.169";
 const MINIMUM_GUARDED_CODEX_VERSION = "0.144.6";
 const questVersionReportSchema = z.object({

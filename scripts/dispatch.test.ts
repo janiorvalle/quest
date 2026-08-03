@@ -1249,7 +1249,7 @@ model = "gpt-5-slow"
           stderr: "",
           stdout: JSON.stringify({
             command: "version",
-            data: { version: "0.7.0" },
+            data: { version: "0.15.0" },
             schema: "quest.report/v1",
           }),
         };
@@ -1281,9 +1281,9 @@ model = "gpt-5-slow"
             }
           : { exitCode: 0, stderr: "", stdout: "" },
       ),
-    ).rejects.toThrow("upgrade Quest CLI to >=0.7.0");
+    ).rejects.toThrow("upgrade Quest CLI to >=0.15.0");
 
-    for (const version of ["0.7.0-alpha", "0.7.0garbage"]) {
+    for (const version of ["0.15.0-alpha", "0.15.0garbage"]) {
       await expect(
         requireQuestCliCompatibility("/opt/bin/quest", "/tmp/repo", async (spec) =>
           spec.args.includes("--version")
@@ -1298,7 +1298,7 @@ model = "gpt-5-slow"
               }
             : { exitCode: 0, stderr: "", stdout: "" },
         ),
-      ).rejects.toThrow("upgrade Quest CLI to >=0.7.0");
+      ).rejects.toThrow("upgrade Quest CLI to >=0.15.0");
     }
   });
 
