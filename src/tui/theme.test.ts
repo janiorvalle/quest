@@ -145,6 +145,16 @@ describe("tavern theme", () => {
     expect(TAVERN_THEME.priorityInk).toEqual({ 1: "#ff8000", 2: "#2f8be6", 3: "#1eff00" });
   });
 
+  test("gives every state a mark of its own", () => {
+    const glyphs = [
+      ...Object.values(TAVERN_THEME.status).map((status) => status.glyph),
+      TAVERN_THEME.blockedStatus.glyph,
+    ];
+    // ready and blocked share ! on purpose — same quest, dimmed because you cannot take it yet.
+    const distinct = glyphs.filter((glyph) => glyph !== "!");
+    expect(new Set(distinct).size).toBe(distinct.length);
+  });
+
   test("every status glyph occupies exactly one terminal cell", () => {
     const glyphs = [
       ...Object.values(TAVERN_THEME.status).map((status) => status.glyph),

@@ -217,7 +217,9 @@ export const TAVERN_THEME: QuestTheme = {
   status: {
     accepted: { color: "#e8b04a", glyph: "⚔", label: "active" },
     complete: { color: "#a08a5f", glyph: "✓", label: "complete" },
-    dropped: { color: "#8a7d68", glyph: "✕", label: "dropped" },
+    // ⊘ rather than dense's ✕: at terminal sizes a text-presentation ⚔ reads as a small crossed x,
+    // and two states must never share a mark.
+    dropped: { color: "#8a7d68", glyph: "⊘", label: "dropped" },
     open: { color: "#c9973f", glyph: "○", label: "open" },
     ready: { color: "#ffd100", glyph: "!", label: "ready" },
     turned_in: { color: "#ffd100", glyph: "?", label: "review" },
