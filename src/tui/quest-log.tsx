@@ -32,6 +32,7 @@ import {
   questThemeAfter,
 } from "./theme";
 import { QuestThemeContext, useQuestTheme } from "./theme-context";
+import { createThemeSaver } from "./theme-saver";
 import type { ViewerTheme } from "./theme-selection";
 
 function areaTabs(items: readonly QuestLogItem[]): readonly (string | null)[] {
@@ -265,9 +266,8 @@ function savedThemeNotice(theme: QuestTheme): string {
   return `Theme: ${theme.name} (saved as default)`;
 }
 
-function unsavedThemeNotice(theme: QuestTheme, error: unknown): string {
-  const detail = error instanceof Error ? error.message : String(error);
-  return `Theme: ${theme.name} (not saved: ${detail})`;
+function unsavedThemeNotice(theme: QuestTheme, reason: string): string {
+  return `Theme: ${theme.name} (not saved: ${reason})`;
 }
 
 export function QuestLogApp({
@@ -299,6 +299,19 @@ export function QuestLogApp({
   const interactionRef = useRef(INITIAL_QUEST_LOG_INTERACTION);
   const themeRef = useRef(theme);
   themeRef.current = theme;
+  const requestThemeSave = useMemo(
+    () =>
+      createThemeSaver({
+        onFailed: (saved, reason) => {
+          setNotice(unsavedThemeNotice(saved, reason));
+        },
+        onSaved: (saved) => {
+          setNotice(savedThemeNotice(saved));
+        },
+        save: viewerTheme.save,
+      }),
+    [viewerTheme.save],
+  );
 
   useEffect(() => runtime.subscribe(setSnapshot), [runtime]);
 
@@ -409,20 +422,7 @@ export function QuestLogApp({
         themeRef.current = next;
         setTheme(next);
         setNotice(`Theme: ${next.name}`);
-        // A later press wins the notice line; a settled save must not overwrite it.
-        const stillCurrent = () => themeRef.current.name === next.name;
-        viewerTheme.save(next.name).then(
-          () => {
-            if (stillCurrent()) {
-              setNotice(savedThemeNotice(next));
-            }
-          },
-          (error: unknown) => {
-            if (stillCurrent()) {
-              setNotice(unsavedThemeNotice(next, error));
-            }
-          },
-        );
+        requestThemeSave(next);
         return;
       }
       case "notice":
