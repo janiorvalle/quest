@@ -168,6 +168,8 @@ quest add [title]                 File a new quest (interactive prompts, or flag
                                   creating; prints candidates, --force to override.
                                   Blocked-by-duplicates exits 1 (domain outcome,
                                   same class as claim conflict; ruled 2026-07-29).
+                                  Descriptions use short blank-line-separated sections,
+                                  never one prose paragraph.
     --status <s> --verdict <v>    Backfill flags for migrating historical items
                                   (state recorded as-is; event log notes backfill).
     --predicted-files <p>...      Files the fix will likely touch; feeds `next`'s

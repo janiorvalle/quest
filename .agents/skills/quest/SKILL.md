@@ -208,14 +208,35 @@ new owner's handoff instead of writing to the quest.
 
 ## Intake
 
+Write quest descriptions for the pane and brief, never as a prose wall. Use
+short sections separated by blank lines: a one-or-two-sentence mission, a
+`THE WORK` bullet list, `FENCES` for constraints, and `DoD` for observable
+finish conditions. Hard rule: never file a single-paragraph mega-description.
+
+Good:
+
+```text
+Mission: Keep quest descriptions scannable in the pane.
+
+THE WORK:
+- Add the authoring rule to the skill.
+- Add the matching CLI note.
+
+FENCES:
+- Docs only.
+
+DoD:
+- A fresh filing follows this shape.
+```
+
+Bad: `Rewrite the whole description as one long paragraph that mixes the
+mission, work, constraints, and finish conditions together.`
+
 File non-interactively and include predicted files:
 
 ```bash
-quest --format json add "Short title" \
-  --kind task \
-  --area <area> \
-  --desc "Concrete problem and expected result" \
-  --predicted-files <path>...
+printf '%s' '{"title":"Short title","kind":"task","area":"<area>","description":"Mission: State the problem and expected result.\n\nTHE WORK:\n- Name the concrete work.\n\nFENCES:\n- Name constraints.\n\nDoD:\n- Name the observable finish condition.","predicted_files":["<path>"]}' |
+  quest --format json add --json -
 ```
 
 Tasks start `ready`; bugs start `open`. `add` performs fuzzy duplicate
@@ -235,9 +256,9 @@ add [title] [--kind bug|task] [--area a] [--desc text] [--guild guild]
 For long descriptions or other shell-hostile text, prefer the JSON transport:
 
 ```bash
-printf '%s' '{"title":"A quest","description":"line one\nline two"}' |
+printf '%s' '{"title":"A quest","description":"Mission: State the problem.\n\nTHE WORK:\n- Name the work.\n\nFENCES:\n- Name constraints.\n\nDoD:\n- Name the finish condition."}' |
   quest --format json add --json -
-printf '%s' '{"description":"updated\nwith quotes: \"ok\""}' |
+printf '%s' '{"description":"Mission: Update the problem.\n\nTHE WORK:\n- Name the updated work.\n\nFENCES:\n- Name updated constraints.\n\nDoD:\n- Name the updated finish condition."}' |
   quest --format json update <id> --json -
 ```
 
