@@ -670,17 +670,6 @@ const DETAIL_FOOTER_ROWS = 1;
 const FILE_LABEL = "files       ";
 const FILE_INDENT = " ".repeat(FILE_LABEL.length);
 
-function appendEllipsis(value: string, width: number): string {
-  if (width <= 0) {
-    return "";
-  }
-  const trimmed = value.trimEnd();
-  if (stringWidth(trimmed) + stringWidth(ELLIPSIS) <= width) {
-    return `${trimmed}${ELLIPSIS}`;
-  }
-  return `${takeDisplayWidth(trimmed, width - stringWidth(ELLIPSIS))}${ELLIPSIS}`;
-}
-
 function appendLongWord(lines: string[], word: string, width: number): string {
   let remaining = word;
   while (stringWidth(remaining) > width) {
@@ -743,26 +732,6 @@ export function wrapText(value: string, width: number): readonly string[] {
     .replaceAll("\r\n", "\n")
     .split("\n")
     .flatMap((paragraph) => wrapParagraph(paragraph, width));
-}
-
-function truncateWrappedLines(
-  lines: readonly string[],
-  limit: number,
-  width: number,
-): readonly string[] {
-  if (limit <= 0) {
-    return [];
-  }
-  if (lines.length <= limit) {
-    return lines;
-  }
-  const visible = lines.slice(0, limit);
-  const last = visible[visible.length - 1];
-  if (last === undefined) {
-    return [];
-  }
-  visible[visible.length - 1] = appendEllipsis(last, width);
-  return visible;
 }
 
 interface DetailTextLine {
@@ -914,18 +883,60 @@ function fileBlocks(paths: readonly string[], width: number): readonly DetailFil
 }
 
 export interface DetailEvidenceRow {
+  readonly continuation: boolean;
   readonly entry: QuestLogEvidenceEntry | null;
+  readonly indent: string;
+  readonly key: string;
   readonly kind: "entry" | "empty" | "loading" | "marker";
+  readonly text: string | null;
 }
 
-function detailEvidenceRows(detail: QuestLogDetail | null): readonly DetailEvidenceRow[] {
+function detailEvidenceRows(
+  detail: QuestLogDetail | null,
+  width: number,
+  theme: QuestTheme,
+): readonly DetailEvidenceRow[] {
   if (detail === null) {
-    return [{ entry: null, kind: "loading" }];
+    return [
+      {
+        continuation: false,
+        entry: null,
+        indent: "",
+        key: "evidence:loading",
+        kind: "loading",
+        text: "loading detail…",
+      },
+    ];
   }
   if (detail.evidence.length === 0) {
-    return [{ entry: null, kind: "empty" }];
+    return [
+      {
+        continuation: false,
+        entry: null,
+        indent: "",
+        key: "evidence:empty",
+        kind: "empty",
+        text: null,
+      },
+    ];
   }
-  return detail.evidence.map((entry) => ({ entry, kind: "entry" }));
+  return detail.evidence.flatMap((entry) => {
+    const complete = entry.stage === "fix" || entry.stage === "verify";
+    const glyph = complete ? theme.glyphs.evidenceComplete : theme.glyphs.evidencePending;
+    const prefix = `${glyph} `;
+    const lines = wrapText(
+      `${entry.filename} ${entry.stage} · ${entry.actor}`,
+      Math.max(1, width - stringWidth(prefix)),
+    );
+    return lines.map((text, index) => ({
+      continuation: index > 0,
+      entry,
+      indent: " ".repeat(stringWidth(prefix)),
+      key: `evidence:${entry.id}:${index}`,
+      kind: "entry" as const,
+      text,
+    }));
+  });
 }
 
 export interface DetailChainRow {
@@ -1037,18 +1048,13 @@ function activityPlaceholder(kind: "loading" | "empty"): DetailActivityRow {
   };
 }
 
-function activityBase(
-  event: QuestLogEventEntry,
-  width: number,
-): {
+function activityBase(event: QuestLogEventEntry): {
   readonly label: string;
   readonly timestamp: string;
 } {
-  const timestamp = fit(detailTime(event.at), Math.max(1, width));
-  const labelWidth = Math.max(0, width - stringWidth(timestamp) - 1);
   return {
-    label: labelWidth === 0 ? "" : fit(`${event.action} ${event.actor}`, labelWidth),
-    timestamp,
+    label: `${event.action} ${event.actor}`,
+    timestamp: detailTime(event.at),
   };
 }
 
@@ -1057,9 +1063,12 @@ function eventRows(
   width: number,
   includeDetails: boolean,
 ): readonly DetailActivityRow[] {
-  const base = activityBase(event, width);
+  const base = activityBase(event);
+  const labelWidth = Math.max(1, width - stringWidth(base.timestamp) - 1);
+  const labelLines = wrapText(base.label, labelWidth);
+  const firstLabel = labelLines[0] ?? "";
   const baseWidth =
-    stringWidth(base.timestamp) + (base.label === "" ? 0 : stringWidth(base.label) + 1);
+    stringWidth(base.timestamp) + (firstLabel === "" ? 0 : stringWidth(firstLabel) + 1);
   const detailWidth = Math.max(0, width - baseWidth - 3);
   const firstRow: DetailActivityRow = {
     continuation: false,
@@ -1069,10 +1078,41 @@ function eventRows(
     indent: "",
     kind: "event",
     key: `event-${event.id}-0`,
-    label: base.label,
+    label: firstLabel,
     placeholder: null,
     timestamp: base.timestamp,
   };
+  if (labelLines.length > 1) {
+    const indentLength = Math.min(Math.max(0, width - 1), stringWidth(base.timestamp) + 1);
+    const labelContinuationRows = labelLines.slice(1).map((label, index) => ({
+      ...firstRow,
+      continuation: true,
+      detail: label,
+      detailWidth: labelWidth,
+      indent: " ".repeat(indentLength),
+      key: `event-${event.id}-label-${index + 1}`,
+      label: "",
+      timestamp: "",
+    }));
+    const detailLines =
+      includeDetails && event.detailSummary !== null
+        ? wrapText(event.detailSummary, Math.max(1, width - indentLength))
+        : [];
+    return [
+      firstRow,
+      ...labelContinuationRows,
+      ...detailLines.map((detail, index) => ({
+        ...firstRow,
+        continuation: true,
+        detail,
+        detailWidth: Math.max(1, width - indentLength),
+        indent: " ".repeat(indentLength),
+        key: `event-${event.id}-detail-${index + 1}`,
+        label: "",
+        timestamp: "",
+      })),
+    ];
+  }
   if (!includeDetails || event.detailSummary === null) {
     return [firstRow];
   }
@@ -1128,32 +1168,6 @@ function detailActivityRows(
   return detail.events.flatMap((event) => eventRows(event, width, includeDetails));
 }
 
-function detailRowsForLayout(
-  laneConflictRows: number,
-  showFiles: boolean,
-  fileBlockRows: number,
-  showEvidence: boolean,
-  evidenceRows: number,
-  showChain: boolean,
-  chainRows: number,
-  showActivity: boolean,
-  activityRows: number,
-  showFooter: boolean,
-  descriptionBodyRows: number,
-): number {
-  return (
-    DETAIL_HEADER_ROWS +
-    laneConflictRows +
-    (showFiles ? fileBlockRows : 0) +
-    1 +
-    descriptionBodyRows +
-    (showEvidence ? 1 + evidenceRows : 0) +
-    (showChain ? 1 + chainRows : 0) +
-    (showActivity ? 1 + activityRows : 0) +
-    (showFooter ? DETAIL_FOOTER_ROWS : 0)
-  );
-}
-
 export interface DetailPaneLayout {
   readonly activityRows: readonly DetailActivityRow[];
   readonly chainRows: readonly DetailChainRow[];
@@ -1172,241 +1186,6 @@ export interface DetailPaneLayout {
   readonly usedRows: number;
 }
 
-interface DetailLayoutState {
-  currentActivityRows: readonly DetailActivityRow[];
-  currentChainBlocks: readonly DetailChainBlock[];
-  currentEvidenceRows: readonly DetailEvidenceRow[];
-  currentFileBlocks: readonly DetailFileBlock[];
-  currentLaneConflictLines: readonly DetailTextLine[];
-  laneConflictWidth: number;
-  showActivity: boolean;
-  showChain: boolean;
-  showEvidence: boolean;
-  showFiles: boolean;
-  showFooter: boolean;
-}
-
-function detailRowsForState(state: DetailLayoutState, descriptionBodyRows: number): number {
-  return detailRowsForLayout(
-    state.currentLaneConflictLines.length,
-    state.showFiles,
-    state.currentFileBlocks.reduce((total, block) => total + block.lines.length, 0),
-    state.showEvidence,
-    state.currentEvidenceRows.length,
-    state.showChain,
-    state.currentChainBlocks.reduce((total, block) => total + block.rows.length, 0),
-    state.showActivity,
-    state.currentActivityRows.length,
-    state.showFooter,
-    descriptionBodyRows,
-  );
-}
-
-function reduceFooter(state: DetailLayoutState): boolean {
-  if (!state.showFooter) {
-    return false;
-  }
-  state.showFooter = false;
-  return true;
-}
-
-function reduceActivityDetails(
-  state: DetailLayoutState,
-  compactActivityRows: readonly DetailActivityRow[],
-): boolean {
-  if (state.currentActivityRows.length <= compactActivityRows.length) {
-    return false;
-  }
-  for (let index = state.currentActivityRows.length - 1; index >= 0; index -= 1) {
-    if (state.currentActivityRows[index]?.continuation !== true) {
-      continue;
-    }
-    const previous = state.currentActivityRows[index - 1];
-    if (previous === undefined) {
-      return false;
-    }
-    state.currentActivityRows = [
-      ...state.currentActivityRows.slice(0, index - 1),
-      {
-        ...previous,
-        detail: appendEllipsis(previous.detail ?? "", previous.detailWidth),
-      },
-      ...state.currentActivityRows.slice(index + 1),
-    ];
-    return true;
-  }
-  return false;
-}
-
-function reduceActivityRows(state: DetailLayoutState): boolean {
-  if (!state.showActivity || state.currentActivityRows.length <= 1) {
-    return false;
-  }
-  state.currentActivityRows = state.currentActivityRows.slice(0, -1);
-  return true;
-}
-
-function reduceActivitySection(state: DetailLayoutState): boolean {
-  if (!state.showActivity) {
-    return false;
-  }
-  state.showActivity = false;
-  return true;
-}
-
-function reduceLaneConflictLines(state: DetailLayoutState): boolean {
-  if (state.currentLaneConflictLines.length === 0) {
-    return false;
-  }
-  if (state.currentLaneConflictLines.length === 1) {
-    state.currentLaneConflictLines = [];
-    return true;
-  }
-  const retained = state.currentLaneConflictLines.slice(0, -1);
-  const last = retained.at(-1);
-  if (last === undefined) {
-    return false;
-  }
-  state.currentLaneConflictLines = [
-    ...retained.slice(0, -1),
-    {
-      ...last,
-      text: appendEllipsis(last.text, state.laneConflictWidth),
-    },
-  ];
-  return true;
-}
-
-function reduceChainRows(state: DetailLayoutState): boolean {
-  if (!state.showChain || state.currentChainBlocks.length === 0) {
-    return false;
-  }
-  const lastIndex = state.currentChainBlocks.length - 1;
-  const last = state.currentChainBlocks[lastIndex];
-  if (last === undefined) {
-    return false;
-  }
-  if (last.rows.length > 1) {
-    const first = last.rows[0];
-    if (first === undefined) {
-      return false;
-    }
-    state.currentChainBlocks = [
-      ...state.currentChainBlocks.slice(0, lastIndex),
-      {
-        ...last,
-        rows: [
-          {
-            ...first,
-            body: appendEllipsis(first.body, last.bodyWidth),
-            key: `${first.key}:truncated`,
-          },
-        ],
-      },
-    ];
-    return true;
-  }
-  if (state.currentChainBlocks.length <= 1) {
-    return false;
-  }
-  state.currentChainBlocks = state.currentChainBlocks.slice(0, -1);
-  return true;
-}
-
-function reduceChainSection(state: DetailLayoutState): boolean {
-  if (!state.showChain) {
-    return false;
-  }
-  state.showChain = false;
-  return true;
-}
-
-function reduceEvidenceRows(state: DetailLayoutState): boolean {
-  if (!state.showEvidence || state.currentEvidenceRows.length <= 1) {
-    return false;
-  }
-  state.currentEvidenceRows = state.currentEvidenceRows.slice(0, -1);
-  return true;
-}
-
-function reduceEvidenceSection(state: DetailLayoutState): boolean {
-  if (!state.showEvidence) {
-    return false;
-  }
-  state.showEvidence = false;
-  return true;
-}
-
-function reduceFileBlocks(state: DetailLayoutState): boolean {
-  if (!state.showFiles || state.currentFileBlocks.length === 0) {
-    return false;
-  }
-  const lastIndex = state.currentFileBlocks.length - 1;
-  const last = state.currentFileBlocks[lastIndex];
-  if (last === undefined) {
-    return false;
-  }
-  if (last.lines.length > 1) {
-    const first = last.lines[0];
-    if (first === undefined) {
-      return false;
-    }
-    state.currentFileBlocks = [
-      ...state.currentFileBlocks.slice(0, lastIndex),
-      {
-        ...last,
-        lines: [
-          { ...first, key: `${first.key}:truncated`, text: fit(`${first.text}…`, last.width) },
-        ],
-      },
-    ];
-    return true;
-  }
-  if (state.currentFileBlocks.length <= 1) {
-    return false;
-  }
-  state.currentFileBlocks = state.currentFileBlocks.slice(0, -1);
-  return true;
-}
-
-function reduceFileSection(state: DetailLayoutState): boolean {
-  if (!state.showFiles) {
-    return false;
-  }
-  state.showFiles = false;
-  return true;
-}
-
-function reduceDetailLayout(
-  state: DetailLayoutState,
-  compactActivityRows: readonly DetailActivityRow[],
-  descriptionRows: number,
-  rowBudget: number,
-): void {
-  const reductions: readonly (() => boolean)[] = [
-    () => reduceFooter(state),
-    () => reduceActivityDetails(state, compactActivityRows),
-    () => reduceChainRows(state),
-    () => reduceChainSection(state),
-    () => reduceEvidenceRows(state),
-    () => reduceEvidenceSection(state),
-    () => reduceFileBlocks(state),
-    () => reduceFileSection(state),
-    () => reduceActivityRows(state),
-    () => reduceActivitySection(state),
-    () => reduceLaneConflictLines(state),
-  ];
-  let reductionIndex = 0;
-  while (
-    detailRowsForState(state, descriptionRows) > rowBudget &&
-    reductionIndex < reductions.length
-  ) {
-    if (!reductions[reductionIndex]?.()) {
-      reductionIndex += 1;
-    }
-  }
-}
-
 export function buildDetailLayout(
   item: QuestLogItem,
   detail: QuestLogDetail | null,
@@ -1422,76 +1201,217 @@ export function buildDetailLayout(
     laneConflictLinesFor(item.id, laneClusters, width),
     "lane-conflict",
   );
-  const headerRows = Math.min(DETAIL_HEADER_ROWS, rowBudget);
-  if (rowBudget < DETAIL_HEADER_ROWS + 2) {
-    const showDescription = rowBudget > headerRows;
-    const descriptionBodyRows = Math.max(0, rowBudget - headerRows - (showDescription ? 1 : 0));
-    return {
-      activityRows: [],
-      chainRows: [],
-      descriptionBodyRows,
-      descriptionLines: keyedTextLines(
-        truncateWrappedLines(description, descriptionBodyRows, width),
-        "description",
-      ),
-      evidenceRows: [],
-      fileBlocks: [],
-      headerRows,
-      laneConflictLines: [],
-      showActivity: false,
-      showChain: false,
-      showDescription,
-      showEvidence: false,
-      showFiles: false,
-      showFooter: false,
-      usedRows: headerRows + (showDescription ? 1 + descriptionBodyRows : 0),
-    };
-  }
   const naturalFileBlocks = fileBlocks(item.predictedFiles, width);
-  const naturalEvidenceRows = detailEvidenceRows(detail);
+  const naturalEvidenceRows = detailEvidenceRows(detail, width, theme);
   const naturalChainBlocks = detailChainBlocks(theme, item, detail, width);
   const fullActivityRows = detailActivityRows(detail, width, true);
-  const compactActivityRows = detailActivityRows(detail, width, false);
-
-  const state: DetailLayoutState = {
-    currentActivityRows: fullActivityRows,
-    currentChainBlocks: naturalChainBlocks,
-    currentEvidenceRows: naturalEvidenceRows,
-    currentFileBlocks: naturalFileBlocks,
-    currentLaneConflictLines: naturalLaneConflictLines,
-    laneConflictWidth: width,
-    showActivity: true,
-    showChain: naturalChainBlocks.length > 0,
-    showEvidence: true,
-    showFiles: naturalFileBlocks.length > 0,
-    showFooter: true,
-  };
-  reduceDetailLayout(state, compactActivityRows, description.length, rowBudget);
-
-  const staticRows = detailRowsForState(state, 0);
-  const descriptionBodyRows = Math.min(description.length, Math.max(1, rowBudget - staticRows));
-  const descriptionLines = keyedTextLines(
-    truncateWrappedLines(description, descriptionBodyRows, width),
-    "description",
-  );
-  const usedRows = detailRowsForState(state, descriptionBodyRows);
+  const showChain = naturalChainBlocks.length > 0;
+  const showFiles = naturalFileBlocks.length > 0;
+  const headerRows = Math.min(DETAIL_HEADER_ROWS, rowBudget);
+  const showFooter = rowBudget >= DETAIL_HEADER_ROWS + 2;
+  const descriptionLines = keyedTextLines(description, "description");
+  const chainRows = flattenChainBlocks(naturalChainBlocks);
+  const fileRows = naturalFileBlocks.reduce((total, block) => total + block.lines.length, 0);
+  const bodyRows =
+    naturalLaneConflictLines.length +
+    (showFiles ? fileRows : 0) +
+    1 +
+    descriptionLines.length +
+    1 +
+    naturalEvidenceRows.length +
+    (showChain ? 1 + chainRows.length : 0) +
+    1 +
+    fullActivityRows.length;
   return {
-    activityRows: state.showActivity ? state.currentActivityRows : [],
-    chainRows: state.showChain ? flattenChainBlocks(state.currentChainBlocks) : [],
-    descriptionBodyRows,
+    activityRows: fullActivityRows,
+    chainRows,
+    descriptionBodyRows: descriptionLines.length,
     descriptionLines,
-    evidenceRows: state.showEvidence ? state.currentEvidenceRows : [],
-    fileBlocks: state.showFiles ? state.currentFileBlocks : [],
+    evidenceRows: naturalEvidenceRows,
+    fileBlocks: naturalFileBlocks,
     headerRows,
-    laneConflictLines: state.currentLaneConflictLines,
-    showActivity: state.showActivity,
-    showChain: state.showChain,
+    laneConflictLines: naturalLaneConflictLines,
+    showActivity: true,
+    showChain,
     showDescription: true,
-    showEvidence: state.showEvidence,
-    showFiles: state.showFiles,
-    showFooter: state.showFooter,
-    usedRows,
+    showEvidence: true,
+    showFiles,
+    showFooter,
+    usedRows: headerRows + bodyRows + (showFooter ? DETAIL_FOOTER_ROWS : 0),
   };
+}
+
+export type DetailDocumentSection = "activity" | "chain" | "description" | "evidence";
+
+export type DetailDocumentLine =
+  | { readonly key: string; readonly kind: "activity"; readonly row: DetailActivityRow }
+  | { readonly key: string; readonly kind: "chain"; readonly row: DetailChainRow }
+  | { readonly key: string; readonly kind: "description"; readonly text: string }
+  | {
+      readonly count: number;
+      readonly key: string;
+      readonly kind: "section";
+      readonly section: "evidence";
+    }
+  | {
+      readonly key: string;
+      readonly kind: "section";
+      readonly section: Exclude<DetailDocumentSection, "evidence">;
+    }
+  | { readonly key: string; readonly kind: "evidence"; readonly row: DetailEvidenceRow }
+  | { readonly key: string; readonly kind: "file"; readonly text: string }
+  | { readonly key: string; readonly kind: "lane-conflict"; readonly text: string };
+
+export interface DetailPaneDocument {
+  readonly lines: readonly DetailDocumentLine[];
+}
+
+function detailDocumentLinesForLayout(
+  layout: DetailPaneLayout,
+  detail: QuestLogDetail | null,
+): readonly DetailDocumentLine[] {
+  const lines: DetailDocumentLine[] = layout.laneConflictLines.map((line) => ({
+    key: line.key,
+    kind: "lane-conflict",
+    text: line.text,
+  }));
+  if (layout.showFiles) {
+    lines.push(
+      ...layout.fileBlocks.flatMap((block) =>
+        block.lines.map((line) => ({ key: line.key, kind: "file" as const, text: line.text })),
+      ),
+    );
+  }
+  if (layout.showDescription) {
+    lines.push({ key: "section:description", kind: "section", section: "description" });
+    lines.push(
+      ...layout.descriptionLines.map((line) => ({
+        key: line.key,
+        kind: "description" as const,
+        text: line.text,
+      })),
+    );
+  }
+  if (layout.showEvidence) {
+    lines.push({
+      count: detail?.evidence.length ?? 0,
+      key: "section:evidence",
+      kind: "section",
+      section: "evidence",
+    });
+    lines.push(
+      ...layout.evidenceRows.map((row) => ({ key: row.key, kind: "evidence" as const, row })),
+    );
+  }
+  if (layout.showChain) {
+    lines.push({ key: "section:chain", kind: "section", section: "chain" });
+    lines.push(...layout.chainRows.map((row) => ({ key: row.key, kind: "chain" as const, row })));
+  }
+  if (layout.showActivity) {
+    lines.push({ key: "section:activity", kind: "section", section: "activity" });
+    lines.push(
+      ...layout.activityRows.map((row) => ({ key: row.key, kind: "activity" as const, row })),
+    );
+  }
+  return lines;
+}
+
+export function buildDetailDocument(
+  item: QuestLogItem,
+  detail: QuestLogDetail | null,
+  paneWidth: number,
+  theme: QuestTheme = DENSE_THEME,
+  laneClusters: readonly PlanLaneCluster[] = [],
+): DetailPaneDocument {
+  const layout = buildDetailLayout(
+    item,
+    detail,
+    paneWidth,
+    DETAIL_HEADER_ROWS + 2,
+    theme,
+    laneClusters,
+  );
+  return { lines: detailDocumentLinesForLayout(layout, detail) };
+}
+
+export interface DetailPaneScrollMetrics {
+  readonly contentRows: number;
+  readonly headerRows: number;
+  readonly maxOffset: number;
+  readonly showFooter: boolean;
+  readonly viewportRows: number;
+}
+
+export function detailPaneScrollMetrics(
+  item: QuestLogItem,
+  detail: QuestLogDetail | null,
+  paneWidth: number,
+  rows: number,
+  theme: QuestTheme = DENSE_THEME,
+  laneClusters: readonly PlanLaneCluster[] = [],
+): DetailPaneScrollMetrics {
+  const rowBudget = Math.max(1, Math.floor(rows));
+  const headerRows = Math.min(DETAIL_HEADER_ROWS, rowBudget);
+  const showFooter = rowBudget >= DETAIL_HEADER_ROWS + 2;
+  const viewportRows = Math.max(0, rowBudget - headerRows - (showFooter ? 1 : 0));
+  const contentRows = buildDetailDocument(item, detail, paneWidth, theme, laneClusters).lines
+    .length;
+  return {
+    contentRows,
+    headerRows,
+    maxOffset: Math.max(0, contentRows - viewportRows),
+    showFooter,
+    viewportRows,
+  };
+}
+
+function DetailEvidenceRowView({
+  row,
+  theme,
+  width,
+}: {
+  readonly row: DetailEvidenceRow;
+  readonly theme: QuestTheme;
+  readonly width: number;
+}) {
+  if (row.kind === "loading") {
+    return (
+      <text fg={theme.palette.textDim} key={row.key} wrapMode="none">
+        {fit(row.text ?? "loading detail…", width)}
+      </text>
+    );
+  }
+  if (row.kind === "empty") {
+    return (
+      <text fg={theme.palette.textDim} key={row.key} wrapMode="none">
+        {fit(theme.labels.evidenceEmpty, width)}
+      </text>
+    );
+  }
+  if (row.kind === "marker") {
+    return (
+      <text fg={theme.palette.textDim} key={row.key} wrapMode="none">
+        {fit("…", width)}
+      </text>
+    );
+  }
+  const evidence = row.entry;
+  if (evidence === null) {
+    return null;
+  }
+  const complete = evidence.stage === "fix" || evidence.stage === "verify";
+  const glyph = complete ? theme.glyphs.evidenceComplete : theme.glyphs.evidencePending;
+  const prefix = `${glyph} `;
+  return (
+    <text key={row.key} wrapMode="none">
+      {row.continuation ? (
+        <span fg={theme.palette.textDim}>{row.indent}</span>
+      ) : (
+        <span fg={complete ? theme.status.complete.color : theme.palette.warn}>{prefix}</span>
+      )}
+      <span fg={theme.palette.textPrimary}>{row.text ?? ""}</span>
+    </text>
+  );
 }
 
 function DetailEvidence({
@@ -1504,47 +1424,9 @@ function DetailEvidence({
   const theme = useQuestTheme();
   return (
     <box style={{ flexDirection: "column", width: "100%" }}>
-      {rows.map((row) => {
-        if (row.kind === "loading") {
-          return (
-            <text fg={theme.palette.textDim} key="loading" wrapMode="none">
-              {fit("loading detail…", width)}
-            </text>
-          );
-        }
-        if (row.kind === "empty") {
-          return (
-            <text fg={theme.palette.textDim} key="empty" wrapMode="none">
-              {fit(theme.labels.evidenceEmpty, width)}
-            </text>
-          );
-        }
-        if (row.kind === "marker") {
-          return (
-            <text fg={theme.palette.textDim} key="marker" wrapMode="none">
-              {fit("…", width)}
-            </text>
-          );
-        }
-        const evidence = row.entry;
-        if (evidence === null) {
-          return null;
-        }
-        const complete = evidence.stage === "fix" || evidence.stage === "verify";
-        const glyph = complete ? theme.glyphs.evidenceComplete : theme.glyphs.evidencePending;
-        const prefix = `${glyph} `;
-        return (
-          <text key={evidence.id} wrapMode="none">
-            <span fg={complete ? theme.status.complete.color : theme.palette.warn}>{prefix}</span>
-            <span fg={theme.palette.textPrimary}>
-              {fit(
-                `${evidence.filename} ${evidence.stage} · ${evidence.actor}`,
-                Math.max(0, width - stringWidth(prefix)),
-              )}
-            </span>
-          </text>
-        );
-      })}
+      {rows.map((row) => (
+        <DetailEvidenceRowView key={row.key} row={row} theme={theme} width={width} />
+      ))}
     </box>
   );
 }
@@ -1573,20 +1455,6 @@ function DetailActivityRowView({
         <span fg={theme.palette.textDim}>{row.continuation ? row.detail : ` · ${row.detail}`}</span>
       )}
     </text>
-  );
-}
-
-function DetailActivity({ rows }: { readonly rows: readonly DetailActivityRow[] }) {
-  const theme = useQuestTheme();
-  return (
-    <box style={{ flexDirection: "column", width: "100%" }}>
-      <text fg={theme.palette.sectionLabel}>
-        <strong>{theme.labels.activity}</strong>
-      </text>
-      {rows.map((row) => (
-        <DetailActivityRowView key={row.key} row={row} theme={theme} />
-      ))}
-    </box>
   );
 }
 
@@ -1687,18 +1555,104 @@ function DetailHeader({
   return <>{rows.slice(0, headerRows)}</>;
 }
 
+function detailSectionLabel(
+  theme: QuestTheme,
+  section: DetailDocumentSection,
+  count: number | undefined,
+): string {
+  if (section === "description") {
+    return theme.labels.description;
+  }
+  if (section === "evidence") {
+    return `${theme.labels.evidence} · ${count ?? 0}`;
+  }
+  if (section === "chain") {
+    return theme.labels.chain;
+  }
+  return theme.labels.activity;
+}
+
+function DetailDocumentLineView({
+  item,
+  line,
+  paneWidth,
+  theme,
+}: {
+  readonly item: QuestLogItem;
+  readonly line: DetailDocumentLine;
+  readonly paneWidth: number;
+  readonly theme: QuestTheme;
+}) {
+  switch (line.kind) {
+    case "activity":
+      return <DetailActivityRowView row={line.row} theme={theme} />;
+    case "chain":
+      return <DetailChainRowView item={item} row={line.row} theme={theme} />;
+    case "description":
+      return (
+        <text fg={theme.palette.textPrimary} key={line.key} wrapMode="none">
+          {line.text}
+        </text>
+      );
+    case "evidence":
+      return <DetailEvidence rows={[line.row]} width={Math.max(1, paneWidth)} />;
+    case "file":
+      return (
+        <text fg={theme.palette.textMuted} key={line.key} wrapMode="none">
+          {line.text}
+        </text>
+      );
+    case "lane-conflict":
+      return (
+        <text fg={theme.palette.warn} key={line.key} wrapMode="none">
+          {line.text}
+        </text>
+      );
+    case "section":
+      return (
+        <text fg={theme.palette.sectionLabel} key={line.key}>
+          <strong>
+            {detailSectionLabel(
+              theme,
+              line.section,
+              line.section === "evidence" ? line.count : undefined,
+            )}
+          </strong>
+        </text>
+      );
+  }
+}
+
+function detailScrollIndicator(
+  offset: number,
+  viewportRows: number,
+  contentRows: number,
+  theme: QuestTheme,
+): string {
+  const trackLength = 12;
+  const scrollExtent = Math.max(1, Math.round((viewportRows / contentRows) * trackLength));
+  const maxPosition = Math.max(0, trackLength - scrollExtent);
+  const scrollPosition = Math.min(
+    maxPosition,
+    Math.round((offset / Math.max(1, contentRows - viewportRows)) * maxPosition),
+  );
+  return `${theme.glyphs.scrollbarTrack.repeat(scrollPosition)}${theme.glyphs.scrollbarFull.repeat(scrollExtent)}${theme.glyphs.scrollbarTrack.repeat(Math.max(0, trackLength - scrollPosition - scrollExtent))}`;
+}
+
 export function DetailPane({
   detail,
   item,
   laneClusters = [],
   paneWidth,
   rows,
+  scrollOffset = 0,
 }: {
   readonly detail: QuestLogDetail | null;
   readonly item: QuestLogItem | undefined;
   readonly laneClusters?: readonly PlanLaneCluster[];
   readonly paneWidth: number;
   readonly rows: number;
+  readonly scrollOffset?: number;
 }) {
   const theme = useQuestTheme();
   if (item === undefined) {
@@ -1717,7 +1671,17 @@ export function DetailPane({
   }
 
   const status = theme.status[item.status];
-  const layout = buildDetailLayout(item, detail, paneWidth, rows, theme, laneClusters);
+  const document = buildDetailDocument(item, detail, paneWidth, theme, laneClusters);
+  const metrics = detailPaneScrollMetrics(item, detail, paneWidth, rows, theme, laneClusters);
+  const boundedOffset = Math.min(Math.max(0, scrollOffset), metrics.maxOffset);
+  const scrollable = metrics.contentRows > metrics.viewportRows;
+  const visibleLines = scrollable
+    ? document.lines.slice(boundedOffset, boundedOffset + metrics.viewportRows)
+    : document.lines;
+  const bodyRows = scrollable ? metrics.viewportRows : document.lines.length;
+  const footer = scrollable
+    ? `J/K detail · ${detailScrollIndicator(boundedOffset, metrics.viewportRows, metrics.contentRows, theme)} ${boundedOffset + 1}-${Math.min(metrics.contentRows, boundedOffset + metrics.viewportRows)}/${metrics.contentRows} · E open evidence · p open PR · q quit`
+    : "E open evidence · p open PR · q quit";
   return (
     <box
       style={{
@@ -1732,77 +1696,35 @@ export function DetailPane({
     >
       <DetailHeader
         detail={detail}
-        headerRows={layout.headerRows}
+        headerRows={metrics.headerRows}
         item={item}
         paneWidth={paneWidth}
         status={status}
         theme={theme}
       />
-      {layout.laneConflictLines.length === 0 ? null : (
-        <box style={{ flexDirection: "column", width: "100%" }}>
-          {layout.laneConflictLines.map((line) => (
-            <text fg={theme.palette.warn} key={line.key} wrapMode="none">
-              {line.text}
-            </text>
-          ))}
-        </box>
-      )}
-      {layout.showFiles ? (
-        <box style={{ flexDirection: "column", width: "100%" }}>
-          {layout.fileBlocks.map((block) => (
-            <box key={block.key} style={{ flexDirection: "column", width: "100%" }}>
-              {block.lines.map((line) => (
-                <text fg={theme.palette.textMuted} key={line.key} wrapMode="none">
-                  {line.text}
-                </text>
-              ))}
-            </box>
-          ))}
-        </box>
-      ) : null}
-      {layout.showDescription ? (
-        <>
-          <text fg={theme.palette.sectionLabel}>
-            <strong>{theme.labels.description}</strong>
-          </text>
-          <box
-            style={{
-              flexDirection: "column",
-              height: layout.descriptionBodyRows,
-              overflow: "hidden",
-              width: "100%",
-            }}
-          >
-            {layout.descriptionLines.map((line) => (
-              <text fg={theme.palette.textPrimary} key={line.key} wrapMode="none">
-                {line.text}
-              </text>
-            ))}
-          </box>
-        </>
-      ) : null}
-      {layout.showEvidence ? (
-        <box style={{ flexDirection: "column", width: "100%" }}>
-          <text fg={theme.palette.sectionLabel}>
-            <strong>{`${theme.labels.evidence} · ${detail?.evidence.length ?? 0}`}</strong>
-          </text>
-          <DetailEvidence rows={layout.evidenceRows} width={Math.max(1, paneWidth - 2)} />
-        </box>
-      ) : null}
-      {layout.showChain ? (
-        <box style={{ flexDirection: "column", width: "100%" }}>
-          <text fg={theme.palette.sectionLabel}>
-            <strong>{theme.labels.chain}</strong>
-          </text>
-          {layout.chainRows.map((row) => (
-            <DetailChainRowView item={item} key={row.key} row={row} theme={theme} />
+      {bodyRows > 0 ? (
+        <box
+          style={{
+            flexDirection: "column",
+            height: bodyRows,
+            overflow: "hidden",
+            width: "100%",
+          }}
+        >
+          {visibleLines.map((line) => (
+            <DetailDocumentLineView
+              item={item}
+              key={line.key}
+              line={line}
+              paneWidth={Math.max(1, paneWidth - 2)}
+              theme={theme}
+            />
           ))}
         </box>
       ) : null}
-      {layout.showActivity ? <DetailActivity rows={layout.activityRows} /> : null}
-      {layout.showFooter ? (
+      {metrics.showFooter ? (
         <text fg={theme.palette.textDim} wrapMode="none">
-          {fit("E open evidence · p open PR · q quit", Math.max(1, paneWidth - 2))}
+          {fit(footer, Math.max(1, paneWidth - 2))}
         </text>
       ) : null}
     </box>
@@ -1859,6 +1781,7 @@ export function FooterKeymap({
     ...(planAvailable ? [["o", sortMode === "plan" ? "flat" : "plan"] as const] : []),
     ["d", "done"],
     ["j/k", "move"],
+    ["J/K", "detail"],
     ["E", "evidence"],
     ["p", "pr"],
     ["t", "theme"],
