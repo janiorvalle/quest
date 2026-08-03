@@ -26,18 +26,29 @@ export function resolveRepositoryName(config: Config, detectedRepo: string): str
   return resolveRepositoryAlias(config, detectedRepo);
 }
 
+function inheritLeaseTtl(config: Config, store: StoreConfig): StoreConfig {
+  const leaseTtlMinutes = config.store.lease_ttl_minutes;
+  if (store.lease_ttl_minutes !== undefined || leaseTtlMinutes === undefined) {
+    return store;
+  }
+  return { ...store, lease_ttl_minutes: leaseTtlMinutes };
+}
+
 export function resolveRepositoryStore(config: Config, repo: string): StoreConfig {
   const canonicalRepo = resolveRepositoryAlias(config, repo);
   const entry = repoConfigEntry(config, canonicalRepo);
   if (typeof entry === "object" && entry !== null && entry.store !== undefined) {
-    return entry.store;
+    return inheritLeaseTtl(config, entry.store);
   }
 
   return config.store;
 }
 
 export function configuredRepositoryStores(config: Config): readonly StoreConfig[] {
-  return Object.values(config.repos).flatMap((entry) =>
-    typeof entry === "object" && entry.store !== undefined ? [entry.store] : [],
-  );
+  return Object.values(config.repos).flatMap((entry) => {
+    if (typeof entry !== "object" || entry.store === undefined) {
+      return [];
+    }
+    return [inheritLeaseTtl(config, entry.store)];
+  });
 }

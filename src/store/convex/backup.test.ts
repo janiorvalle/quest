@@ -22,12 +22,16 @@ afterEach(async () => {
   );
 });
 
-async function snapshotFile(dump: QuestDump): Promise<{ directory: string; path: string }> {
+async function snapshotContents(contents: unknown): Promise<{ directory: string; path: string }> {
   const directory = await mkdtemp(join(tmpdir(), "quest-convex-backup-"));
   directories.push(directory);
   const path = join(directory, "snapshot.json");
-  await writeFile(path, `${JSON.stringify(dump)}\n`);
+  await writeFile(path, `${JSON.stringify(contents)}\n`);
   return { directory, path };
+}
+
+async function snapshotFile(dump: QuestDump): Promise<{ directory: string; path: string }> {
+  return snapshotContents(dump);
 }
 
 function quest(id: number, repo: string): QuestDump["quests"][number] {
@@ -55,6 +59,32 @@ function quest(id: number, repo: string): QuestDump["quests"][number] {
 }
 
 describe("Convex backup restore", () => {
+  test("normalizes a v6 physical backup before inspection", async () => {
+    const { directory, path } = await snapshotContents({ ...emptyDump, schema_version: 6 });
+    const store = {
+      exportAll: async () => emptyDump,
+      exportAllWithCutoff: async () => ({
+        dump: emptyDump,
+        lease_cutoff: "2026-08-01T00:00:00.000Z",
+      }),
+      beginRestore: async () => "restore-token",
+      recoverMigrationFenceForRestore: async () => false,
+      renewRestore: async () => undefined,
+      activateRestore: async (_token: string, replacement: QuestDump) => replacement,
+      commitRestore: async () => emptyDump,
+      restoreStatus: async () => ({ status: "active" as const }),
+      releaseRestore: async () => undefined,
+      rollbackRestore: async () => undefined,
+    };
+    const backup = new ConvexBackupDatabase(join(directory, "live.json"), store);
+
+    await expect(backup.inspect(path)).resolves.toEqual({
+      dump: emptyDump,
+      integrity_check: ["ok"],
+      schema_version: 6,
+    });
+  });
+
   test("resolves an ambiguous commit before allowing rollback", async () => {
     const { directory, path } = await snapshotFile(emptyDump);
     let commitAttempts = 0;

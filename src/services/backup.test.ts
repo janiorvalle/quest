@@ -4,6 +4,8 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { parse } from "smol-toml";
+
 import type { NewQuest, QuestDump } from "../schema";
 import { backupManifestSchema, newQuestSchema, STORE_SCHEMA_VERSION } from "../schema";
 import {
@@ -121,7 +123,10 @@ describe("local backup service", () => {
     const restoredEvidenceDirectory = join(root, "restored-evidence");
     const configFile = join(root, "config.toml");
     const backupRoot = join(root, "backups");
-    await writeFile(configFile, "");
+    await writeFile(
+      configFile,
+      '[repos.target]\nfuture = "keep"\n\n[repos.target.store]\nbackend = "sqlite"\nfuture_option = "keep"\n',
+    );
     const store = new SqliteStore(databasePath, { now: () => createdAt });
     try {
       const target = await store.addQuest({ ...task("target"), repo: "target" });
@@ -155,6 +160,10 @@ describe("local backup service", () => {
         retention: { daily: 7, weekly: 4, monthly: 6 },
       });
       const run = await backup.run();
+      await writeFile(
+        configFile,
+        '[repos.target]\nfuture = "changed"\n\n[repos.target.store]\nbackend = "sqlite"\nfuture_option = "changed"\n',
+      );
       const repositoryDatabase: BackupDatabase = {
         restoreScope: "repository",
         createSnapshot: (destination) => sqliteDatabase.createSnapshot(destination),
@@ -177,6 +186,14 @@ describe("local backup service", () => {
 
       expect(await restoredBlobs.has(targetHash)).toBeTrue();
       expect(await restoredBlobs.has(unrelatedHash)).toBeFalse();
+      expect(parse(await readFile(configFile, "utf8"))).toEqual({
+        repos: {
+          target: {
+            future: "keep",
+            store: { backend: "sqlite", future_option: "keep" },
+          },
+        },
+      });
     } finally {
       store.close();
       await rm(root, { force: true, recursive: true });

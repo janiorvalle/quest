@@ -10,6 +10,7 @@ import {
   ConfigWriteError,
   ConvexDeploymentError,
   normalizeConvexDeployment,
+  readRepositoryRoutingSnapshot,
   restoreRepositoryConfigEntry,
   restoreRepositoryConfigEntryIfUnchanged,
   verifyRepositoryConfigEntry,
@@ -126,9 +127,8 @@ test("writeViewerTheme replaces the previous theme instead of appending a second
   }
 });
 
-// A released quest parses the config root strictly, so a section it has never heard of fails
-// every command on that binary — not just the viewer. Whatever the viewer saves has to land in a
-// section that already-shipped versions accept.
+// Keep the preference under the established viewer section so related settings remain easy to
+// discover across binary versions.
 test("writeViewerTheme saves into a section older quest versions already accept", async () => {
   const directory = await mkdtemp(join(tmpdir(), "quest-config-writer-theme-section-"));
   const configFile = join(directory, "config.toml");
@@ -262,6 +262,28 @@ describe("repository store config writer", () => {
         },
       });
       expect(config.store.backend).toBe("sqlite");
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("preserves a repository lease TTL when writing a routing block", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-config-writer-lease-ttl-"));
+    const configFile = join(directory, "config.toml");
+    try {
+      await writeRepositoryStoreConfig(configFile, "web-app", {
+        backend: "sqlite",
+        lease_ttl_minutes: 45,
+      });
+
+      const config = await loadConfig({
+        configFile,
+        platform: { directories: testDirectories(directory) },
+        environment: {},
+      });
+      expect(config.repos["web-app"]).toEqual({
+        store: { backend: "sqlite", lease_ttl_minutes: 45 },
+      });
     } finally {
       await rm(directory, { force: true, recursive: true });
     }
@@ -432,6 +454,52 @@ describe("repository store config writer", () => {
       expect(config.repos["web-app"]).toEqual({
         store: { backend: "convex", deployment: "dev:concurrent" },
       });
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("preserves future repository settings during a conditional routing update", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-config-writer-future-keys-"));
+    const configFile = join(directory, "config.toml");
+    try {
+      await writeFile(
+        configFile,
+        '[repos.web-app]\nfuture = "keep"\n\n[repos.web-app.store]\nbackend = "sqlite"\nfuture_option = "keep"\n',
+      );
+      const snapshot = await readRepositoryRoutingSnapshot(configFile, "web-app");
+
+      const written = await writeRepositoryStoreConfigIfUnchanged(
+        configFile,
+        { backend: "convex", deployment: "dev:migration" },
+        snapshot,
+      );
+
+      expect(parse(await readFile(configFile, "utf8"))).toEqual({
+        repos: {
+          "web-app": {
+            future: "keep",
+            store: {
+              backend: "convex",
+              deployment: "dev:migration",
+              future_option: "keep",
+            },
+          },
+        },
+      });
+
+      await writeFile(
+        configFile,
+        '[repos.web-app]\nfuture = "changed"\n\n[repos.web-app.store]\nbackend = "convex"\ndeployment = "dev:migration"\nfuture_option = "changed"\n',
+      );
+      await expect(
+        restoreRepositoryConfigEntryIfUnchanged(
+          configFile,
+          "web-app",
+          written,
+          snapshot.repositoryEntryRaw ?? snapshot.repositoryEntry,
+        ),
+      ).resolves.toBeFalse();
     } finally {
       await rm(directory, { force: true, recursive: true });
     }

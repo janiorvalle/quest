@@ -117,7 +117,7 @@ describe("config schema", () => {
     });
   });
 
-  test("accepts documented user configuration and rejects process customization", () => {
+  test("accepts documented user configuration and strips unknown sections", () => {
     expect(
       configSchema.safeParse({
         identity: "janior",
@@ -139,7 +139,11 @@ describe("config schema", () => {
         backup: { root: "/tmp/backups" },
       }).success,
     ).toBeTrue();
-    expect(configSchema.safeParse({ workflow: { statuses: ["todo"] } }).success).toBeFalse();
+    const unknownSection = configSchema.safeParse({ workflow: { statuses: ["todo"] } });
+    expect(unknownSection.success).toBeTrue();
+    if (unknownSection.success) {
+      expect(unknownSection.data).not.toHaveProperty("workflow");
+    }
   });
 
   test("accepts per-repository backend overrides", () => {
@@ -161,6 +165,16 @@ describe("config schema", () => {
         deployment: "https://happy-fox-123.convex.cloud",
       },
     });
+  });
+
+  test("accepts a lease duration in the existing store section", () => {
+    expect(
+      configSchema.parse({ store: { backend: "sqlite", lease_ttl_minutes: 60 } }).store,
+    ).toEqual({ backend: "sqlite", lease_ttl_minutes: 60 });
+    expect(configSchema.safeParse({ store: { lease_ttl_minutes: 0 } }).success).toBeFalse();
+    expect(
+      configSchema.safeParse({ store: { lease_ttl_minutes: 100_000_001 } }).success,
+    ).toBeFalse();
   });
 
   test("rejects non-record values for object-valued configuration", () => {

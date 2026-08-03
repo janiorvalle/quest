@@ -23,6 +23,7 @@ import type {
 } from "../schema";
 import {
   evidenceSchema,
+  MAX_LEASE_TTL_MINUTES,
   questKindSchema,
   questSchema,
   questStatusSchema,
@@ -54,6 +55,7 @@ const nonEmptyOptionSchema = z.string().trim().min(1);
 const displayIdSchema = z.coerce.number().int().positive();
 const prioritySchema = z.coerce.number().int().min(1).max(3);
 const reopenLimitSchema = z.coerce.number().int().min(1);
+const leaseTtlSchema = z.coerce.number().int().positive().max(MAX_LEASE_TTL_MINUTES);
 const jsonSourceSchema = z.literal("-");
 
 const addJsonInputSchema = z.strictObject({
@@ -171,6 +173,7 @@ interface NextCliRequest {
   readonly brief: boolean;
   readonly claim: boolean;
   readonly command: "next";
+  readonly leaseTtlMinutes?: number | undefined;
   readonly skipAfterReopens?: number | undefined;
 }
 
@@ -178,12 +181,14 @@ interface AcceptCliRequest {
   readonly command: "accept";
   readonly force: boolean;
   readonly id: number;
+  readonly leaseTtlMinutes?: number | undefined;
   readonly owner?: string | undefined;
 }
 
 interface TouchCliRequest {
   readonly command: "touch";
   readonly id: number;
+  readonly leaseTtlMinutes?: number | undefined;
   readonly owner?: string | undefined;
 }
 
@@ -325,6 +330,24 @@ function optionalString(command: Command, name: string): string | undefined {
   return value === undefined ? undefined : nonEmptyOptionSchema.parse(value);
 }
 
+function optionalLeaseTtl(command: Command): number | undefined {
+  const value = command.getOptionValue("lease");
+  if (value === undefined) {
+    return undefined;
+  }
+  const parsed = leaseTtlSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new LifecycleCliUsageError(
+      `--lease expects a positive whole number of minutes no greater than ${MAX_LEASE_TTL_MINUTES}, for example --lease 1440`,
+    );
+  }
+  return parsed.data;
+}
+
+function acceptLeaseOptions(request: AcceptCliRequest): { readonly leaseTtlMinutes?: number } {
+  return request.leaseTtlMinutes === undefined ? {} : { leaseTtlMinutes: request.leaseTtlMinutes };
+}
+
 function optionalText(command: Command, name: string): string | undefined {
   const value = command.getOptionValue(name);
   return value === undefined ? undefined : z.string().parse(value);
@@ -414,6 +437,7 @@ export function registerLifecycleCommands(
     .option("--claim", "atomically accept the suggestion")
     .option("--allow-conflict", "claim despite a hard lane conflict")
     .option("--brief", "include the full context package; requires --claim")
+    .option("--lease <minutes>", "set this claim's lease length in minutes")
     .option(
       "--skip-after-reopens <count>",
       "leave quests reopened this many times or more for a human",
@@ -424,6 +448,7 @@ export function registerLifecycleCommands(
         brief: booleanOption(this, "brief"),
         claim: booleanOption(this, "claim"),
         command: "next",
+        leaseTtlMinutes: optionalLeaseTtl(this),
         skipAfterReopens: reopenLimitSchema
           .optional()
           .parse(optionalString(this, "skipAfterReopens")),
@@ -436,11 +461,13 @@ export function registerLifecycleCommands(
     .argument("<id>")
     .option("--as <owner>")
     .option("--force", "accept despite a mismatched quest guild")
+    .option("--lease <minutes>", "set this claim's lease length in minutes")
     .action(function (this: Command, id: string) {
       capture.set({
         command: "accept",
         force: booleanOption(this, "force"),
         id: idArgument(id),
+        leaseTtlMinutes: optionalLeaseTtl(this),
         owner: optionalString(this, "as"),
       });
     });
@@ -450,8 +477,14 @@ export function registerLifecycleCommands(
     .description("renew the lease on an accepted quest")
     .argument("<id>")
     .option("--as <owner>")
+    .option("--lease <minutes>", "set this touch's lease length in minutes")
     .action(function (this: Command, id: string) {
-      capture.set({ command: "touch", id: idArgument(id), owner: optionalString(this, "as") });
+      capture.set({
+        command: "touch",
+        id: idArgument(id),
+        leaseTtlMinutes: optionalLeaseTtl(this),
+        owner: optionalString(this, "as"),
+      });
     });
 
   program
@@ -959,6 +992,11 @@ function requireBriefClaim(request: NextCliRequest): void {
       "--allow-conflict requires --claim; run `quest next --claim --allow-conflict` to claim work with the override",
     );
   }
+  if (request.leaseTtlMinutes !== undefined && !request.claim) {
+    throw new LifecycleCliUsageError(
+      "--lease requires --claim; run `quest next --claim --lease <minutes>` to claim work with a custom lease",
+    );
+  }
 }
 
 function laneConflictDescription(conflict: NextLaneConflict): string {
@@ -1062,6 +1100,9 @@ async function executeNext(options: ExecuteLifecycleCliOptions): Promise<ExitCod
     {
       allowConflict: request.allowConflict,
       now,
+      ...(request.leaseTtlMinutes === undefined
+        ? {}
+        : { leaseTtlMinutes: request.leaseTtlMinutes }),
       ...(options.isTty && !request.allowConflict
         ? {
             resolveLaneConflict: async (conflicts: readonly NextLaneConflict[]) => {
@@ -1214,6 +1255,7 @@ export async function executeLifecycleCli(options: ExecuteLifecycleCliOptions): 
         request.id,
         mutationActor,
         {
+          ...acceptLeaseOptions(request),
           mode: request.force ? "force" : "normal",
           sessionAttribution,
           sessionGuild,
@@ -1235,6 +1277,7 @@ export async function executeLifecycleCli(options: ExecuteLifecycleCliOptions): 
         mutationActor,
         sessionGuild,
         sessionAttribution,
+        request.leaseTtlMinutes,
       );
       return writeMutationResult(options, request.command, result, `quest ${request.id} touched`);
     }

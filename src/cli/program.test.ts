@@ -609,6 +609,27 @@ describe("Commander CLI wiring", () => {
     ]);
   });
 
+  test("older Convex stores tell the operator to deploy the matching functions", async () => {
+    const { dependencies, stderr } = harness({
+      probe: {
+        check: () =>
+          Promise.resolve({
+            outcome: "store-older" as const,
+            supported_version: 6,
+            store_version: 5,
+            action: "migrate-store" as const,
+          }),
+        olderStoreRemedy:
+          "deploy the matching Convex functions with `bunx convex deploy`, then retry",
+      },
+    });
+
+    expect(await runQuestCli(["--version"], dependencies)).toBe(EXIT_DOMAIN_ERROR);
+    expect(stderr).toEqual([
+      "quest: domain: store schema 5 is older than this binary supports (6); deploy the matching Convex functions with `bunx convex deploy`, then retry",
+    ]);
+  });
+
   test("ordinary commands do not migrate older stores", async () => {
     let migrationCalls = 0;
     const probe: StoreCompatibilityProbe = {

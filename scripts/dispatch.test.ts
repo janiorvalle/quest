@@ -118,6 +118,17 @@ function nextReport(item: Quest | null): string {
   });
 }
 
+function touchReport(item: Quest): string {
+  return JSON.stringify({
+    command: "touch",
+    data: { changed: true, evidence: [], quest: item },
+    filters: { repo: "quest" },
+    generated_at: "2026-07-31T05:00:00Z",
+    schema: "quest.report/v1",
+    warnings: [],
+  });
+}
+
 function showReport(item: Quest, status: Quest["status"] = "turned_in"): string {
   return JSON.stringify({
     command: "show",
@@ -1238,7 +1249,7 @@ model = "gpt-5-slow"
           stderr: "",
           stdout: JSON.stringify({
             command: "version",
-            data: { version: "0.7.0" },
+            data: { version: "0.15.0" },
             schema: "quest.report/v1",
           }),
         };
@@ -1246,7 +1257,7 @@ model = "gpt-5-slow"
       return {
         exitCode: 0,
         stderr: "",
-        stdout: "--claim\n--skip-after-reopens <count>\n",
+        stdout: "--claim\n--lease <minutes>\n--skip-after-reopens <count>\n",
       };
     };
 
@@ -1270,9 +1281,9 @@ model = "gpt-5-slow"
             }
           : { exitCode: 0, stderr: "", stdout: "" },
       ),
-    ).rejects.toThrow("upgrade Quest CLI to >=0.7.0");
+    ).rejects.toThrow("upgrade Quest CLI to >=0.15.0");
 
-    for (const version of ["0.7.0-alpha", "0.7.0garbage"]) {
+    for (const version of ["0.15.0-alpha", "0.15.0garbage"]) {
       await expect(
         requireQuestCliCompatibility("/opt/bin/quest", "/tmp/repo", async (spec) =>
           spec.args.includes("--version")
@@ -1287,7 +1298,7 @@ model = "gpt-5-slow"
               }
             : { exitCode: 0, stderr: "", stdout: "" },
         ),
-      ).rejects.toThrow("upgrade Quest CLI to >=0.7.0");
+      ).rejects.toThrow("upgrade Quest CLI to >=0.15.0");
     }
   });
 
@@ -1523,7 +1534,11 @@ model = "gpt-5-slow"
         githubToken: "test-token",
         questBackendDomains: ["quest.example.test"],
         questRepositoryName: "quest",
-        questStore: { backend: "convex", deployment: "https://quest.example.test" },
+        questStore: {
+          backend: "convex",
+          deployment: "https://quest.example.test",
+          lease_ttl_minutes: 5,
+        },
         async runCommand(spec) {
           commands.push(spec);
           await prepareFakeWorktree(spec);
@@ -1558,6 +1573,7 @@ model = "gpt-5-slow"
                 expect(loadedQuestConfig.store).toEqual({
                   backend: "convex",
                   convex_deployment: "https://quest.example.test",
+                  lease_ttl_minutes: 30,
                 });
               }
               activeWorkers += 1;
@@ -1581,9 +1597,15 @@ model = "gpt-5-slow"
       }
       expect(workerQuestConfig).toContain('backend = "convex"');
       expect(workerQuestConfig).toContain('convex_deployment = "https://quest.example.test"');
+      expect(workerQuestConfig).toContain("lease_ttl_minutes = 30");
       const claimCommands = commands.filter((command) => command.args.includes("next"));
       expect(claimCommands.length).toBeGreaterThanOrEqual(2);
       expect(claimCommands.every((command) => command.args.includes("--brief"))).toBeTrue();
+      expect(
+        claimCommands.every(
+          (command) => command.args[command.args.indexOf("--lease") + 1] === "30",
+        ),
+      ).toBeTrue();
       expect(report.workers.every((worker) => worker.lockStatus === "handoff")).toBeTrue();
       expect(maximumWorkers).toBe(2);
       const firstLock = commands.findIndex((command) => command.args.includes("claim"));
@@ -1766,6 +1788,7 @@ model = "gpt-5-slow"
   test("renews each claimed quest while its worker runs", async () => {
     const root = await mkdtemp(join(tmpdir(), "quest-dispatch-heartbeat-test-"));
     let touched = 0;
+    const touchCommands: CommandSpec[] = [];
     let claimed = false;
     let workerStarted = false;
     let resolveWorker: ((exitCode: number) => void) | undefined;
@@ -1780,6 +1803,9 @@ model = "gpt-5-slow"
         repoRoot: root,
         async runCommand(spec) {
           await prepareFakeWorktree(spec);
+          if (spec.args.includes("touch")) {
+            touchCommands.push(spec);
+          }
           return fakeCommandResponse(spec, [
             [
               "next",
@@ -1796,7 +1822,11 @@ model = "gpt-5-slow"
                 if (workerStarted) {
                   resolveWorker?.(0);
                 }
-                return { exitCode: 0, stderr: "", stdout: "" };
+                return {
+                  exitCode: 0,
+                  stderr: "",
+                  stdout: touchReport(quest(3, "Long work")),
+                };
               },
             ],
             [
@@ -1822,6 +1852,12 @@ model = "gpt-5-slow"
 
       expect(report.workers).toHaveLength(1);
       expect(touched).toBeGreaterThan(0);
+      expect(
+        touchCommands.every((command) => {
+          const leaseIndex = command.args.indexOf("--lease");
+          return leaseIndex >= 0 && command.args[leaseIndex + 1] === "30";
+        }),
+      ).toBeTrue();
     } finally {
       await rm(root, { force: true, recursive: true });
     }
@@ -1849,7 +1885,11 @@ model = "gpt-5-slow"
           if (spec.args.includes("touch")) {
             touches += 1;
             if (touches === 1) {
-              return { exitCode: 0, stderr: "", stdout: "" };
+              return {
+                exitCode: 0,
+                stderr: "",
+                stdout: touchReport(quest(4, "Lease failure")),
+              };
             }
             return new Promise<CommandResult>((resolve) => {
               releaseTouchFailure = () =>

@@ -5,6 +5,7 @@ export {
 } from "./compatibility";
 export {
   authTokenInput,
+  CONVEX_OLDER_STORE_REMEDY,
   ConvexBackupDatabase,
   ConvexBlobStore,
   type ConvexBlobStoreOptions,

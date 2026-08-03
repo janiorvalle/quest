@@ -13,6 +13,7 @@ export type StoreSchemaVersionReader = () => number | null | Promise<number | nu
 
 export interface StoreCompatibilityProbeOptions {
   readonly migrateStore?: () => Promise<void>;
+  readonly olderStoreRemedy?: string;
   readonly readStoreVersion: StoreSchemaVersionReader;
   readonly supportedVersion?: number;
 }
@@ -59,6 +60,9 @@ export function createStoreCompatibilityProbe(
       const storeVersion = schemaVersionSchema.parse(detectedVersion ?? supportedVersion);
       return compatibilityResult(supportedVersion, storeVersion);
     },
+    ...(options.olderStoreRemedy === undefined
+      ? {}
+      : { olderStoreRemedy: options.olderStoreRemedy }),
     ...(options.migrateStore === undefined ? {} : { migrate: options.migrateStore }),
   };
 }

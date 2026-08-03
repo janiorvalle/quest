@@ -222,6 +222,31 @@ describe("doctor diagnostics", () => {
     }
   });
 
+  test("uses the backend remedy for an older remote store", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-doctor-remote-schema-"));
+    try {
+      const result = await runDoctor({
+        compatibility: {
+          action: "migrate-store",
+          outcome: "store-older",
+          store_version: 5,
+          supported_version: 6,
+        },
+        now,
+        olderStoreRemedy:
+          "deploy the matching Convex functions with `bunx convex deploy`, then retry",
+        operations: operations(root),
+      });
+
+      expect(check(result, "schema")).toMatchObject({
+        remedy: "deploy the matching Convex functions with `bunx convex deploy`, then retry",
+        status: "fail",
+      });
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   test("preserves SQLite integrity failures when the dump is unavailable", async () => {
     const root = await mkdtemp(join(tmpdir(), "quest-doctor-integrity-"));
     try {

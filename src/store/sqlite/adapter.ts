@@ -13,6 +13,7 @@ import {
   isValidBackfill,
   leaseExpiry,
   materializeExpiredLease,
+  normalizeLeaseTtlMinutes,
   statusAfterClaimRelease,
   statusForRetestVerdict,
   statusForVerdict,
@@ -189,6 +190,7 @@ type Watcher = {
 
 export type SqliteStoreOptions = {
   beforeEventAppend?: () => void;
+  leaseTtlMinutes?: number;
   now?: () => string;
   watchPollIntervalMs?: number;
 };
@@ -336,6 +338,7 @@ export class SqliteStore implements QuestStore {
   readonly #database: Database;
   readonly #ownership: SqliteStoreOwnership;
   readonly #beforeEventAppend: (() => void) | undefined;
+  readonly #leaseTtlMinutes: number;
   readonly #now: () => string;
   readonly #watchPollIntervalMs: number;
   readonly #watchers = new Map<number, Watcher>();
@@ -362,6 +365,7 @@ export class SqliteStore implements QuestStore {
 
     this.databasePath = databasePath;
     this.#beforeEventAppend = options.beforeEventAppend;
+    this.#leaseTtlMinutes = normalizeLeaseTtlMinutes(options.leaseTtlMinutes);
     this.#now = options.now ?? (() => new Date().toISOString());
     this.#watchPollIntervalMs = options.watchPollIntervalMs ?? 250;
     mkdirSync(dirname(databasePath), { recursive: true });
@@ -418,7 +422,7 @@ export class SqliteStore implements QuestStore {
         lease_expires_at:
           parsed.lease_expires_at ??
           (parsed.status === "accepted" && parsed.assignee !== null
-            ? leaseExpiry(timestamp)
+            ? leaseExpiry(timestamp, parsed.lease_ttl_minutes ?? this.#leaseTtlMinutes)
             : null),
       };
       const candidate = questSchema.parse({
@@ -493,7 +497,10 @@ export class SqliteStore implements QuestStore {
       return laneConflict;
     }
 
-    const nextLeaseExpiresAt = leaseExpiry(timestamp);
+    const nextLeaseExpiresAt = leaseExpiry(
+      timestamp,
+      parsed.lease_ttl_minutes ?? this.#leaseTtlMinutes,
+    );
     const changed = runStatement(
       this.#database,
       `UPDATE quests
@@ -545,7 +552,7 @@ export class SqliteStore implements QuestStore {
       this.#requireActiveLeaseOwner(current, parsed.owner, timestamp);
       const updated = questSchema.parse({
         ...current,
-        lease_expires_at: leaseExpiry(timestamp),
+        lease_expires_at: leaseExpiry(timestamp, parsed.lease_ttl_minutes ?? this.#leaseTtlMinutes),
         updated_at: timestamp,
       });
       this.#updateQuest(updated);
@@ -590,8 +597,9 @@ export class SqliteStore implements QuestStore {
         this.#removeDuplicateLinksForReopen(parsedId, parsedTransition, timestamp);
       }
 
+      const { lease_ttl_minutes: _leaseTtlMinutes, ...persistedTransition } = parsedTransition;
       this.#appendEvent(parsedId, timestamp, parsedTransition.actor, parsedTransition.action, {
-        ...parsedTransition,
+        ...persistedTransition,
         session_guild: parsedTransition.session_guild ?? null,
       });
       return this.#publicQuest(this.#requireStoredQuest(parsedId));
@@ -653,7 +661,7 @@ export class SqliteStore implements QuestStore {
       const timestamp = this.#now();
       this.#requireLeaseOwner(current, parsed.actor, timestamp);
       if (current.status === "accepted") {
-        this.#updateQuest(this.#renewLease(current, timestamp));
+        this.#updateQuest(this.#renewLease(current, timestamp, parsed.lease_ttl_minutes));
       }
       this.#insertChain(parsed.link);
       this.#appendEvent(parsed.link.quest_id, timestamp, parsed.actor, "chain", {
@@ -693,7 +701,7 @@ export class SqliteStore implements QuestStore {
       const timestamp = this.#now();
       this.#requireLeaseOwner(current, parsed.actor, timestamp);
       if (current.status === "accepted") {
-        this.#updateQuest(this.#renewLease(current, timestamp));
+        this.#updateQuest(this.#renewLease(current, timestamp, parsed.lease_ttl_minutes));
       }
       this.#appendEvent(parsed.link.quest_id, timestamp, parsed.actor, "chain", {
         operation: "remove",
@@ -716,7 +724,7 @@ export class SqliteStore implements QuestStore {
       const timestamp = this.#now();
       this.#requireLeaseOwner(current, parsed.added_by, timestamp);
       if (current.status === "accepted") {
-        this.#updateQuest(this.#renewLease(current, timestamp));
+        this.#updateQuest(this.#renewLease(current, timestamp, parsed.lease_ttl_minutes));
       }
       const insertion = runStatement(
         this.#database,
@@ -732,9 +740,10 @@ export class SqliteStore implements QuestStore {
         timestamp,
       );
       const evidenceId = Number(insertion.lastInsertRowid);
+      const { lease_ttl_minutes: _leaseTtlMinutes, ...persistedInput } = parsed;
       this.#appendEvent(parsed.quest_id, timestamp, parsed.added_by, "update", {
         evidence_id: evidenceId,
-        ...parsed,
+        ...persistedInput,
         session_guild: parsed.session_guild ?? null,
       });
       return this.#requireEvidence(evidenceId);
@@ -1635,7 +1644,7 @@ export class SqliteStore implements QuestStore {
       predicted_files: transition.changes.predicted_files ?? current.predicted_files,
       lease_expires_at:
         current.status === "accepted" && current.assignee !== null
-          ? leaseExpiry(timestamp)
+          ? leaseExpiry(timestamp, transition.lease_ttl_minutes ?? this.#leaseTtlMinutes)
           : current.lease_expires_at,
       updated_at: timestamp,
     });
@@ -1927,10 +1936,10 @@ export class SqliteStore implements QuestStore {
     );
   }
 
-  #renewLease(quest: Quest, timestamp: string): Quest {
+  #renewLease(quest: Quest, timestamp: string, leaseTtlMinutes?: number): Quest {
     return questSchema.parse({
       ...quest,
-      lease_expires_at: leaseExpiry(timestamp),
+      lease_expires_at: leaseExpiry(timestamp, leaseTtlMinutes ?? this.#leaseTtlMinutes),
       updated_at: timestamp,
     });
   }

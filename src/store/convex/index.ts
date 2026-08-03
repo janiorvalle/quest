@@ -13,6 +13,7 @@ export {
   createConvexHttpClient,
 } from "./client";
 export {
+  CONVEX_OLDER_STORE_REMEDY,
   type ConvexCompatibilityProbeOptions,
   createConvexStoreCompatibilityProbe,
 } from "./compatibility";

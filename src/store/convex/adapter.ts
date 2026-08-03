@@ -1,3 +1,4 @@
+import { DEFAULT_LEASE_TTL_MINUTES, normalizeLeaseTtlMinutes } from "../../domain";
 import {
   type AcceptQuestInput,
   type AcceptResult,
@@ -52,6 +53,7 @@ type TestableMutation<T> = {
 
 export interface ConvexStoreOptions {
   readonly clients?: ConvexClientPair;
+  readonly leaseTtlMinutes?: number;
 }
 
 export interface ConvexExportSnapshot {
@@ -89,23 +91,39 @@ function isMissingFederatedSnapshotQuery(error: unknown): boolean {
   );
 }
 
+function addConfiguredLeaseTtl<T extends { readonly lease_ttl_minutes?: number | undefined }>(
+  input: T,
+  leaseTtlMinutes: number,
+): T {
+  if (input.lease_ttl_minutes !== undefined || leaseTtlMinutes === DEFAULT_LEASE_TTL_MINUTES) {
+    return input;
+  }
+  return { ...input, lease_ttl_minutes: leaseTtlMinutes };
+}
+
 export class ConvexStore implements QuestStore {
   readonly deployment: string;
   readonly #clients: ConvexClientPair;
   readonly #ownsClients: boolean;
+  readonly #leaseTtlMinutes: number;
   #failNextEventAppend = false;
 
   constructor(deployment: string, options: ConvexStoreOptions = {}) {
     this.deployment = deployment;
     this.#clients = options.clients ?? createConvexClientPair(deployment);
     this.#ownsClients = options.clients === undefined;
+    this.#leaseTtlMinutes = normalizeLeaseTtlMinutes(options.leaseTtlMinutes);
   }
 
   async addQuest(input: NewQuest): Promise<Quest> {
     const parsed = newQuestSchema.parse(input);
     return this.#clients.http.mutation(
       convexApi.addQuest,
-      testableMutation(this.#clients, parsed, this.#consumeEventFailure()),
+      testableMutation(
+        this.#clients,
+        addConfiguredLeaseTtl(parsed, this.#leaseTtlMinutes),
+        this.#consumeEventFailure(),
+      ),
     );
   }
 
@@ -113,7 +131,11 @@ export class ConvexStore implements QuestStore {
     const parsed = acceptQuestInputSchema.parse(input);
     return this.#clients.http.mutation(
       convexApi.acceptQuest,
-      testableMutation(this.#clients, parsed, this.#consumeEventFailure()),
+      testableMutation(
+        this.#clients,
+        addConfiguredLeaseTtl(parsed, this.#leaseTtlMinutes),
+        this.#consumeEventFailure(),
+      ),
     );
   }
 
@@ -121,7 +143,11 @@ export class ConvexStore implements QuestStore {
     const parsed = acceptQuestInputSchema.parse(input);
     return this.#clients.http.mutation(
       convexApi.acceptQuestAndExport,
-      testableMutation(this.#clients, parsed, this.#consumeEventFailure()),
+      testableMutation(
+        this.#clients,
+        addConfiguredLeaseTtl(parsed, this.#leaseTtlMinutes),
+        this.#consumeEventFailure(),
+      ),
     );
   }
 
@@ -129,13 +155,20 @@ export class ConvexStore implements QuestStore {
     const parsed = touchQuestInputSchema.parse(input);
     return this.#clients.http.mutation(
       convexApi.touchQuest,
-      testableMutation(this.#clients, parsed, this.#consumeEventFailure()),
+      testableMutation(
+        this.#clients,
+        addConfiguredLeaseTtl(parsed, this.#leaseTtlMinutes),
+        this.#consumeEventFailure(),
+      ),
     );
   }
 
   async transition(id: number, transition: QuestTransition): Promise<Quest> {
     const parsedId = questSchema.shape.id.parse(id);
-    const parsedTransition = questTransitionSchema.parse(transition);
+    const parsedTransition = addConfiguredLeaseTtl(
+      questTransitionSchema.parse(transition),
+      this.#leaseTtlMinutes,
+    );
     const testFailure = this.#consumeEventFailure();
     return this.#clients.http.mutation(
       convexApi.transition,
@@ -154,7 +187,11 @@ export class ConvexStore implements QuestStore {
     const parsed = chainMutationSchema.parse(input);
     return this.#clients.http.mutation(
       convexApi.addChainLink,
-      testableMutation(this.#clients, parsed, this.#consumeEventFailure()),
+      testableMutation(
+        this.#clients,
+        addConfiguredLeaseTtl(parsed, this.#leaseTtlMinutes),
+        this.#consumeEventFailure(),
+      ),
     );
   }
 
@@ -162,7 +199,11 @@ export class ConvexStore implements QuestStore {
     const parsed = chainMutationSchema.parse(input);
     return this.#clients.http.mutation(
       convexApi.removeChainLink,
-      testableMutation(this.#clients, parsed, this.#consumeEventFailure()),
+      testableMutation(
+        this.#clients,
+        addConfiguredLeaseTtl(parsed, this.#leaseTtlMinutes),
+        this.#consumeEventFailure(),
+      ),
     );
   }
 
@@ -170,7 +211,11 @@ export class ConvexStore implements QuestStore {
     const parsed = newEvidenceSchema.parse(input);
     return this.#clients.http.mutation(
       convexApi.addEvidence,
-      testableMutation(this.#clients, parsed, this.#consumeEventFailure()),
+      testableMutation(
+        this.#clients,
+        addConfiguredLeaseTtl(parsed, this.#leaseTtlMinutes),
+        this.#consumeEventFailure(),
+      ),
     );
   }
 
@@ -254,6 +299,13 @@ export class ConvexStore implements QuestStore {
 
   async exportAll(): Promise<QuestDump> {
     return (await this.exportAllWithCutoff()).dump;
+  }
+
+  async exportAllRaw(): Promise<QuestDump> {
+    const dump = await this.#clients.http.query(convexApi.rawExportAll, {
+      ...authTokenInput(this.#clients),
+    });
+    return questDumpSchema.parse(dump);
   }
 
   async serverTime(): Promise<string> {

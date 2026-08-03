@@ -21,6 +21,7 @@ Backend selection is per repository. `[store]` is the default, and a nested
 ```toml
 [store]
 backend = "sqlite"
+lease_ttl_minutes = 60
 
 [repos.web-app.store]
 backend = "convex"
@@ -32,6 +33,22 @@ exactly one repository backend; `--all` is for reads only. Display IDs are
 allocated by each backend, so the same ID can appear in multiple repositories.
 Cross-repository views include the repository column; use `--repo <name>` when
 an ID is ambiguous.
+
+## Configuration compatibility
+
+The config loader ignores unknown keys inside known sections and unknown
+top-level sections. It writes one warning per ignored item to stderr, so
+`--format json` stdout remains valid. The warning names the setting and tells
+you to upgrade the Quest binary before relying on it.
+
+For an unknown key under `[store]`, the warning also names the effective
+`store.backend`; a typo cannot change routing, and the explicit backend key is
+the remedy.
+
+This is intentionally tolerant in the new binary. A pre-0.15 binary rejects a
+config that opts into a newer key such as `[store] lease_ttl_minutes` with a
+clear config error. That compatibility cost is opt-in and self-inflicted: only
+configs using newer keys are affected, and the remedy is to upgrade the binary.
 
 Session guild routing is optional. Set `guild = "claude"` in config or export
 `QUEST_GUILD=claude`. Untagged quests remain shared; `next` skips quests tagged
@@ -85,9 +102,8 @@ theme = "dense"
 
 That preference is the only thing the read-only viewer ever writes. It never
 touches the quest store or repository routing. Viewer settings go under the
-existing `[tui]` section on purpose: the config root is parsed strictly, so a
-quest that predates a brand-new section rejects the whole config and fails every
-command, not just the viewer.
+existing `[tui]` section on purpose, keeping display settings together while
+the compatibility rules above handle settings added by newer binaries.
 
 ## Convex onboarding
 
@@ -191,6 +207,8 @@ quest next                        The answer to "what do I work on?" Respects:
     --brief                       With --claim, include the full context package
                                   in the same response; this is the one-shot work
                                   start for agents.
+    --lease <minutes>             With --claim, override the claim lease for this
+                                  one suggestion; must be a positive whole number.
 
 quest accept <id>                 Claim a quest (atomic; sets assignee).
     --as <owner>                  Owner identity; overrides QUEST_IDENTITY,
@@ -199,11 +217,24 @@ quest accept <id>                 Claim a quest (atomic; sets assignee).
                                   agent class is guild, not identity.
                                   Conflict → exit 1: `quest 47 already accepted by ryan`.
     --force                       Override a mismatched quest guild.
+    --lease <minutes>             Override this claim's lease length for one
+                                  accept; must be a positive whole number.
 
-quest touch <id>                  Renew the current assignee's 30-minute lease.
+quest touch <id>                  Renew the current assignee's lease.
+    --lease <minutes>             Override this touch's renewal duration; must be
+                                  a positive whole number.
                                   Use during long-running work; writes by the
-                                  assignee renew automatically. An expired lease
-                                  must be re-accepted.
+                                  assignee renew automatically. New claims and
+                                  touches default to 24 hours. Set
+                                  `[store] lease_ttl_minutes` to change that
+                                  default; `accept --lease` or `touch --lease`
+                                  wins for one mutation.
+                                  The tradeoff is explicit: a crashed manual
+                                  lane can hold its claim for up to a day.
+                                  Use `quest abandon` to release it; `quest doctor`
+                                  still reports stale claims, and
+                                  dispatcher workers keep their heartbeat.
+                                  An expired lease must be re-accepted.
 
 quest abandon <id>                Release a claim back to the pool.
 
