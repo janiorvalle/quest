@@ -340,9 +340,8 @@ function questStoreConfigToml(store: Config["store"]): string {
   return [
     "[store]",
     `backend = ${tomlString(store.backend)}`,
-    ...(store.lease_ttl_minutes === undefined
-      ? []
-      : [`lease_ttl_minutes = ${store.lease_ttl_minutes}`]),
+    // Worker lifecycle writes must renew the same bounded lease used by the dispatcher claim.
+    `lease_ttl_minutes = ${DISPATCH_LEASE_TTL_MINUTES}`,
     ...(deployment === undefined || store.backend !== "convex"
       ? []
       : [`convex_deployment = ${tomlString(deployment)}`]),

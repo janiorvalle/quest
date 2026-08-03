@@ -871,7 +871,7 @@ async function prepareRepositoryMigration(
   }
   const targetConfig = migrationStoreConfig(activeConfig, repository, request);
   return {
-    originalRepositoryConfig: routingSnapshot.repositoryEntry,
+    originalRepositoryConfig: routingSnapshot.repositoryEntryRaw ?? routingSnapshot.repositoryEntry,
     repository,
     routingSnapshot,
     sourceConfig,

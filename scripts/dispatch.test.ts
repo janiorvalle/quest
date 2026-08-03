@@ -1573,7 +1573,7 @@ model = "gpt-5-slow"
                 expect(loadedQuestConfig.store).toEqual({
                   backend: "convex",
                   convex_deployment: "https://quest.example.test",
-                  lease_ttl_minutes: 5,
+                  lease_ttl_minutes: 30,
                 });
               }
               activeWorkers += 1;
@@ -1597,7 +1597,7 @@ model = "gpt-5-slow"
       }
       expect(workerQuestConfig).toContain('backend = "convex"');
       expect(workerQuestConfig).toContain('convex_deployment = "https://quest.example.test"');
-      expect(workerQuestConfig).toContain("lease_ttl_minutes = 5");
+      expect(workerQuestConfig).toContain("lease_ttl_minutes = 30");
       const claimCommands = commands.filter((command) => command.args.includes("next"));
       expect(claimCommands.length).toBeGreaterThanOrEqual(2);
       expect(claimCommands.every((command) => command.args.includes("--brief"))).toBeTrue();

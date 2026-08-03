@@ -10,6 +10,7 @@ import {
   ConfigWriteError,
   ConvexDeploymentError,
   normalizeConvexDeployment,
+  readRepositoryRoutingSnapshot,
   restoreRepositoryConfigEntry,
   restoreRepositoryConfigEntryIfUnchanged,
   verifyRepositoryConfigEntry,
@@ -452,6 +453,39 @@ describe("repository store config writer", () => {
       });
       expect(config.repos["web-app"]).toEqual({
         store: { backend: "convex", deployment: "dev:concurrent" },
+      });
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("preserves future repository settings during a conditional routing update", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-config-writer-future-keys-"));
+    const configFile = join(directory, "config.toml");
+    try {
+      await writeFile(
+        configFile,
+        '[repos.web-app]\nfuture = "keep"\n\n[repos.web-app.store]\nbackend = "sqlite"\nfuture_option = "keep"\n',
+      );
+      const snapshot = await readRepositoryRoutingSnapshot(configFile, "web-app");
+
+      await writeRepositoryStoreConfigIfUnchanged(
+        configFile,
+        { backend: "convex", deployment: "dev:migration" },
+        snapshot,
+      );
+
+      expect(parse(await readFile(configFile, "utf8"))).toEqual({
+        repos: {
+          "web-app": {
+            future: "keep",
+            store: {
+              backend: "convex",
+              deployment: "dev:migration",
+              future_option: "keep",
+            },
+          },
+        },
       });
     } finally {
       await rm(directory, { force: true, recursive: true });

@@ -58,6 +58,8 @@ export interface RepositoryRoutingSnapshot {
   readonly canonicalRepository: string;
   readonly detectedRepository: string;
   readonly repositoryEntry: RepoConfigEntry | undefined;
+  /** The validated TOML value, retaining settings newer binaries may have added. */
+  readonly repositoryEntryRaw?: RepoConfigEntry;
   readonly sourceStore: StoreConfig;
 }
 
@@ -197,7 +199,17 @@ function tomlRepositoryEntryWithStore(entry: unknown, store: StoreConfig): TomlT
       "[CONFIG_ALIAS_ROUTE_CHANGED] repository aliases must resolve to their canonical repository before adding a store; retry with the canonical repository name",
     );
   }
-  return { ...(isRecord(entry) ? entry : {}), store: configStoreValue(store) };
+  const rawEntry = isRecord(entry) ? entry : {};
+  const rawStore = isRecord(rawEntry["store"]) ? rawEntry["store"] : {};
+  const futureStoreSettings = Object.fromEntries(
+    Object.entries(rawStore).filter(
+      ([key]) => !["backend", "deployment", "convex_deployment", "lease_ttl_minutes"].includes(key),
+    ),
+  );
+  return {
+    ...rawEntry,
+    store: { ...futureStoreSettings, ...configStoreValue(store) },
+  };
 }
 
 function stableSerialize(value: unknown): string {
@@ -653,8 +665,10 @@ function repositoryEntriesMatch(actual: unknown, expected: RepoConfigEntry | und
     return actual === undefined;
   }
   const parsedActual = repoConfigEntrySchema.safeParse(actual);
+  const parsedExpected = repoConfigEntrySchema.safeParse(expected);
   return (
-    stableSerialize(parsedActual.success ? parsedActual.data : actual) === stableSerialize(expected)
+    stableSerialize(parsedActual.success ? parsedActual.data : actual) ===
+    stableSerialize(parsedExpected.success ? parsedExpected.data : expected)
   );
 }
 
@@ -707,6 +721,9 @@ function routingSnapshotMatches(config: TomlTable, snapshot: RepositoryRoutingSn
   return (
     route.canonicalRepository === snapshot.canonicalRepository &&
     storeRoutesMatch(route.store, snapshot.sourceStore) &&
+    (!("repositoryEntryRaw" in snapshot) ||
+      stableSerialize(repos[snapshot.canonicalRepository]) ===
+        stableSerialize(snapshot.repositoryEntryRaw)) &&
     repositoryEntriesMatch(repos[snapshot.canonicalRepository], snapshot.repositoryEntry)
   );
 }
@@ -727,6 +744,25 @@ function repositoryEntryFromToml(
     );
   }
   return parsed.data;
+}
+
+function repositoryEntryRawFromToml(
+  config: TomlTable,
+  canonicalRepository: string,
+): RepoConfigEntry | undefined {
+  const repos = isRecord(config["repos"]) ? config["repos"] : {};
+  const value = repos[canonicalRepository];
+  if (value === undefined) {
+    return undefined;
+  }
+  const parsed = repoConfigEntrySchema.safeParse(value);
+  if (!parsed.success) {
+    throw new Error(
+      `[CONFIG_WRITE_FAILED] repository ${canonicalRepository} has an invalid routing entry; fix config.toml and retry`,
+    );
+  }
+  // The schema validates the shape, but the raw object intentionally keeps unknown future keys.
+  return value as RepoConfigEntry;
 }
 
 async function readTomlFile(filePath: string): Promise<TomlTable> {
@@ -1118,11 +1154,16 @@ export async function readRepositoryRoutingSnapshot(
     const snapshot = await readTomlFileSnapshot(configFile);
     try {
       const route = currentRepositoryRoute(snapshot.value, trimmedRepository);
+      const repositoryEntryRaw = repositoryEntryRawFromToml(
+        snapshot.value,
+        route.canonicalRepository,
+      );
       return {
         canonicalRepository: route.canonicalRepository,
         detectedRepository: trimmedRepository,
         repositoryEntry: repositoryEntryFromToml(snapshot.value, route.canonicalRepository),
         sourceStore: route.store,
+        ...(repositoryEntryRaw === undefined ? {} : { repositoryEntryRaw }),
       };
     } catch (error: unknown) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -1196,7 +1237,10 @@ export async function writeRepositoryStoreConfigIfUnchanged(
     const currentRepos = isRecord(config["repos"]) ? config["repos"] : {};
     const repos = {
       ...currentRepos,
-      [trimmedRepository]: repositoryEntryWithStore(snapshot.repositoryEntry, store),
+      [trimmedRepository]: tomlRepositoryEntryWithStore(
+        "repositoryEntryRaw" in snapshot ? snapshot.repositoryEntryRaw : snapshot.repositoryEntry,
+        store,
+      ),
     };
     await writeTomlFileIfCurrent(configFile, { ...config, repos }, fileSnapshot, assertOwner);
   });
