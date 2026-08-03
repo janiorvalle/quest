@@ -3,6 +3,7 @@ import { parseHttpUrl } from "./pr";
 export interface QuestLogInteractionState {
   readonly areaIndex: number;
   readonly areaKey: string;
+  readonly detailScrollOffset: number;
   readonly selectedIndex: number;
   readonly selectedQuestId: number | undefined;
   readonly showDone: boolean;
@@ -21,6 +22,8 @@ export interface QuestLogKey {
 export interface QuestLogInteractionContext {
   readonly areaCount: number;
   readonly areaKeys?: readonly string[];
+  readonly detailContentRows?: number;
+  readonly detailViewportRows?: number;
   readonly pr?: string | null;
   readonly questId: number | undefined;
   readonly visibleCount: number;
@@ -46,6 +49,7 @@ export interface QuestLogInteractionResult {
 export const INITIAL_QUEST_LOG_INTERACTION: QuestLogInteractionState = {
   areaIndex: 0,
   areaKey: "all",
+  detailScrollOffset: 0,
   selectedIndex: 0,
   selectedQuestId: undefined,
   showDone: false,
@@ -56,6 +60,31 @@ function isKey(key: QuestLogKey, value: string): boolean {
   return key.name === value || key.raw === value || key.sequence === value;
 }
 
+function detailScrollLimit(context: QuestLogInteractionContext): number {
+  if (context.detailContentRows === undefined || context.detailViewportRows === undefined) {
+    return Number.MAX_SAFE_INTEGER;
+  }
+  return Math.max(0, context.detailContentRows - context.detailViewportRows);
+}
+
+function detailScrollOffset(
+  offset: number,
+  direction: -1 | 1,
+  context: QuestLogInteractionContext,
+): number {
+  return Math.min(Math.max(0, offset + direction), detailScrollLimit(context));
+}
+
+function isDetailKey(key: QuestLogKey, value: "J" | "K"): boolean {
+  const lower = value.toLowerCase();
+  return (
+    key.name === value ||
+    key.raw === value ||
+    key.sequence === value ||
+    (key.shift && isKey(key, lower))
+  );
+}
+
 function normalizeState(
   state: QuestLogInteractionState,
   context: QuestLogInteractionContext,
@@ -63,9 +92,14 @@ function normalizeState(
   const areaKeys = context.areaKeys ?? fallbackAreaKeys(context.areaCount);
   const areaIndex = Math.max(0, areaKeys.indexOf(state.areaKey));
   const selection = selectionForVisibleQuests(state, context);
+  const selectionChanged =
+    context.visibleQuestIds !== undefined && selection.questId !== state.selectedQuestId;
   return {
     areaIndex,
     areaKey: areaKeys[areaIndex] ?? "all",
+    detailScrollOffset: selectionChanged
+      ? 0
+      : Math.min(Math.max(0, state.detailScrollOffset), detailScrollLimit(context)),
     selectedIndex: selection.index,
     selectedQuestId: selection.questId,
     showDone: state.showDone,
@@ -122,6 +156,7 @@ function tabState(
     ...state,
     areaIndex,
     areaKey: areaKeys[areaIndex] ?? state.areaKey,
+    detailScrollOffset: 0,
     selectedIndex: 0,
     selectedQuestId: context.visibleQuestIds?.[0],
   };
@@ -168,9 +203,24 @@ function moveSelectionState(
   const selectedIndex = moveSelection(state.selectedIndex, direction, context.visibleCount);
   return {
     ...state,
+    detailScrollOffset: 0,
     selectedIndex,
     selectedQuestId: context.visibleQuestIds?.[selectedIndex],
   };
+}
+
+function detailScrollState(
+  state: QuestLogInteractionState,
+  key: QuestLogKey,
+  context: QuestLogInteractionContext,
+): QuestLogInteractionState | undefined {
+  const direction = isDetailKey(key, "K") ? -1 : isDetailKey(key, "J") ? 1 : undefined;
+  return direction === undefined
+    ? undefined
+    : {
+        ...state,
+        detailScrollOffset: detailScrollOffset(state.detailScrollOffset, direction, context),
+      };
 }
 
 export function reduceReadOnlyInteraction(
@@ -182,6 +232,13 @@ export function reduceReadOnlyInteraction(
 
   if (isKey(key, "q")) {
     return { intent: { type: "quit" }, state: normalized };
+  }
+  const scrolled = detailScrollState(normalized, key, context);
+  if (scrolled !== undefined) {
+    return {
+      intent: { type: "none" },
+      state: scrolled,
+    };
   }
   if (isKey(key, "up") || isKey(key, "k")) {
     return {
@@ -208,6 +265,7 @@ export function reduceReadOnlyInteraction(
         ...normalized,
         areaIndex: 0,
         areaKey: "all",
+        detailScrollOffset: 0,
         selectedIndex: 0,
         selectedQuestId: undefined,
       },
@@ -218,6 +276,7 @@ export function reduceReadOnlyInteraction(
       intent: { type: "toggle-done" },
       state: {
         ...normalized,
+        detailScrollOffset: 0,
         selectedIndex: 0,
         selectedQuestId: context.visibleQuestIds?.[0],
         showDone: !normalized.showDone,

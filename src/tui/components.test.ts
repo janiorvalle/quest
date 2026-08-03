@@ -4,7 +4,9 @@ import { stringWidth } from "bun";
 import type { QuestLogDetail, QuestLogEventEntry, QuestLogItem } from "../services/quest-log-model";
 import {
   blockedStatusText,
+  buildDetailDocument,
   buildDetailLayout,
+  detailPaneScrollMetrics,
   laneConflictLinesFor,
   laneMarkerFor,
   pullRequestGlyphColor,
@@ -139,18 +141,29 @@ describe("detail pane layout", () => {
     expect(layout.usedRows).toBeLessThan(32);
   });
 
-  test("truncates lower-priority activity before cutting the description on a short pane", () => {
+  test("keeps the full document available when the viewport is short", () => {
     const layout = buildDetailLayout(item, detail, 56, 15);
     const veryShortLayout = buildDetailLayout(item, detail, 56, 10);
+    const document = buildDetailDocument(item, detail, 56);
+    const metrics = detailPaneScrollMetrics(item, detail, 56, 15);
 
-    expect(layout.usedRows).toBeLessThanOrEqual(15);
+    expect(layout.usedRows).toBeGreaterThan(15);
     expect(layout.descriptionLines.at(-1)?.text).toBe("limit.");
     expect(layout.activityRows[0]?.timestamp).toBe("01:11");
     expect(
       layout.fileBlocks.flatMap((block) => block.lines.map((line) => line.text)).join("\n"),
     ).toContain("src/store/convex/client.ts");
-    expect(veryShortLayout.usedRows).toBeLessThanOrEqual(10);
-    expect(veryShortLayout.descriptionLines.at(-1)?.text).toContain("…");
+    expect(veryShortLayout.usedRows).toBeGreaterThan(10);
+    expect(veryShortLayout.descriptionLines.at(-1)?.text).toBe("limit.");
+    const documentActivity = document.lines
+      .filter((line) => line.kind === "activity")
+      .map((line) => `${line.row.timestamp} ${line.row.label} ${line.row.detail ?? ""}`)
+      .join(" ");
+    expect(documentActivity).toContain("lease expires at");
+    expect(documentActivity).toContain("2026-08-01T01:41:00.000Z");
+    expect(metrics.contentRows).toBe(document.lines.length);
+    expect(metrics.viewportRows).toBe(8);
+    expect(metrics.maxOffset).toBe(metrics.contentRows - metrics.viewportRows);
   });
 
   test("keeps crowded event details and tiny row budgets honest", () => {
@@ -178,8 +191,9 @@ describe("detail pane layout", () => {
 
     for (const rowBudget of [1, 2, 3, 4, 5, 6, 7]) {
       const layout = buildDetailLayout(item, detail, 56, rowBudget);
-      expect(layout.usedRows).toBeLessThanOrEqual(rowBudget);
       expect(layout.headerRows).toBeLessThanOrEqual(rowBudget);
+      expect(layout.descriptionLines.length).toBeGreaterThan(0);
+      expect(layout.usedRows).toBeGreaterThan(rowBudget);
     }
   });
 });
@@ -298,8 +312,8 @@ describe("plan list annotations", () => {
           rowBudget,
           DENSE_THEME,
           denseClusters,
-        ).usedRows,
-      ).toBeLessThanOrEqual(rowBudget);
+        ).laneConflictLines.length,
+      ).toBeGreaterThan(0);
     }
   });
 });

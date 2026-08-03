@@ -52,6 +52,7 @@ describe("read-only quest log keymap", () => {
       state: {
         areaIndex: 0,
         areaKey: "all",
+        detailScrollOffset: 0,
         selectedIndex: 0,
         selectedQuestId: undefined,
         showDone: true,
@@ -158,6 +159,37 @@ describe("read-only quest log keymap", () => {
     });
     expect(result.state.selectedIndex).toBe(1);
     expect(result.state.selectedQuestId).toBe(20);
+  });
+
+  test("uses uppercase J/K for bounded detail scrolling and resets on selection", () => {
+    const scrollingContext = {
+      ...context,
+      detailContentRows: 10,
+      detailViewportRows: 4,
+      visibleQuestIds: [72, 73, 74, 75],
+    };
+    let state = reduceReadOnlyInteraction(
+      INITIAL_QUEST_LOG_INTERACTION,
+      key("J", "J"),
+      scrollingContext,
+    ).state;
+    expect(state).toMatchObject({ detailScrollOffset: 1, selectedIndex: 0 });
+
+    state = reduceReadOnlyInteraction(state, key("j", "J", true), scrollingContext).state;
+    expect(state.detailScrollOffset).toBe(2);
+    state = reduceReadOnlyInteraction(state, key("J", "J"), scrollingContext).state;
+    state = reduceReadOnlyInteraction(state, key("J", "J"), scrollingContext).state;
+    state = reduceReadOnlyInteraction(state, key("J", "J"), scrollingContext).state;
+    state = reduceReadOnlyInteraction(state, key("J", "J"), scrollingContext).state;
+    expect(state.detailScrollOffset).toBe(6);
+
+    state = reduceReadOnlyInteraction(state, key("K", "K"), scrollingContext).state;
+    expect(state.detailScrollOffset).toBe(5);
+    state = reduceReadOnlyInteraction(state, key("k", "K", true), scrollingContext).state;
+    expect(state.detailScrollOffset).toBe(4);
+
+    const moved = reduceReadOnlyInteraction(state, key("j"), scrollingContext).state;
+    expect(moved).toMatchObject({ detailScrollOffset: 0, selectedIndex: 1, selectedQuestId: 73 });
   });
 });
 

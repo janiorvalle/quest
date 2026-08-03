@@ -8,6 +8,7 @@ import {
   areaLabel,
   areaTabKey,
   DetailPane,
+  detailPaneScrollMetrics,
   FooterKeymap,
   type HeaderCounts,
   HorizontalRule,
@@ -159,6 +160,7 @@ function ReadOnlyLayout({
   counts,
   current,
   detail,
+  detailScrollOffset,
   hiddenDoneCount,
   identity,
   activeAreaIndex,
@@ -177,6 +179,7 @@ function ReadOnlyLayout({
   readonly counts: HeaderCounts;
   readonly current: QuestLogItem | undefined;
   readonly detail: Awaited<ReturnType<QuestLogRuntime["loadDetail"]>> | null;
+  readonly detailScrollOffset: number;
   readonly hiddenDoneCount: number;
   readonly identity: string | undefined;
   readonly activeAreaIndex: number;
@@ -248,6 +251,7 @@ function ReadOnlyLayout({
             laneClusters={snapshot.plan?.laneClusters ?? []}
             paneWidth={geometry.detailWidth}
             rows={geometry.detailRows}
+            scrollOffset={detailScrollOffset}
           />
         </box>
       </box>
@@ -340,6 +344,34 @@ export function QuestLogApp({
   const currentPr = current?.pr;
   const currentQuestId = current?.id;
   const detail = useQuestDetail(runtime, current);
+  const geometry = mainPaneGeometry(dimensions.width, dimensions.height);
+  const detailMetrics = useMemo(
+    () =>
+      current === undefined
+        ? {
+            contentRows: 0,
+            headerRows: 0,
+            maxOffset: 0,
+            showFooter: false,
+            viewportRows: 0,
+          }
+        : detailPaneScrollMetrics(
+            current,
+            detail,
+            geometry.detailWidth,
+            geometry.detailRows,
+            theme,
+            snapshot.plan?.laneClusters ?? [],
+          ),
+    [
+      current,
+      detail,
+      geometry.detailRows,
+      geometry.detailWidth,
+      snapshot.plan?.laneClusters,
+      theme,
+    ],
+  );
   const counts = useMemo(() => headerCounts(snapshot.items), [snapshot.items]);
 
   useEffect(() => {
@@ -349,6 +381,8 @@ export function QuestLogApp({
       {
         areaCount: areas.length,
         areaKeys,
+        detailContentRows: detailMetrics.contentRows,
+        detailViewportRows: detailMetrics.viewportRows,
         ...(currentPr === undefined ? {} : { pr: currentPr }),
         questId: currentQuestId,
         visibleCount: visibleItems.length,
@@ -359,7 +393,8 @@ export function QuestLogApp({
       next.state.areaIndex !== interaction.areaIndex ||
       next.state.areaKey !== interaction.areaKey ||
       next.state.selectedIndex !== interaction.selectedIndex ||
-      next.state.selectedQuestId !== interaction.selectedQuestId
+      next.state.selectedQuestId !== interaction.selectedQuestId ||
+      next.state.detailScrollOffset !== interaction.detailScrollOffset
     ) {
       interactionRef.current = next.state;
       setInteraction((state) => ({ ...state, ...next.state }));
@@ -369,6 +404,9 @@ export function QuestLogApp({
     areaKeys,
     currentPr,
     currentQuestId,
+    detailMetrics.contentRows,
+    detailMetrics.viewportRows,
+    interaction.detailScrollOffset,
     interaction.areaIndex,
     interaction.areaKey,
     interaction.selectedIndex,
@@ -394,6 +432,8 @@ export function QuestLogApp({
       {
         areaCount: areas.length,
         areaKeys,
+        detailContentRows: detailMetrics.contentRows,
+        detailViewportRows: detailMetrics.viewportRows,
         ...(activeQuest === undefined ? {} : { pr: activeQuest.pr }),
         questId: activeQuest?.id,
         visibleCount: activeItems.length,
@@ -453,6 +493,7 @@ export function QuestLogApp({
         counts={counts}
         current={current}
         detail={detail}
+        detailScrollOffset={interaction.detailScrollOffset}
         hiddenDoneCount={hiddenDoneCount}
         height={dimensions.height}
         identity={identity}
