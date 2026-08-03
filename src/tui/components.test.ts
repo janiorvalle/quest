@@ -11,7 +11,7 @@ import {
   sessionAttributionText,
   wrapText,
 } from "./components";
-import { DENSE_THEME } from "./theme";
+import { DENSE_THEME, TAVERN_THEME } from "./theme";
 
 const item: QuestLogItem = {
   area: "cli",
@@ -211,9 +211,15 @@ describe("plan list annotations", () => {
   }
 
   test("labels a blocked row with its nearest blocker", () => {
-    expect(blockedStatusText(blocked)).toBe("○ blocked 87");
-    expect(blockedStatusText(dispatchable)).toBeNull();
-    expect(blockedStatusText({ ...blocked, blockerIds: [87, 94, 95] })).toBe("○ blocked 87 +2");
+    expect(blockedStatusText(DENSE_THEME, blocked)).toBe("○ blocked 87");
+    expect(blockedStatusText(DENSE_THEME, dispatchable)).toBeNull();
+    expect(blockedStatusText(DENSE_THEME, { ...blocked, blockerIds: [87, 94, 95] })).toBe(
+      "○ blocked 87 +2",
+    );
+  });
+
+  test("takes the blocked glyph from the theme", () => {
+    expect(blockedStatusText(TAVERN_THEME, blocked)).toBe("! blocked 87");
   });
 
   test("marks adjacent plan-lane rows with the kind and partner ids", () => {

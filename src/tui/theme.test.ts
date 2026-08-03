@@ -1,12 +1,17 @@
 import { describe, expect, test } from "bun:test";
 
+import { stringWidth } from "bun";
+
 import {
   DENSE_THEME,
   findQuestTheme,
   QUEST_THEMES,
   type QuestTheme,
+  questPriorityInk,
+  questStatusText,
   questThemeAfter,
   questThemeNames,
+  TAVERN_THEME,
 } from "./theme";
 
 const SECOND_THEME: QuestTheme = { ...DENSE_THEME, name: "test-second" };
@@ -14,11 +19,17 @@ const THIRD_THEME: QuestTheme = { ...DENSE_THEME, name: "test-third" };
 const REGISTRY: readonly QuestTheme[] = [DENSE_THEME, SECOND_THEME, THIRD_THEME];
 
 describe("theme registry", () => {
-  test("ships dense as the only theme, and dense is the default", () => {
-    expect(QUEST_THEMES).toEqual([DENSE_THEME]);
-    expect(questThemeNames()).toEqual(["dense"]);
+  test("ships dense and tavern, with dense first as the default", () => {
+    expect(QUEST_THEMES).toEqual([DENSE_THEME, TAVERN_THEME]);
+    expect(questThemeNames()).toEqual(["dense", "tavern"]);
     expect(findQuestTheme("dense")).toBe(DENSE_THEME);
-    expect(findQuestTheme("tavern")).toBeUndefined();
+    expect(findQuestTheme("tavern")).toBe(TAVERN_THEME);
+    expect(findQuestTheme("ledger")).toBeUndefined();
+  });
+
+  test("t reaches tavern from dense and comes back", () => {
+    expect(questThemeAfter(DENSE_THEME)).toBe(TAVERN_THEME);
+    expect(questThemeAfter(TAVERN_THEME)).toBe(DENSE_THEME);
   });
 
   test("cycles through every registered theme and wraps back to the first", () => {
@@ -29,7 +40,6 @@ describe("theme registry", () => {
 
   test("cycling a single-theme registry stays on that theme", () => {
     expect(questThemeAfter(DENSE_THEME, [DENSE_THEME])).toBe(DENSE_THEME);
-    expect(questThemeAfter(DENSE_THEME)).toBe(DENSE_THEME);
   });
 
   test("cycling from a theme the registry does not hold lands on the first one", () => {
@@ -46,6 +56,7 @@ describe("dense theme", () => {
       borderIdle: "#24313a",
       hint: "#62c4c9",
       lane: "#bc8cff",
+      pullRequest: "#e3c05c",
       sectionLabel: "#7fa3b8",
       selection: "#c9d4d9",
       selectionInk: "#0b0f12",
@@ -59,13 +70,15 @@ describe("dense theme", () => {
       warn: "#e3c05c",
     });
     expect(DENSE_THEME.status).toEqual({
-      accepted: { color: "#7fa3b8", label: "◐ active" },
-      complete: { color: "#7bc96f", label: "✓ complete" },
-      dropped: { color: "#37444b", label: "✕ dropped" },
-      open: { color: "#d1706b", label: "○ open" },
-      ready: { color: "#62c4c9", label: "● ready" },
-      turned_in: { color: "#e3c05c", label: "◆ review" },
+      accepted: { color: "#7fa3b8", glyph: "◐", label: "active" },
+      complete: { color: "#7bc96f", glyph: "✓", label: "complete" },
+      dropped: { color: "#37444b", glyph: "✕", label: "dropped" },
+      open: { color: "#d1706b", glyph: "○", label: "open" },
+      ready: { color: "#62c4c9", glyph: "●", label: "ready" },
+      turned_in: { color: "#e3c05c", glyph: "◆", label: "review" },
     });
+    expect(DENSE_THEME.blockedStatus).toEqual({ glyph: "○", label: "blocked" });
+    expect(DENSE_THEME.priorityInk).toEqual({ 1: "#d1706b", 2: "#5f7078", 3: "#5f7078" });
     expect(DENSE_THEME.labels.statusPhrase).toEqual({
       accepted: "in progress",
       complete: "verified",
@@ -81,5 +94,94 @@ describe("dense theme", () => {
       const source = await Bun.file(new URL(name, import.meta.url)).text();
       expect(source).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
     }
+  });
+});
+
+describe("tavern theme", () => {
+  test("carries the blessed palette", () => {
+    expect(TAVERN_THEME.palette).toEqual({
+      accent: "#e8b04a",
+      background: "#241a10",
+      borderActive: "#684e2e",
+      borderIdle: "#3d2e1b",
+      hint: "#e8b04a",
+      lane: "#c98bde",
+      pullRequest: "#e8b04a",
+      sectionLabel: "#8a7448",
+      selection: "#59431c",
+      selectionInk: "#ffd786",
+      stripe: "#281d12",
+      surface: "#2e2214",
+      textBright: "#e3cfa2",
+      textDim: "#8a7d68",
+      textMuted: "#a08a5f",
+      textPrimary: "#e3cfa2",
+      textSecondary: "#c1ac80",
+      warn: "#c9973f",
+    });
+  });
+
+  test("speaks quest-log grammar: ! available, ⚔ out on the job, ? returned, ! dimmed for blocked", () => {
+    expect(TAVERN_THEME.status.ready).toEqual({ color: "#ffd100", glyph: "!", label: "ready" });
+    expect(TAVERN_THEME.status.accepted).toEqual({
+      color: "#e8b04a",
+      glyph: "⚔",
+      label: "active",
+    });
+    expect(TAVERN_THEME.status.turned_in).toEqual({
+      color: "#ffd100",
+      glyph: "?",
+      label: "review",
+    });
+    expect(TAVERN_THEME.blockedStatus).toEqual({ glyph: "!", label: "blocked" });
+    expect(TAVERN_THEME.status.complete).toEqual({
+      color: "#a08a5f",
+      glyph: "✓",
+      label: "complete",
+    });
+  });
+
+  test("wears item-quality priority ink", () => {
+    expect(TAVERN_THEME.priorityInk).toEqual({ 1: "#ff8000", 2: "#2f8be6", 3: "#1eff00" });
+  });
+
+  test("every status glyph occupies exactly one terminal cell", () => {
+    const glyphs = [
+      ...Object.values(TAVERN_THEME.status).map((status) => status.glyph),
+      TAVERN_THEME.blockedStatus.glyph,
+    ];
+    for (const glyph of glyphs) {
+      expect(stringWidth(glyph)).toBe(1);
+    }
+  });
+
+  test("leaves the columns exactly where dense puts them", () => {
+    for (const status of Object.keys(DENSE_THEME.status) as (keyof typeof DENSE_THEME.status)[]) {
+      expect(stringWidth(questStatusText(TAVERN_THEME.status[status]))).toBe(
+        stringWidth(questStatusText(DENSE_THEME.status[status])),
+      );
+    }
+    expect(stringWidth(TAVERN_THEME.blockedStatus.label)).toBe(
+      stringWidth(DENSE_THEME.blockedStatus.label),
+    );
+  });
+
+  test("changes nothing but palette and glyphs", () => {
+    expect(TAVERN_THEME.glyphs).toEqual(DENSE_THEME.glyphs);
+    expect(TAVERN_THEME.labels).toEqual(DENSE_THEME.labels);
+    expect(TAVERN_THEME.structure).toEqual(DENSE_THEME.structure);
+    expect(TAVERN_THEME.border).toBe(DENSE_THEME.border);
+  });
+});
+
+describe("priority ink", () => {
+  test("gives each level its own color", () => {
+    expect(questPriorityInk(TAVERN_THEME, 1)).toBe("#ff8000");
+    expect(questPriorityInk(TAVERN_THEME, 2)).toBe("#2f8be6");
+    expect(questPriorityInk(TAVERN_THEME, 3)).toBe("#1eff00");
+  });
+
+  test("renders a priority the schema forbids as the lowest one", () => {
+    expect(questPriorityInk(TAVERN_THEME, 9)).toBe("#1eff00");
   });
 });
