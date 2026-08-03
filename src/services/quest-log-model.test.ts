@@ -3,8 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { NewQuest, QuestScope } from "../schema";
-import { createSqliteStore } from "../store";
+import type { NewQuest, QuestFilter, QuestScope } from "../schema";
+import { createSqliteStore, FederatedReadError, type QuestWatchListener } from "../store";
 import {
   createQuestLogRuntime,
   type QuestLogSnapshot,
@@ -411,15 +411,100 @@ describe("read-only quest log runtime", () => {
     }
   });
 
+  test("keeps the viewer open with an actionable routed-backend error", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-log-unavailable-"));
+    const store = createSqliteStore(join(directory, "quest.db"));
+    const snapshots: QuestLogSnapshot[] = [];
+    const runtime = createQuestLogRuntime({
+      initialScope: { repo: "remote" },
+      store,
+    });
+    const unsubscribe = runtime.subscribe((snapshot) => snapshots.push(snapshot));
+    store.watch = async () =>
+      Promise.reject(
+        new FederatedReadError(
+          "[FEDERATED_SCOPE_UNAVAILABLE] repository remote backend is unreachable; retry when its deployment is reachable",
+        ),
+      );
+
+    try {
+      await expect(runtime.start()).resolves.toBeUndefined();
+      expect(latest(snapshots)).toMatchObject({
+        currentRepo: "remote",
+        error:
+          "[FEDERATED_SCOPE_UNAVAILABLE] repository remote backend is unreachable; retry when its deployment is reachable",
+        loading: false,
+        scope: "current",
+      });
+    } finally {
+      unsubscribe();
+      await runtime.stop();
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("keeps named-scope watches alive through a routed-backend outage", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-log-recovery-"));
+    const store = createSqliteStore(join(directory, "quest.db"));
+    const quest = await store.addQuest(questInput("remote", "Recoverable quest"));
+    const snapshots: QuestLogSnapshot[] = [];
+    const runtime = createQuestLogRuntime({
+      initialScope: { repo: "remote" },
+      store,
+    });
+    const unsubscribe = runtime.subscribe((snapshot) => snapshots.push(snapshot));
+    const watchEntries: Array<{
+      readonly filter: QuestFilter;
+      readonly listener: QuestWatchListener;
+    }> = [];
+    store.watch = async (filter, listener) => {
+      watchEntries.push({ filter, listener });
+      listener(filter.blocked === true ? [] : [quest]);
+      return { unsubscribe: async () => undefined };
+    };
+
+    try {
+      await runtime.start();
+      await waitFor(
+        () => latest(snapshots).loading === false && latest(snapshots).items.length === 1,
+      );
+      const mainWatch = watchEntries.find((entry) => entry.filter.blocked !== true);
+      const blockedWatch = watchEntries.find((entry) => entry.filter.blocked === true);
+      if (mainWatch === undefined || blockedWatch === undefined) {
+        throw new Error("quest log did not establish both named-scope watches");
+      }
+
+      const outage = new FederatedReadError(
+        "[FEDERATED_SCOPE_UNAVAILABLE] repository remote backend is unreachable; retry when its deployment is reachable",
+      );
+      mainWatch.listener([], outage);
+      blockedWatch.listener([]);
+      expect(latest(snapshots)).toMatchObject({
+        error: outage.message,
+        items: [],
+        loading: false,
+      });
+
+      mainWatch.listener([quest]);
+      expect(latest(snapshots)).toMatchObject({ error: null, items: [{ repo: "remote" }] });
+    } finally {
+      unsubscribe();
+      await runtime.stop();
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
   test("loads read-only detail and delegates evidence opening", async () => {
     const directory = await mkdtemp(join(tmpdir(), "quest-log-detail-"));
     const store = createSqliteStore(join(directory, "quest.db"));
-    const opened: number[] = [];
+    const opened: Array<{ readonly id: number; readonly repository: string | undefined }> = [];
     const openedPrs: string[] = [];
     const runtime = createQuestLogRuntime({
       initialScope: { repo: null },
-      openEvidence: async (id) => {
-        opened.push(id);
+      openEvidence: async (id, repository) => {
+        opened.push({ id, repository });
         return `Opened quest ${id}`;
       },
       openPr: async (url) => {
@@ -434,8 +519,8 @@ describe("read-only quest log runtime", () => {
       const detail = await runtime.loadDetail(quest.id);
       expect(detail.questId).toBe(quest.id);
       expect(detail.events[0]?.action).toBe("add");
-      expect(await runtime.openEvidence(quest.id)).toBe(`Opened quest ${quest.id}`);
-      expect(opened).toEqual([quest.id]);
+      expect(await runtime.openEvidence(quest.id, "quest")).toBe(`Opened quest ${quest.id}`);
+      expect(opened).toEqual([{ id: quest.id, repository: "quest" }]);
       expect(await runtime.openPr("https://github.com/janiorvalle/quest/pull/52")).toBe(
         "Opened PR https://github.com/janiorvalle/quest/pull/52",
       );

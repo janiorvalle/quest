@@ -211,6 +211,10 @@ interface CliBackendRuntime {
   readonly openApplicationPorts: () => Promise<CliApplicationPorts>;
 }
 
+export interface QuestCliBackendOpenOptions {
+  readonly mode?: "command" | "viewer";
+}
+
 export interface QuestCliDependencies {
   readonly applicationVersion: string;
   readonly clock: Clock;
@@ -227,7 +231,10 @@ export interface QuestCliDependencies {
   readonly locateGitIdentity?: GitIdentityLocator;
   readonly locateGitRoot: GitRootLocator;
   readonly migration?: RepositoryMigrationOperations;
-  readonly openBackend?: (scope: QuestScope) => Promise<CliBackendRuntime>;
+  readonly openBackend?: (
+    scope: QuestScope,
+    options?: QuestCliBackendOpenOptions,
+  ) => Promise<CliBackendRuntime>;
   readonly openApplicationPorts: () => Promise<CliApplicationPorts>;
   readonly openDefaultBackend?: () => Promise<CliBackendRuntime>;
   readonly onboarding?: ConvexOnboardingOperations | undefined;
@@ -645,10 +652,11 @@ async function openDefaultBackend(dependencies: QuestCliDependencies): Promise<C
 async function openScopedBackend(
   dependencies: QuestCliDependencies,
   scope: QuestScope,
+  options?: QuestCliBackendOpenOptions,
 ): Promise<CliBackendRuntime> {
   return dependencies.openBackend === undefined
     ? legacyBackendRuntime(dependencies)
-    : dependencies.openBackend(scope);
+    : dependencies.openBackend(scope, options);
 }
 
 async function openMaintenanceBackend(
@@ -928,7 +936,10 @@ async function executeQuestCli(
   });
   // Resolve identity once after scope detection so Git metadata is read only once per command.
   const resolvedIdentity = await resolveRequestIdentity(request, resolved, dependencies);
-  const backend = await openRequestBackend(dependencies, request, resolved.scope);
+  const backend =
+    request === undefined && dependencies.isTty && flags.format !== "json"
+      ? await openScopedBackend(dependencies, { repo: null }, { mode: "viewer" })
+      : await openRequestBackend(dependencies, request, resolved.scope);
   try {
     if (!isBackupRecoveryRequest(request)) {
       await requireCompatibleStore(backend.compatibilityProbe);

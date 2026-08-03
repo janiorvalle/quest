@@ -33,7 +33,7 @@ import type {
   Sha256,
   TouchQuestInput,
 } from "../../schema";
-import type { AcceptQuestAndExportResult, Clock } from "../port";
+import type { AcceptQuestAndExportResult, Clock, FederatedReadSnapshot } from "../port";
 
 type TestableMutation<T> = {
   readonly input: T;
@@ -114,6 +114,14 @@ export const convexApi = {
     { readonly auth_token?: string; readonly scope: QuestScope; readonly lease_cutoff: string },
     QuestStats
   >("quest:stats"),
+  fencedRepositories: makeFunctionReference<"query", { readonly auth_token?: string }, string[]>(
+    "quest:fencedRepositories",
+  ),
+  federatedSnapshot: makeFunctionReference<
+    "query",
+    { readonly auth_token?: string },
+    FederatedReadSnapshot
+  >("quest:federatedSnapshot"),
   events: makeFunctionReference<
     "query",
     { readonly auth_token?: string; readonly quest_id: number },

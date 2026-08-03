@@ -143,6 +143,7 @@ describe("SqliteStore", () => {
       await session.commit();
       await session.release();
 
+      expect(await store.listFencedRepositories()).toEqual(["fenced repository"]);
       await expect(store.replaceAll(await store.exportAll())).rejects.toThrow(
         "MIGRATION_REPOSITORY_FENCED",
       );

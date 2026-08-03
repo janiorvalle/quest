@@ -71,7 +71,8 @@ export async function getQuestPlanSnapshot(
   scope: QuestScope,
   now: string,
 ): Promise<QuestPlanSnapshot> {
-  const dump = await store.exportAll();
+  const scopedStore = scope.repo === null ? store : (store.forRepository?.(scope.repo) ?? store);
+  const dump = await scopedStore.exportAll();
   const input = scopedPlanInput(dump, scope, now);
   const scopedQuestIds = new Set(
     input.quests.filter((quest) => isInScope(quest, scope)).map((quest) => quest.id),

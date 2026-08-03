@@ -1524,6 +1524,32 @@ export const listQuests = queryGeneric({
   },
 });
 
+export const fencedRepositories = queryGeneric({
+  args: { auth_token: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    await requireMemberQueryActor(ctx, args.auth_token);
+    return (await ctx.db.query("migration_fences").collect())
+      .filter((fence) => fence.unfenced !== true)
+      .map((fence) => fence.repo)
+      .sort();
+  },
+});
+
+export const federatedSnapshot = queryGeneric({
+  args: { auth_token: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    await requireMemberQueryActor(ctx, args.auth_token);
+    const timestamp = now();
+    return {
+      dump: await exportDump(ctx, timestamp),
+      fencedRepositories: (await ctx.db.query("migration_fences").collect())
+        .filter((fence) => fence.unfenced !== true)
+        .map((fence) => fence.repo)
+        .sort(),
+    };
+  },
+});
+
 export const getQuest = queryGeneric({
   args: { auth_token: v.optional(v.string()), id: v.number(), lease_cutoff: v.string() },
   handler: async (ctx, args) => {

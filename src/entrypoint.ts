@@ -27,8 +27,16 @@ const launchReadOnlyViewer = async (context: FutureTuiContext): Promise<void> =>
   const runtime = createQuestLogRuntime({
     clock: context.ports.clock,
     initialScope: context.scope,
-    openEvidence: async (id) => {
-      const detail = await showQuestDetail(context.ports.questStore, { repo: null }, id);
+    openEvidence: async (id, repository) => {
+      const store =
+        repository === undefined
+          ? context.ports.questStore
+          : (context.ports.questStore.forRepository?.(repository) ?? context.ports.questStore);
+      const detail = await showQuestDetail(
+        store,
+        repository === undefined ? { repo: null } : { repo: repository },
+        id,
+      );
       if (detail.evidence.length === 0) {
         return `Quest ${id} has no evidence`;
       }
@@ -36,6 +44,7 @@ const launchReadOnlyViewer = async (context: FutureTuiContext): Promise<void> =>
         context.ports.blobStore,
         detail.evidence,
         createEvidenceMaterializer,
+        detail.quest.repo,
       );
       try {
         for (const file of materialized.files) {
