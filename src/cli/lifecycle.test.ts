@@ -351,6 +351,22 @@ describe("lifecycle CLI behavior", () => {
     }
   });
 
+  test("allows touch to override the lease duration", async () => {
+    const harness = await createHarness();
+    try {
+      await harness.runJson(["add", "One-off touch lease"]);
+      expect((await harness.runJson(["accept", "1"])).code).toBe(EXIT_SUCCESS);
+
+      const touched = await harness.runJson(["touch", "1", "--lease", "5"]);
+      expect(touched.code).toBe(EXIT_SUCCESS);
+      expect(reportData(touched.report)).toMatchObject({
+        quest: { lease_expires_at: "2026-07-29T12:05:00.000Z" },
+      });
+    } finally {
+      await harness.stop();
+    }
+  });
+
   test("gives accept flags precedence over the configured lease duration", async () => {
     const harness = await createHarness([], {
       ...config,

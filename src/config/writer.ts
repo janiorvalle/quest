@@ -181,18 +181,6 @@ function configStoreValue(store: StoreConfig): StoreConfig {
   return { backend: "convex", deployment, ...leaseTtl };
 }
 
-function repositoryEntryWithStore(
-  entry: RepoConfigEntry | undefined,
-  store: StoreConfig,
-): RepoConfigEntry {
-  if (typeof entry === "string") {
-    throw new Error(
-      "[CONFIG_ALIAS_ROUTE_CHANGED] repository aliases must resolve to their canonical repository before adding a store; retry with the canonical repository name",
-    );
-  }
-  return { ...(entry ?? {}), store: configStoreValue(store) };
-}
-
 function tomlRepositoryEntryWithStore(entry: unknown, store: StoreConfig): TomlTable {
   if (typeof entry === "string") {
     throw new Error(
@@ -670,6 +658,13 @@ function repositoryEntriesMatch(actual: unknown, expected: RepoConfigEntry | und
     stableSerialize(parsedActual.success ? parsedActual.data : actual) ===
     stableSerialize(parsedExpected.success ? parsedExpected.data : expected)
   );
+}
+
+function repositoryEntriesRawMatch(
+  actual: unknown,
+  expected: RepoConfigEntry | undefined,
+): boolean {
+  return stableSerialize(actual) === stableSerialize(expected);
 }
 
 function storeRoutesMatch(actual: StoreConfig, expected: StoreConfig): boolean {
@@ -1217,6 +1212,7 @@ export async function writeRepositoryStoreConfigIfUnchanged(
     throw new Error("[CONFIG_WRITE_FAILED] repository name must not be empty");
   }
 
+  let writtenRepositoryConfig: RepoConfigEntry | undefined;
   await withConfigLock(configFile, async (assertOwner) => {
     const fileSnapshot = await readTomlFileSnapshot(configFile);
     const config = fileSnapshot.value;
@@ -1235,16 +1231,24 @@ export async function writeRepositoryStoreConfigIfUnchanged(
       );
     }
     const currentRepos = isRecord(config["repos"]) ? config["repos"] : {};
+    const writtenEntry = tomlRepositoryEntryWithStore(
+      "repositoryEntryRaw" in snapshot ? snapshot.repositoryEntryRaw : snapshot.repositoryEntry,
+      store,
+    );
+    // The validated raw entry retains future keys for a later rollback CAS check.
+    writtenRepositoryConfig = writtenEntry as RepoConfigEntry;
     const repos = {
       ...currentRepos,
-      [trimmedRepository]: tomlRepositoryEntryWithStore(
-        "repositoryEntryRaw" in snapshot ? snapshot.repositoryEntryRaw : snapshot.repositoryEntry,
-        store,
-      ),
+      [trimmedRepository]: writtenEntry,
     };
     await writeTomlFileIfCurrent(configFile, { ...config, repos }, fileSnapshot, assertOwner);
   });
-  return repositoryEntryWithStore(snapshot.repositoryEntry, store);
+  if (writtenRepositoryConfig === undefined) {
+    throw new Error(
+      `[CONFIG_WRITE_FAILED] routing for ${trimmedRepository} was not written; inspect config.toml and retry`,
+    );
+  }
+  return writtenRepositoryConfig;
 }
 
 export async function restoreRepositoryConfigEntry(
@@ -1293,7 +1297,7 @@ export async function restoreRepositoryConfigEntryIfUnchanged(
     const fileSnapshot = await readTomlFileSnapshot(configFile);
     const config = fileSnapshot.value;
     const currentRepos = isRecord(config["repos"]) ? config["repos"] : {};
-    if (!repositoryEntriesMatch(currentRepos[trimmedRepository], expectedCurrent)) {
+    if (!repositoryEntriesRawMatch(currentRepos[trimmedRepository], expectedCurrent)) {
       return false;
     }
     const repos: TomlTable = { ...currentRepos };

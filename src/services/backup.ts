@@ -136,6 +136,10 @@ export interface LocalBackupServiceOptions {
   readonly retention: Retention;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function isMissingFile(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
@@ -681,7 +685,12 @@ function repositoryConfigEntry(
   if (text.trim() === "") {
     return undefined;
   }
-  return configSchema.parse(parse(text)).repos[repository];
+  const rawConfig: unknown = parse(text);
+  configSchema.parse(rawConfig);
+  const repos = isRecord(rawConfig) && isRecord(rawConfig["repos"]) ? rawConfig["repos"] : {};
+  const entry = repos[repository];
+  // Validation above guarantees the union shape; retain extra TOML keys for forward compatibility.
+  return entry as RepoConfigEntry | undefined;
 }
 
 async function repositoryConfigEntryMatches(

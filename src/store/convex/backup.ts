@@ -259,7 +259,12 @@ function mergeRepositoryRestore(
   });
 }
 
-async function readDump(path: string): Promise<QuestDump> {
+interface ReadDumpResult {
+  readonly dump: QuestDump;
+  readonly schemaVersion: number;
+}
+
+async function readDump(path: string): Promise<ReadDumpResult> {
   let serialized: string;
   try {
     serialized = await readFile(path, "utf8");
@@ -267,7 +272,13 @@ async function readDump(path: string): Promise<QuestDump> {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`could not read Convex backup ${path}: ${detail}`);
   }
-  return parseQuestBackupExport(serialized);
+  const raw: unknown = JSON.parse(serialized);
+  const dump = parseQuestBackupExport(serialized);
+  const schemaVersion =
+    isRecord(raw) && typeof raw["schema_version"] === "number"
+      ? raw["schema_version"]
+      : dump.schema_version;
+  return { dump, schemaVersion };
 }
 
 export class ConvexBackupDatabase implements BackupDatabase {
@@ -294,7 +305,8 @@ export class ConvexBackupDatabase implements BackupDatabase {
 
   async inspect(databasePath: string): Promise<BackupDatabaseInspection> {
     this.#requireAbsolute(databasePath, "snapshot path");
-    return this.#inspection(await readDump(databasePath));
+    const snapshot = await readDump(databasePath);
+    return this.#inspection(snapshot.dump, snapshot.schemaVersion);
   }
 
   async inspectCurrent(): Promise<BackupDatabaseInspection> {
@@ -307,7 +319,7 @@ export class ConvexBackupDatabase implements BackupDatabase {
     repository?: string,
   ): Promise<BackupDatabaseRestoreSession> {
     this.#requireAbsolute(source, "snapshot path");
-    const replacement = await readDump(source);
+    const replacement = (await readDump(source)).dump;
     const previousSnapshot = await this.#store.exportAllWithCutoff();
     const previous = previousSnapshot.dump;
     const trimmedRepository = repository?.trim();
@@ -437,11 +449,14 @@ export class ConvexBackupDatabase implements BackupDatabase {
     };
   }
 
-  #inspection(dump: QuestDump): BackupDatabaseInspection {
+  #inspection(
+    dump: QuestDump,
+    schemaVersion: number = dump.schema_version,
+  ): BackupDatabaseInspection {
     return {
       dump,
       integrity_check: ["ok"],
-      schema_version: dump.schema_version,
+      schema_version: schemaVersion,
     };
   }
 

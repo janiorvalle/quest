@@ -105,9 +105,9 @@ open ──claim─────────────────────�
   quest to its dispatch state (`open` for an untriaged bug, otherwise `ready`)
   without a daemon. `quest touch <id>` renews a long-running claim. Zero rows
   updated = claim conflict.
-  Configure `[store] lease_ttl_minutes` or use `accept --lease` for a one-off
-  duration. Existing recorded expiry timestamps are never recalculated. Zero
-  rows updated = claim conflict.
+  Configure `[store] lease_ttl_minutes` or use `accept --lease` / `touch --lease`
+  for a one-off duration. Existing recorded expiry timestamps are never
+  recalculated. Zero rows updated = claim conflict.
 - `turned_in` — change made and submitted (merged / in review), awaiting
   independent verification.
 - `complete` — verified.

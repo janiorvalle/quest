@@ -221,11 +221,14 @@ quest accept <id>                 Claim a quest (atomic; sets assignee).
                                   accept; must be a positive whole number.
 
 quest touch <id>                  Renew the current assignee's lease.
+    --lease <minutes>             Override this touch's renewal duration; must be
+                                  a positive whole number.
                                   Use during long-running work; writes by the
                                   assignee renew automatically. New claims and
                                   touches default to 24 hours. Set
                                   `[store] lease_ttl_minutes` to change that
-                                  default; `accept --lease` wins for one claim.
+                                  default; `accept --lease` or `touch --lease`
+                                  wins for one mutation.
                                   The tradeoff is explicit: a crashed manual
                                   lane can hold its claim for up to a day.
                                   Use `quest abandon` to release it; `quest doctor`

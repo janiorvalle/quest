@@ -1788,6 +1788,7 @@ model = "gpt-5-slow"
   test("renews each claimed quest while its worker runs", async () => {
     const root = await mkdtemp(join(tmpdir(), "quest-dispatch-heartbeat-test-"));
     let touched = 0;
+    const touchCommands: CommandSpec[] = [];
     let claimed = false;
     let workerStarted = false;
     let resolveWorker: ((exitCode: number) => void) | undefined;
@@ -1802,6 +1803,9 @@ model = "gpt-5-slow"
         repoRoot: root,
         async runCommand(spec) {
           await prepareFakeWorktree(spec);
+          if (spec.args.includes("touch")) {
+            touchCommands.push(spec);
+          }
           return fakeCommandResponse(spec, [
             [
               "next",
@@ -1848,6 +1852,12 @@ model = "gpt-5-slow"
 
       expect(report.workers).toHaveLength(1);
       expect(touched).toBeGreaterThan(0);
+      expect(
+        touchCommands.every((command) => {
+          const leaseIndex = command.args.indexOf("--lease");
+          return leaseIndex >= 0 && command.args[leaseIndex + 1] === "30";
+        }),
+      ).toBeTrue();
     } finally {
       await rm(root, { force: true, recursive: true });
     }

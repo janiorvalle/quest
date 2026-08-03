@@ -81,7 +81,7 @@ describe("Convex backup restore", () => {
     await expect(backup.inspect(path)).resolves.toEqual({
       dump: emptyDump,
       integrity_check: ["ok"],
-      schema_version: STORE_SCHEMA_VERSION,
+      schema_version: 6,
     });
   });
 

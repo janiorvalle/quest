@@ -868,6 +868,7 @@ export async function touchLifecycleQuest(
   owner: string,
   sessionGuild: string | null = null,
   sessionAttribution: SessionAttribution = {},
+  leaseTtlMinutes?: number,
 ): Promise<QuestMutationResult> {
   await requireScopedQuest(store, id, scope);
   const quest = await store.touchQuest({
@@ -875,6 +876,7 @@ export async function touchLifecycleQuest(
     owner,
     ...sessionAttribution,
     session_guild: sessionGuild,
+    ...(leaseTtlMinutes === undefined ? {} : { lease_ttl_minutes: leaseTtlMinutes }),
   });
   return {
     changed: true,

@@ -188,6 +188,7 @@ interface AcceptCliRequest {
 interface TouchCliRequest {
   readonly command: "touch";
   readonly id: number;
+  readonly leaseTtlMinutes?: number | undefined;
   readonly owner?: string | undefined;
 }
 
@@ -476,8 +477,14 @@ export function registerLifecycleCommands(
     .description("renew the lease on an accepted quest")
     .argument("<id>")
     .option("--as <owner>")
+    .option("--lease <minutes>", "set this touch's lease length in minutes")
     .action(function (this: Command, id: string) {
-      capture.set({ command: "touch", id: idArgument(id), owner: optionalString(this, "as") });
+      capture.set({
+        command: "touch",
+        id: idArgument(id),
+        leaseTtlMinutes: optionalLeaseTtl(this),
+        owner: optionalString(this, "as"),
+      });
     });
 
   program
@@ -1270,6 +1277,7 @@ export async function executeLifecycleCli(options: ExecuteLifecycleCliOptions): 
         mutationActor,
         sessionGuild,
         sessionAttribution,
+        request.leaseTtlMinutes,
       );
       return writeMutationResult(options, request.command, result, `quest ${request.id} touched`);
     }

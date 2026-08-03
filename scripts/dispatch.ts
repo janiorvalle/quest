@@ -2624,7 +2624,16 @@ function touchCommand(
   timeoutMs: number,
 ): CommandSpec {
   return {
-    args: ["--format", "json", "touch", String(target.questId), "--as", target.owner],
+    args: [
+      "--format",
+      "json",
+      "touch",
+      String(target.questId),
+      "--as",
+      target.owner,
+      "--lease",
+      String(DISPATCH_LEASE_TTL_MINUTES),
+    ],
     command: questCliCommand(runtime),
     cwd: runtime.repoRoot,
     env: questEnvironment(

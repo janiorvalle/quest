@@ -469,7 +469,7 @@ describe("repository store config writer", () => {
       );
       const snapshot = await readRepositoryRoutingSnapshot(configFile, "web-app");
 
-      await writeRepositoryStoreConfigIfUnchanged(
+      const written = await writeRepositoryStoreConfigIfUnchanged(
         configFile,
         { backend: "convex", deployment: "dev:migration" },
         snapshot,
@@ -487,6 +487,19 @@ describe("repository store config writer", () => {
           },
         },
       });
+
+      await writeFile(
+        configFile,
+        '[repos.web-app]\nfuture = "changed"\n\n[repos.web-app.store]\nbackend = "convex"\ndeployment = "dev:migration"\nfuture_option = "changed"\n',
+      );
+      await expect(
+        restoreRepositoryConfigEntryIfUnchanged(
+          configFile,
+          "web-app",
+          written,
+          snapshot.repositoryEntryRaw ?? snapshot.repositoryEntry,
+        ),
+      ).resolves.toBeFalse();
     } finally {
       await rm(directory, { force: true, recursive: true });
     }
