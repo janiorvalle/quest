@@ -25,7 +25,12 @@ import {
   type UpgradeOperations,
 } from "../services";
 import type { BlobStore, Clock, QuestStore, StoreCompatibilityProbe } from "../store";
-import { selectQuestTheme, UnknownThemeError, type ViewerTheme } from "../tui/theme-selection";
+import {
+  assertKnownThemeFlag,
+  selectQuestTheme,
+  UnknownThemeError,
+  type ViewerTheme,
+} from "../tui/theme-selection";
 import {
   type BackupCliRequest,
   BackupCliUsageError,
@@ -903,6 +908,9 @@ async function executeQuestCli(
   request: QuestCliRequest | undefined,
   dependencies: QuestCliDependencies,
 ): Promise<ExitCode> {
+  if (flags.theme !== undefined) {
+    assertKnownThemeFlag(flags.theme);
+  }
   if (request !== undefined && isSkillCliRequest(request)) {
     return executeSkillRequest(flags, request, dependencies);
   }

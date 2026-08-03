@@ -57,10 +57,14 @@ resolved provider configuration make the values explicit.
 
 The viewer picks its theme from the first source that names one:
 `--theme <name>`, then `QUEST_THEME`, then `[tui] theme` in the user config,
-then the built-in default `dense`. `quest --theme <name>` with a name this build
-does not ship is a usage error listing the valid names; a name only in the config
-file warns in the viewer's notice line and falls back to `dense`, so a config
-written by a newer quest never bricks an older one.
+then the built-in default `dense`.
+
+`--theme <name>` with a name this build does not ship is a usage error on any
+command, listing the valid names — you typed it, so the command you typed it on
+reports it. `QUEST_THEME` is ambient rather than typed, so it is checked when the
+viewer opens and a stale export never fails commands that show no theme. A name
+that appears only in the config file warns in the viewer's notice line and falls
+back to `dense`, so a config written by a newer quest never bricks an older one.
 
 Pressing `t` in the viewer switches to the next theme and saves it as the
 default, writing one key to the user config file:

@@ -388,6 +388,27 @@ describe("Commander CLI wiring", () => {
     }
   });
 
+  test("an unknown --theme fails every command, but a stale QUEST_THEME only fails the viewer", async () => {
+    const jsonRun = harness({});
+    expect(await runQuestCli(["--theme", "tavren", "--format", "json"], jsonRun.dependencies)).toBe(
+      EXIT_USAGE_ERROR,
+    );
+    expect(jsonRun.stderr[0]).toContain("--theme tavren");
+    expect(jsonRun.stdout).toEqual([]);
+
+    const pipedRun = harness({ isTty: false });
+    expect(await runQuestCli(["--theme", "tavren", "list"], pipedRun.dependencies)).toBe(
+      EXIT_USAGE_ERROR,
+    );
+    expect(pipedRun.stderr[0]).toContain("--theme tavren");
+
+    // QUEST_THEME is ambient: a stale export must not take down commands that never show a theme.
+    const environmentRun = harness({ environment: { QUEST_THEME: "tavren" } });
+    expect(await runQuestCli(["--format", "json", "list"], environmentRun.dependencies)).not.toBe(
+      EXIT_USAGE_ERROR,
+    );
+  });
+
   test("the viewer saves a theme through the config writer the CLI supplies", async () => {
     const directory = await mkdtemp(join(tmpdir(), "quest-cli-theme-save-"));
     const store = createSqliteStore(join(directory, "quest.db"));

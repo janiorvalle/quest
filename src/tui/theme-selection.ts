@@ -92,6 +92,20 @@ function configTheme(name: string, themes: readonly QuestTheme[]): ThemeSelectio
   };
 }
 
+/**
+ * Checks a theme name the caller typed on this invocation, whatever the command does with it.
+ *
+ * An explicit flag is checked everywhere because a typo is the caller's mistake and belongs to the
+ * command that made it. QUEST_THEME is deliberately not checked this way: it is ambient, and a
+ * stale export must not fail commands that never look at a theme.
+ */
+export function assertKnownThemeFlag(
+  name: string,
+  themes: readonly QuestTheme[] = QUEST_THEMES,
+): void {
+  flagTheme(name, themes);
+}
+
 export function selectQuestTheme(sources: ThemeSelectionSources): ThemeSelection {
   const themes = sources.themes ?? QUEST_THEMES;
   if (sources.flagTheme !== undefined) {
