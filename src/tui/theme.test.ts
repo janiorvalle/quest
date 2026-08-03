@@ -97,6 +97,46 @@ describe("dense theme", () => {
   });
 });
 
+/**
+ * Adding tavern meant growing the theme vocabulary: the blocked status text, the priority ink, the
+ * pull-request color and the split of a status glyph from its word all moved out of the view and
+ * into theme data. None of that may change what dense paints. Each expectation below pins a token
+ * to the value the view hardcoded before the move, so the refactor stays provably neutral.
+ *
+ * The frame-level proof lives with quest 194: dense rendered on 8b62421 against dense rendered on
+ * this branch differs in zero characters and zero colors, only in glyph weight.
+ */
+describe("dense survives the theme-token refactor unchanged", () => {
+  test("composes the status labels the view used to hardcode", () => {
+    expect(questStatusText(DENSE_THEME.status.accepted)).toBe("◐ active");
+    expect(questStatusText(DENSE_THEME.status.complete)).toBe("✓ complete");
+    expect(questStatusText(DENSE_THEME.status.dropped)).toBe("✕ dropped");
+    expect(questStatusText(DENSE_THEME.status.open)).toBe("○ open");
+    expect(questStatusText(DENSE_THEME.status.ready)).toBe("● ready");
+    expect(questStatusText(DENSE_THEME.status.turned_in)).toBe("◆ review");
+  });
+
+  test("still spells the blocked cell '○ blocked', which the view had as a literal", () => {
+    expect(`${DENSE_THEME.blockedStatus.glyph} ${DENSE_THEME.blockedStatus.label}`).toBe(
+      "○ blocked",
+    );
+  });
+
+  test("reproduces the old priority coloring: p1 the open color, p2 and p3 muted", () => {
+    expect(questPriorityInk(DENSE_THEME, 1)).toBe(DENSE_THEME.status.open.color);
+    expect(questPriorityInk(DENSE_THEME, 2)).toBe(DENSE_THEME.palette.textMuted);
+    expect(questPriorityInk(DENSE_THEME, 3)).toBe(DENSE_THEME.palette.textMuted);
+  });
+
+  test("keeps the pull-request marker on the same color the warn token gave it", () => {
+    expect(DENSE_THEME.palette.pullRequest).toBe(DENSE_THEME.palette.warn);
+  });
+
+  test("keeps the blocked-flag marker, renamed but not changed", () => {
+    expect(DENSE_THEME.glyphs.blockedFlag).toBe("⛓");
+  });
+});
+
 describe("tavern theme", () => {
   test("carries the blessed palette", () => {
     expect(TAVERN_THEME.palette).toEqual({
