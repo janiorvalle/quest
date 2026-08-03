@@ -203,6 +203,8 @@ quest next                        The answer to "what do I work on?" Respects:
     --brief                       With --claim, include the full context package
                                   in the same response; this is the one-shot work
                                   start for agents.
+    --lease <minutes>             With --claim, override the claim lease for this
+                                  one suggestion; must be a positive whole number.
 
 quest accept <id>                 Claim a quest (atomic; sets assignee).
     --as <owner>                  Owner identity; overrides QUEST_IDENTITY,

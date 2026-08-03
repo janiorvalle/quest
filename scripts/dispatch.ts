@@ -18,6 +18,7 @@ import { type Config, type Quest, questSchema } from "../src/schema";
 const dispatchAgentSchema = z.enum(["codex", "claude"]);
 const trustModeSchema = z.enum(["full", "guarded"]);
 const ORCHESTRATION_COMMAND_TIMEOUT_MS = 60_000;
+const DISPATCH_LEASE_TTL_MINUTES = 30;
 const DISPATCH_HEARTBEAT_WINDOW_MS = 30 * 60 * 1_000;
 const WORKER_BRIEF_FILE_PREFIX = ".quest-dispatch-brief-";
 const dispatchArgumentsSchema = z.strictObject({
@@ -2470,7 +2471,7 @@ export async function requireGuardedCodexCompatibility(
 function questCliCompatibilityError(questCliPath: string, detail: string): DispatchError {
   return new DispatchError(
     "DISPATCH_QUEST_CLI_INCOMPATIBLE",
-    `Quest CLI at ${questCliPath} is not compatible with dispatcher trust rework (${detail}); upgrade Quest CLI to >=${MINIMUM_QUEST_CLI_VERSION}. It must support --format json, next --claim, and --skip-after-reopens <count>, then retry`,
+    `Quest CLI at ${questCliPath} is not compatible with dispatcher trust rework (${detail}); upgrade Quest CLI to >=${MINIMUM_QUEST_CLI_VERSION}. It must support --format json, next --claim, --lease <minutes>, and --skip-after-reopens <count>, then retry`,
   );
 }
 
@@ -2516,7 +2517,9 @@ export async function requireQuestCliCompatibility(
     maxOutputChars: null,
   });
   const help = `${helpResult.stdout}\n${helpResult.stderr}`;
-  const missingFlags = ["--claim", "--skip-after-reopens"].filter((flag) => !help.includes(flag));
+  const missingFlags = ["--claim", "--lease", "--skip-after-reopens"].filter(
+    (flag) => !help.includes(flag),
+  );
   if (helpResult.exitCode !== 0 || missingFlags.length > 0) {
     throw questCliCompatibilityError(
       questCliPath,
@@ -2569,7 +2572,15 @@ function questCommand(
   environment: Readonly<Record<string, string | undefined>>,
 ): CommandSpec {
   return {
-    args: ["--format", "json", "next", "--claim", "--brief"],
+    args: [
+      "--format",
+      "json",
+      "next",
+      "--claim",
+      "--brief",
+      "--lease",
+      String(DISPATCH_LEASE_TTL_MINUTES),
+    ],
     command: questCliPath ?? process.env["QUEST_CLI"] ?? "quest",
     cwd: repoRoot,
     env: environment,

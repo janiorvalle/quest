@@ -790,4 +790,26 @@ describe("next CLI behavior", () => {
       await harness.stop();
     }
   });
+
+  test("--lease overrides the default for a claimed suggestion", async () => {
+    const harness = await createHarness();
+    try {
+      await harness.runJson(["add", "Short dispatcher lease"]);
+
+      const result = await harness.runJson(["next", "--claim", "--lease", "5"]);
+
+      expect(result.code).toBe(EXIT_SUCCESS);
+      expect(result.report).toMatchObject({
+        data: {
+          claimed: true,
+          quest: {
+            assignee: identity,
+            lease_expires_at: "2026-07-29T12:05:00.000Z",
+          },
+        },
+      });
+    } finally {
+      await harness.stop();
+    }
+  });
 });

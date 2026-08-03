@@ -1257,7 +1257,7 @@ model = "gpt-5-slow"
       return {
         exitCode: 0,
         stderr: "",
-        stdout: "--claim\n--skip-after-reopens <count>\n",
+        stdout: "--claim\n--lease <minutes>\n--skip-after-reopens <count>\n",
       };
     };
 
@@ -1601,6 +1601,11 @@ model = "gpt-5-slow"
       const claimCommands = commands.filter((command) => command.args.includes("next"));
       expect(claimCommands.length).toBeGreaterThanOrEqual(2);
       expect(claimCommands.every((command) => command.args.includes("--brief"))).toBeTrue();
+      expect(
+        claimCommands.every(
+          (command) => command.args[command.args.indexOf("--lease") + 1] === "30",
+        ),
+      ).toBeTrue();
       expect(report.workers.every((worker) => worker.lockStatus === "handoff")).toBeTrue();
       expect(maximumWorkers).toBe(2);
       const firstLock = commands.findIndex((command) => command.args.includes("claim"));

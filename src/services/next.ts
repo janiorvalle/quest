@@ -37,6 +37,7 @@ export interface NextLaneConflict {
 
 export interface NextQuestOptions {
   readonly allowConflict?: boolean;
+  readonly leaseTtlMinutes?: number;
   readonly now?: string;
   readonly resolveLaneConflict?: (conflicts: readonly NextLaneConflict[]) => Promise<boolean>;
 }
@@ -381,6 +382,9 @@ export async function getNextQuest(
         laneConflictAcknowledged: acceptanceState.acknowledged,
         laneConflictGuard: true,
         laneConflictOverride: acceptanceState.override,
+        ...(options.leaseTtlMinutes === undefined
+          ? {}
+          : { leaseTtlMinutes: options.leaseTtlMinutes }),
         sessionAttribution,
         sessionGuild,
       },

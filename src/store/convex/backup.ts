@@ -3,6 +3,7 @@ import { dirname, isAbsolute } from "node:path";
 
 import { findChainCyclePath } from "../../domain";
 import { type Event, type QuestDump, questDumpSchema } from "../../schema";
+import { parseQuestBackupExport } from "../../services/export";
 import type {
   BackupDatabase,
   BackupDatabaseInspection,
@@ -259,14 +260,14 @@ function mergeRepositoryRestore(
 }
 
 async function readDump(path: string): Promise<QuestDump> {
-  let parsed: unknown;
+  let serialized: string;
   try {
-    parsed = JSON.parse(await readFile(path, "utf8"));
+    serialized = await readFile(path, "utf8");
   } catch (error: unknown) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`could not read Convex backup ${path}: ${detail}`);
   }
-  return questDumpSchema.parse(parsed);
+  return parseQuestBackupExport(serialized);
 }
 
 export class ConvexBackupDatabase implements BackupDatabase {

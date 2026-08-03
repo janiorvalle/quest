@@ -153,6 +153,21 @@ describe("config loading", () => {
     ]);
   });
 
+  test("warns when an unknown store key cannot change the selected backend", async () => {
+    const warnings: string[] = [];
+    const config = await loadConfig({
+      platform,
+      environment: {},
+      onWarning: (warning) => warnings.push(warning),
+      readFile: textReader('[store]\nbacknd = "convex"'),
+    });
+
+    expect(config.store.backend).toBe("sqlite");
+    expect(warnings).toEqual([
+      'ignored unknown config key "store.backnd"; no value was applied; backend remains "sqlite"; upgrade the Quest binary before relying on this setting',
+    ]);
+  });
+
   test("warns once and ignores an unknown top-level section", async () => {
     const warnings: string[] = [];
     const config = await loadConfig({

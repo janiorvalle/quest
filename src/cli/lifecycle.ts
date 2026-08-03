@@ -173,6 +173,7 @@ interface NextCliRequest {
   readonly brief: boolean;
   readonly claim: boolean;
   readonly command: "next";
+  readonly leaseTtlMinutes?: number | undefined;
   readonly skipAfterReopens?: number | undefined;
 }
 
@@ -435,6 +436,7 @@ export function registerLifecycleCommands(
     .option("--claim", "atomically accept the suggestion")
     .option("--allow-conflict", "claim despite a hard lane conflict")
     .option("--brief", "include the full context package; requires --claim")
+    .option("--lease <minutes>", "set this claim's lease length in minutes")
     .option(
       "--skip-after-reopens <count>",
       "leave quests reopened this many times or more for a human",
@@ -445,6 +447,7 @@ export function registerLifecycleCommands(
         brief: booleanOption(this, "brief"),
         claim: booleanOption(this, "claim"),
         command: "next",
+        leaseTtlMinutes: optionalLeaseTtl(this),
         skipAfterReopens: reopenLimitSchema
           .optional()
           .parse(optionalString(this, "skipAfterReopens")),
@@ -982,6 +985,11 @@ function requireBriefClaim(request: NextCliRequest): void {
       "--allow-conflict requires --claim; run `quest next --claim --allow-conflict` to claim work with the override",
     );
   }
+  if (request.leaseTtlMinutes !== undefined && !request.claim) {
+    throw new LifecycleCliUsageError(
+      "--lease requires --claim; run `quest next --claim --lease <minutes>` to claim work with a custom lease",
+    );
+  }
 }
 
 function laneConflictDescription(conflict: NextLaneConflict): string {
@@ -1085,6 +1093,9 @@ async function executeNext(options: ExecuteLifecycleCliOptions): Promise<ExitCod
     {
       allowConflict: request.allowConflict,
       now,
+      ...(request.leaseTtlMinutes === undefined
+        ? {}
+        : { leaseTtlMinutes: request.leaseTtlMinutes }),
       ...(options.isTty && !request.allowConflict
         ? {
             resolveLaneConflict: async (conflicts: readonly NextLaneConflict[]) => {
