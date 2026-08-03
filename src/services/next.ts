@@ -1,4 +1,4 @@
-import { computeQuestPlan, type PlanLaneCluster } from "../domain";
+import { computeQuestPlan, isDispatchableQuest, type PlanLaneCluster } from "../domain";
 import type { Chain, LaneConflictReference, Quest, QuestScope } from "../schema";
 import type { QuestStore } from "../store";
 import { compileQuestBriefFromDump, type QuestBrief } from "./brief";
@@ -83,7 +83,7 @@ function nextCandidate(
   if (
     !isInScope(quest, scope) ||
     !questGuildMatches(quest, sessionGuild) ||
-    quest.status !== "ready" ||
+    !isDispatchableQuest(quest) ||
     quest.assignee !== null
   ) {
     return { quest: null, warnings: [] };

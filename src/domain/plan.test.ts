@@ -35,6 +35,42 @@ function plan(quests: readonly Quest[], chains: readonly Chain[] = []) {
 }
 
 describe("computed quest plan", () => {
+  test("includes open bugs alongside ready work and preserves their blockers", () => {
+    const result = plan(
+      [
+        quest(1, "Ready task", { predicted_files: ["src/shared.ts"] }),
+        quest(2, "Open bug", {
+          kind: "bug",
+          predicted_files: ["src/shared.ts"],
+          status: "open",
+        }),
+        quest(3, "Blocked open bug", { kind: "bug", status: "open" }),
+        quest(4, "Open root bug", { kind: "bug", status: "open" }),
+      ],
+      [{ quest_id: 3, target_id: 4, type: "requires" }],
+    );
+
+    expect(result.quests.map((item) => item.id)).toEqual([1, 2, 4, 3]);
+    expect(result.quests.find((item) => item.id === 2)).toMatchObject({
+      computed_state: "dispatchable",
+      status: "open",
+    });
+    expect(result.quests.find((item) => item.id === 3)).toMatchObject({
+      blocker_paths: [[3, 4]],
+      blockers: [4],
+      computed_state: "blocked",
+      root_blockers: [4],
+      status: "open",
+    });
+    expect(result.lane_clusters).toContainEqual({
+      area: null,
+      files: ["src/shared.ts"],
+      heuristic: false,
+      kind: "shared_files",
+      quest_ids: [1, 2],
+    });
+  });
+
   test("layers direct and transitive blockers without persisting a status", () => {
     const result = plan(
       [
@@ -151,7 +187,7 @@ describe("computed quest plan", () => {
       [
         quest(1, "Deep blocked", { priority: 1 }),
         quest(2, "Shallow blocked", { priority: 3 }),
-        quest(3, "Root", { status: "open" }),
+        quest(3, "Root", { kind: "bug", status: "open" }),
         quest(4, "Live", {
           assignee: "worker",
           status: "accepted",
@@ -167,6 +203,6 @@ describe("computed quest plan", () => {
       ],
     );
 
-    expect(result.quests.map((item) => item.id)).toEqual([4, 5, 6, 2, 1]);
+    expect(result.quests.map((item) => item.id)).toEqual([4, 5, 3, 6, 2, 1]);
   });
 });

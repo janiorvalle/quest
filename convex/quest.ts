@@ -11,11 +11,13 @@ import {
   canApplyVerdict,
   computeQuestPlan,
   findChainCyclePath,
+  isDispatchableQuest,
   isLeaseExpired,
   isLegalStatusTransition,
   isValidBackfill,
   leaseExpiry,
   materializeExpiredLease,
+  statusAfterClaimRelease,
   statusForRetestVerdict,
   statusForVerdict,
 } from "../src/domain";
@@ -236,6 +238,10 @@ function hasGuildMismatch(
   return quest.guild !== null && quest.guild !== (sessionGuild ?? null) && force !== true;
 }
 
+function isUnclaimedDispatchable(quest: Quest): boolean {
+  return quest.assignee === null && isDispatchableQuest(quest);
+}
+
 function requireStatusTransition(
   current: Quest,
   expectedFrom: Quest["status"],
@@ -360,7 +366,10 @@ function applyReopen(
   ) {
     throw new Error(`illegal quest transition: ${current.status} -> reopen`);
   }
-  const reopenedStatus = current.status === "dropped" && current.kind === "bug" ? "open" : "ready";
+  const reopenedStatus =
+    current.status === "dropped" && current.kind === "bug"
+      ? "open"
+      : statusAfterClaimRelease(current);
   requireStatusTransition(current, current.status, reopenedStatus);
   return questSchema.parse({
     ...current,
@@ -401,15 +410,17 @@ function applyUpdate(
 
 function applyTransition(current: Quest, transition: QuestTransition, timestamp: string): Quest {
   switch (transition.action) {
-    case "abandon":
-      requireStatusTransition(current, "accepted", "ready");
+    case "abandon": {
+      const releasedStatus = statusAfterClaimRelease(current);
+      requireStatusTransition(current, "accepted", releasedStatus);
       return questSchema.parse({
         ...current,
         assignee: null,
         lease_expires_at: null,
-        status: "ready",
+        status: releasedStatus,
         updated_at: timestamp,
       });
+    }
     case "verdict":
       return applyVerdict(current, transition, timestamp);
     case "turnin":
@@ -1232,10 +1243,10 @@ async function accept(
     };
   }
   const expired = isLeaseExpired(stored.lease_expires_at, timestamp);
-  const unclaimedReady = stored.assignee === null && stored.status === "ready";
+  const unclaimedDispatchable = isUnclaimedDispatchable(stored);
   const expiredAccepted = stored.status === "accepted" && expired;
   if (
-    !(unclaimedReady || expiredAccepted) ||
+    !(unclaimedDispatchable || expiredAccepted) ||
     !isLegalStatusTransition(current.status, "accepted")
   ) {
     return { outcome: "conflict", lease_expires_at: current.lease_expires_at, quest: current };

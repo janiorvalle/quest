@@ -7,11 +7,13 @@ import {
   canApplyVerdict,
   computeQuestPlan,
   findChainCyclePath,
+  isDispatchableQuest,
   isLeaseExpired,
   isLegalStatusTransition,
   isValidBackfill,
   leaseExpiry,
   materializeExpiredLease,
+  statusAfterClaimRelease,
   statusForRetestVerdict,
   statusForVerdict,
 } from "../../domain";
@@ -496,7 +498,7 @@ export class SqliteStore implements QuestStore {
       `UPDATE quests
         SET assignee = ?, status = 'accepted', lease_expires_at = ?, updated_at = ?
         WHERE id = ? AND (
-          (assignee IS NULL AND status = 'ready') OR
+          (assignee IS NULL AND status IN ('open', 'ready')) OR
           (status = 'accepted' AND lease_expires_at IS NOT NULL AND julianday(lease_expires_at) <= julianday(?))
         )`,
       parsed.owner,
@@ -1534,7 +1536,9 @@ export class SqliteStore implements QuestStore {
       throw new Error(`illegal quest transition: ${current.status} -> reopen`);
     }
     const reopenedStatus =
-      current.status === "dropped" && current.kind === "bug" ? "open" : "ready";
+      current.status === "dropped" && current.kind === "bug"
+        ? "open"
+        : statusAfterClaimRelease(current);
     this.#requireStatusTransition(current, current.status, reopenedStatus);
     return questSchema.parse({
       ...current,
@@ -1550,15 +1554,17 @@ export class SqliteStore implements QuestStore {
 
   #applyTransition(current: Quest, transition: QuestTransition, timestamp: string): Quest {
     switch (transition.action) {
-      case "abandon":
-        this.#requireStatusTransition(current, "accepted", "ready");
+      case "abandon": {
+        const releasedStatus = statusAfterClaimRelease(current);
+        this.#requireStatusTransition(current, "accepted", releasedStatus);
         return questSchema.parse({
           ...current,
           assignee: null,
           lease_expires_at: null,
-          status: "ready",
+          status: releasedStatus,
           updated_at: timestamp,
         });
+      }
       case "verdict":
         return this.#applyVerdictTransition(current, transition, timestamp);
       case "turnin":
@@ -1892,10 +1898,11 @@ export class SqliteStore implements QuestStore {
   }
 
   #canAccept(stored: Quest, current: Quest, expired: boolean): boolean {
-    const unclaimedReady = stored.assignee === null && stored.status === "ready";
+    const unclaimedDispatchable = stored.assignee === null && isDispatchableQuest(stored);
     const expiredAccepted = stored.status === "accepted" && expired;
     return (
-      (unclaimedReady || expiredAccepted) && isLegalStatusTransition(current.status, "accepted")
+      (unclaimedDispatchable || expiredAccepted) &&
+      isLegalStatusTransition(current.status, "accepted")
     );
   }
 

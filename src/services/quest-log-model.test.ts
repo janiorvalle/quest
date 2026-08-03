@@ -182,6 +182,12 @@ describe("read-only quest log runtime", () => {
         predicted_files: ["src/live.ts"],
         status: "accepted",
       });
+      const openBug = await store.addQuest({
+        ...questInput("quest", "Open bug"),
+        backfill: true,
+        kind: "bug",
+        status: "open",
+      });
       await store.addChainLink({
         actor: "fixture",
         link: { quest_id: dependent.id, target_id: root.id, type: "requires" },
@@ -196,8 +202,22 @@ describe("read-only quest log runtime", () => {
       );
 
       const snapshot = latest(snapshots);
-      expect(snapshot.items.map((item) => item.id)).toEqual([root.id, dependent.id, live.id]);
-      expect(snapshot.plan?.items.map((item) => item.id)).toEqual([live.id, root.id, dependent.id]);
+      expect(snapshot.items.map((item) => item.id)).toEqual([
+        root.id,
+        dependent.id,
+        live.id,
+        openBug.id,
+      ]);
+      expect(snapshot.plan?.items.map((item) => item.id)).toEqual([
+        live.id,
+        root.id,
+        openBug.id,
+        dependent.id,
+      ]);
+      expect(snapshot.plan?.items.find((item) => item.id === openBug.id)).toMatchObject({
+        computedState: "dispatchable",
+        status: "open",
+      });
       expect(snapshot.items.find((item) => item.id === dependent.id)).toMatchObject({
         blocked: true,
         blockerId: root.id,

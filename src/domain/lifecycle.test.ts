@@ -9,14 +9,17 @@ import {
 import {
   canApplyVerdict,
   initialStatusForKind,
+  isDispatchableQuest,
   isLegalStatusTransition,
   isValidBackfill,
+  statusAfterClaimRelease,
   statusForRetestVerdict,
   statusForVerdict,
 } from ".";
 
 const expectedTransitions = new Set([
   "open:ready",
+  "open:accepted",
   "open:dropped",
   "ready:accepted",
   "ready:dropped",
@@ -24,9 +27,11 @@ const expectedTransitions = new Set([
   "accepted:ready",
   "accepted:turned_in",
   "accepted:dropped",
+  "turned_in:open",
   "turned_in:ready",
   "turned_in:complete",
   "turned_in:dropped",
+  "complete:open",
   "complete:ready",
   "dropped:open",
   "dropped:ready",
@@ -61,6 +66,19 @@ describe("status and kind rules", () => {
       }
     }
   });
+
+  test.each([
+    ["task", "ready", true],
+    ["bug", "ready", true],
+    ["bug", "open", true],
+    ["task", "open", false],
+    ["bug", "accepted", false],
+  ] satisfies ReadonlyArray<readonly [QuestKind, QuestStatus, boolean]>)(
+    "%s/%s dispatchability is %s",
+    (kind, status, expected) => {
+      expect(isDispatchableQuest({ kind, status })).toBe(expected);
+    },
+  );
 });
 
 describe("verdict routing", () => {
@@ -103,7 +121,11 @@ describe("backfill validity", () => {
     ["bug", "open", null, true],
     ["bug", "open", "not-reproduced", true],
     ["bug", "ready", "actionable", true],
+    ["bug", "accepted", null, true],
+    ["bug", "accepted", "not-reproduced", true],
     ["bug", "accepted", "actionable", true],
+    ["bug", "turned_in", null, true],
+    ["bug", "complete", "not-reproduced", true],
     ["bug", "turned_in", "actionable", true],
     ["bug", "complete", "actionable", true],
     ["bug", "dropped", "not-reproduced", true],
@@ -115,6 +137,18 @@ describe("backfill validity", () => {
     "%s/%s/%s validity is %s",
     (kind, status, verdict, expected) => {
       expect(isValidBackfill({ kind, status, verdict })).toBe(expected);
+    },
+  );
+
+  test.each([
+    ["task", null, "ready"],
+    ["bug", null, "open"],
+    ["bug", "not-reproduced", "open"],
+    ["bug", "actionable", "ready"],
+  ] satisfies ReadonlyArray<readonly [QuestKind, Verdict | null, QuestStatus]>)(
+    "%s/%s claim release returns %s",
+    (kind, verdict, expected) => {
+      expect(statusAfterClaimRelease({ kind, verdict })).toBe(expected);
     },
   );
 });

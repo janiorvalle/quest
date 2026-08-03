@@ -100,6 +100,9 @@ describe("plan CLI behavior", () => {
       );
       const softOne = await store.addQuest(task("alpha", "Soft one", { area: "tui" }));
       const softTwo = await store.addQuest(task("alpha", "Soft two", { area: "tui" }));
+      const openBug = await store.addQuest(
+        task("alpha", "Open bug", { kind: "bug", status: "open", backfill: true }),
+      );
       await store.addQuest(task("beta", "Other repository"));
       await store.addChainLink({
         actor: "fixture",
@@ -125,6 +128,7 @@ describe("plan CLI behavior", () => {
             { id: root.id, computed_state: "dispatchable" },
             { id: softOne.id, computed_state: "dispatchable" },
             { id: softTwo.id, computed_state: "dispatchable" },
+            { id: openBug.id, computed_state: "dispatchable", status: "open" },
             {
               id: blocked.id,
               computed_state: "blocked",

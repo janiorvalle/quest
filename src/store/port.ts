@@ -75,8 +75,9 @@ export interface QuestStore {
   addQuest(input: NewQuest): Promise<Quest>;
 
   /**
-   * Atomically claims an unassigned ready quest and appends its accept event. Concurrent callers
-   * observe exactly one accepted result; every loser receives the current quest as a conflict.
+   * Atomically claims an unassigned dispatchable quest (an open bug or ready work) and appends
+   * its accept event. Concurrent callers observe exactly one accepted result; every loser
+   * receives the current quest as a conflict.
    */
   acceptQuest(input: AcceptQuestInput): Promise<AcceptResult>;
 

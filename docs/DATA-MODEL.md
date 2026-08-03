@@ -29,7 +29,7 @@ backend enforces the same invariant its own way. All access via the
 | `opened_by` | text | Identity that filed it (human or agent) |
 | `guild` | text nullable | Agent class requested for the work; null = shared. A manual accept from another guild requires `--force` |
 | `assignee` | text nullable | Owner identity; null = unclaimed |
-| `lease_expires_at` | timestamp nullable | Passive claim expiry; reads materialize an expired accepted quest back to `ready`, and assignee writes renew the lease |
+| `lease_expires_at` | timestamp nullable | Passive claim expiry; reads materialize an expired accepted quest back to its dispatch state (`open` for an untriaged bug, otherwise `ready`), and assignee writes renew the lease |
 | `status` | text enum | See lifecycle |
 | `verdict` | text enum nullable | Triage outcome for bugs; null for tasks. See verdicts |
 | `verdict_notes` | text nullable | Why the verdict; investigation findings |
@@ -89,19 +89,22 @@ therefore only valid with a single-repository scope.
 
 ```
             (bugs start here)          (tasks start here)
-open ──verdict:actionable──▶ ready ──▶ accepted ──▶ turned_in ──▶ complete
+open ──claim─────────────────────────▶ accepted ──▶ turned_in ──▶ complete
+  └──verdict:actionable──▶ ready ────────┘
   │                            ▲                        │
   │                            └────── reopen ◀─────────┘  (reopen_count++)
   │
   └──verdict:anything else──▶ dropped
 ```
 
-- `open` — filed, not yet triaged (bugs only).
+- `open` — filed, not yet triaged (bugs only); open bugs are still dispatchable
+  and may be claimed directly.
 - `ready` — actionable and unclaimed. Tasks are born here.
 - `accepted` — claimed for a 30-minute lease. Claiming is atomic; every write
   by the assignee renews it. A read observes an expired lease and returns the
-  quest to `ready` without a daemon. `quest touch <id>` renews a long-running
-  claim. Zero rows updated = claim conflict.
+  quest to its dispatch state (`open` for an untriaged bug, otherwise `ready`)
+  without a daemon. `quest touch <id>` renews a long-running claim. Zero rows
+  updated = claim conflict.
 - `turned_in` — change made and submitted (merged / in review), awaiting
   independent verification.
 - `complete` — verified.
@@ -109,8 +112,8 @@ open ──verdict:actionable──▶ ready ──▶ accepted ──▶ turned
 - `cancel` — any non-terminal quest moves to `dropped`; bugs receive `wont-do`,
   while tasks keep a null verdict and record the reason in notes.
 - `reopen` — forward correction with notes and a bumped count: `turned_in` and
-  `complete` return to `ready`; dropped bugs return to `open`; dropped tasks
-  return to `ready`.
+  `complete` return to `ready`, unless an untriaged bug returns to `open`;
+  dropped bugs return to `open`; dropped tasks return to `ready`.
 
 Verification is whatever the project means by it (QA retest, code review,
 stakeholder check) — the model only insists the step exists.
