@@ -25,6 +25,7 @@ import {
   type UpgradeOperations,
 } from "../services";
 import type { BlobStore, Clock, QuestStore, StoreCompatibilityProbe } from "../store";
+import { selectQuestTheme, UnknownThemeError, type ViewerTheme } from "../tui/theme-selection";
 import {
   type BackupCliRequest,
   BackupCliUsageError,
@@ -190,7 +191,7 @@ export interface FutureTuiContext {
   readonly identity?: string;
   readonly ports: OperationalCliApplicationPorts;
   readonly scope: QuestScope;
-  readonly theme?: string;
+  readonly theme: ViewerTheme;
   readonly viewer: EvidenceOpener;
   readonly workingDirectory: string;
 }
@@ -228,6 +229,7 @@ export interface QuestCliDependencies {
   readonly output: CliOutputBoundary;
   readonly prompter: CliPrompter;
   readonly readStdin?: (() => Promise<string>) | undefined;
+  readonly saveViewerTheme?: ((themeName: string) => Promise<void>) | undefined;
   readonly upgrade?: UpgradeOperations | undefined;
   readonly validateWorkingDirectory: WorkingDirectoryValidator;
   readonly viewer?: EvidenceOpener;
@@ -258,6 +260,7 @@ interface CliErrorDispatchRule {
 
 const CLI_ERROR_DISPATCH: readonly CliErrorDispatchRule[] = [
   { kind: "usage", matches: (error) => error instanceof ScopeResolutionError },
+  { kind: "usage", matches: (error) => error instanceof UnknownThemeError },
   { kind: "usage", matches: (error) => error instanceof ConvexDeploymentError },
   { kind: "domain", matches: (error) => error instanceof StoreCompatibilityError },
   { kind: "usage", matches: (error) => error instanceof LifecycleCliUsageError },
@@ -288,6 +291,7 @@ function parseGlobalOptions(program: Command) {
     repo: program.getOptionValue("repo"),
     all: program.getOptionValue("all"),
     format: program.getOptionValue("format"),
+    theme: program.getOptionValue("theme"),
     version: program.getOptionValue("version"),
   });
 }
@@ -944,6 +948,23 @@ async function executeQuestCli(
   }
 }
 
+function resolveViewerTheme(
+  flags: GlobalCliOptions,
+  dependencies: QuestCliDependencies,
+): ViewerTheme {
+  const selection = selectQuestTheme({
+    configTheme: dependencies.config.tui?.theme,
+    environmentTheme: dependencies.environment?.["QUEST_THEME"],
+    flagTheme: flags.theme,
+  });
+  const save = dependencies.saveViewerTheme;
+  return {
+    name: selection.theme.name,
+    save: save ?? (() => Promise.reject(new Error("this build cannot write the user config file"))),
+    warnings: selection.warnings,
+  };
+}
+
 async function executeBareQuestRequest(
   flags: GlobalCliOptions,
   dependencies: QuestCliDependencies,
@@ -951,7 +972,6 @@ async function executeBareQuestRequest(
   resolved: ResolvedCliScope,
   clock: Clock,
 ): Promise<ExitCode> {
-  const theme = dependencies.config.tui?.theme;
   if (dependencies.isTty && flags.format !== "json") {
     if (dependencies.launchTui === undefined || dependencies.viewer === undefined) {
       throw new Error("the read-only viewer is unavailable in this build");
@@ -962,7 +982,7 @@ async function executeBareQuestRequest(
         : { identity: dependencies.config.identity }),
       ports: requireOperationalPorts(ports),
       scope: resolved.scope,
-      ...(theme === undefined ? {} : { theme }),
+      theme: resolveViewerTheme(flags, dependencies),
       viewer: dependencies.viewer,
       workingDirectory: resolved.working_directory,
     });
@@ -1061,6 +1081,7 @@ export function createQuestCommand(
     .addOption(new Option("--repo <name>", "select one repository").conflicts("all"))
     .addOption(new Option("--all", "select every repository").conflicts("repo"))
     .addOption(new Option("--format <format>", "select output format").choices(["json"]))
+    .addOption(new Option("--theme <name>", "select the viewer theme"))
     .addOption(new Option("-V, --version", "display version"))
     .allowExcessArguments(false)
     .showHelpAfterError(false)

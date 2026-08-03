@@ -7,6 +7,7 @@ import { parse } from "smol-toml";
 
 import { loadConfig } from "./loader";
 import {
+  ConfigWriteError,
   ConvexDeploymentError,
   normalizeConvexDeployment,
   restoreRepositoryConfigEntry,
@@ -17,6 +18,7 @@ import {
   writeHostedRepositoryRoutes,
   writeRepositoryStoreConfig,
   writeRepositoryStoreConfigIfUnchanged,
+  writeViewerTheme,
 } from "./writer";
 
 // Windows ignores POSIX mode bits — NTFS ACLs decide who can read a file there — so
@@ -81,6 +83,69 @@ test("writeConvexToken creates a missing config file", async () => {
       convex: { "dev:quest": { token: "qtk-token" } },
     });
     await expectPrivateFile(configFile);
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
+test("writeViewerTheme saves the theme and leaves every other setting untouched", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "quest-config-writer-theme-"));
+  const configFile = join(directory, "config.toml");
+  try {
+    await writeFile(
+      configFile,
+      'identity = "alice"\n\n[store]\nbackend = "sqlite"\n\n[repos]\nquest = "quest"\n',
+    );
+
+    await writeViewerTheme(configFile, "dense");
+
+    expect(parse(await readFile(configFile, "utf8"))).toEqual({
+      identity: "alice",
+      store: { backend: "sqlite" },
+      repos: { quest: "quest" },
+      tui: { theme: "dense" },
+    });
+    await expectPrivateFile(configFile);
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
+test("writeViewerTheme replaces the previous theme instead of appending a second one", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "quest-config-writer-theme-replace-"));
+  const configFile = join(directory, "nested", "config.toml");
+  try {
+    await writeViewerTheme(configFile, "first");
+    await writeViewerTheme(configFile, "second");
+
+    const contents = await readFile(configFile, "utf8");
+    expect(parse(contents)).toEqual({ tui: { theme: "second" } });
+    expect(contents.match(/theme/gu)).toHaveLength(1);
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
+// A released quest parses the config root strictly, so a section it has never heard of fails
+// every command on that binary — not just the viewer. Whatever the viewer saves has to land in a
+// section that already-shipped versions accept.
+test("writeViewerTheme saves into a section older quest versions already accept", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "quest-config-writer-theme-section-"));
+  const configFile = join(directory, "config.toml");
+  try {
+    await writeViewerTheme(configFile, "dense");
+
+    expect(Object.keys(parse(await readFile(configFile, "utf8")))).toEqual(["tui"]);
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
+});
+
+test("writeViewerTheme refuses an empty theme name", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "quest-config-writer-theme-empty-"));
+  const configFile = join(directory, "config.toml");
+  try {
+    await expect(writeViewerTheme(configFile, "  ")).rejects.toThrow(ConfigWriteError);
   } finally {
     await rm(directory, { force: true, recursive: true });
   }

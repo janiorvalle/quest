@@ -156,11 +156,27 @@ export const DENSE_THEME: QuestTheme = {
   },
 };
 
+/**
+ * The registry. A new theme ships by adding its QuestTheme object here — selection, the t key,
+ * persistence, and the error messages all read this list, so nothing else has to change.
+ */
 export const QUEST_THEMES: readonly QuestTheme[] = [DENSE_THEME];
 
-export function themeByName(name: string | undefined): QuestTheme {
-  if (name === undefined) {
-    return DENSE_THEME;
-  }
-  return QUEST_THEMES.find((theme) => theme.name === name) ?? DENSE_THEME;
+export function questThemeNames(themes: readonly QuestTheme[] = QUEST_THEMES): readonly string[] {
+  return themes.map((theme) => theme.name);
+}
+
+export function findQuestTheme(
+  name: string,
+  themes: readonly QuestTheme[] = QUEST_THEMES,
+): QuestTheme | undefined {
+  return themes.find((theme) => theme.name === name);
+}
+
+export function questThemeAfter(
+  current: QuestTheme,
+  themes: readonly QuestTheme[] = QUEST_THEMES,
+): QuestTheme {
+  const index = themes.findIndex((theme) => theme.name === current.name);
+  return themes[(index + 1) % themes.length] ?? current;
 }

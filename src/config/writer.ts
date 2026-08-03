@@ -528,6 +528,55 @@ export async function writeConvexToken(
   }
 }
 
+function tuiTable(config: TomlTable, configFile: string): TomlTable {
+  const value = config["tui"];
+  if (value === undefined) {
+    return {};
+  }
+  if (!isRecord(value)) {
+    throw new ConfigWriteError(`config file ${configFile} has a non-table [tui] value`);
+  }
+  return value;
+}
+
+/**
+ * The one write the read-only viewer is allowed to make: its own display preference, in the user
+ * config file. It never touches the quest store or repository routing.
+ *
+ * The preference goes in [tui] rather than a section named for the viewer because the config root
+ * schema is strict: a released quest rejects a config carrying an unknown section outright, and
+ * that failure takes down every command, not just the viewer. [tui] is the section every shipped
+ * version already accepts, so a config this viewer writes stays readable by the binary next door.
+ */
+export async function writeViewerTheme(configFile: string, theme: string): Promise<void> {
+  const normalizedTheme = theme.trim();
+  if (normalizedTheme === "") {
+    throw new ConfigWriteError("cannot save an empty viewer theme name");
+  }
+  if (!isAbsolute(configFile)) {
+    throw new ConfigWriteError(`config path must be absolute: ${configFile}`);
+  }
+
+  await mkdir(dirname(configFile), { recursive: true, mode: 0o700 });
+  await withConfigLock(configFile, async (assertOwner) => {
+    const fileSnapshot = await readTomlFileSnapshot(configFile);
+    const config = fileSnapshot.value;
+    const updated = {
+      ...config,
+      tui: { ...tuiTable(config, configFile), theme: normalizedTheme },
+    };
+    try {
+      await writeTomlFileIfCurrent(configFile, updated, fileSnapshot, assertOwner);
+    } catch (error: unknown) {
+      if (error instanceof ConfigWriteError) {
+        throw error;
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new ConfigWriteError(`could not save the viewer theme to ${configFile}: ${detail}`);
+    }
+  });
+}
+
 export async function writeHostedRepositoryRoutes(
   configFile: string,
   repositories: readonly string[],

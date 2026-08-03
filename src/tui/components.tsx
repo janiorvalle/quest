@@ -1847,6 +1847,7 @@ export function FooterKeymap({
     ["j/k", "move"],
     ["E", "evidence"],
     ["p", "pr"],
+    ["t", "theme"],
   ] as const;
   return (
     <box

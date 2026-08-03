@@ -29,6 +29,7 @@ export interface QuestLogInteractionContext {
 
 export type QuestLogIntent =
   | { readonly type: "cycle-scope" }
+  | { readonly type: "cycle-theme" }
   | { readonly type: "none" }
   | { readonly type: "notice"; readonly message: string }
   | { readonly type: "open-evidence"; readonly id: number }
@@ -196,6 +197,9 @@ export function reduceReadOnlyInteraction(
   }
   if (isKey(key, "tab")) {
     return { intent: { type: "none" }, state: tabState(normalized, key, context) };
+  }
+  if (isKey(key, "t")) {
+    return { intent: { type: "cycle-theme" }, state: normalized };
   }
   if (isKey(key, "r")) {
     return {

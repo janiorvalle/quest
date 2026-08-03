@@ -89,6 +89,7 @@ function harness(options: {
   readonly openBackend?: QuestCliDependencies["openBackend"];
   readonly openApplicationPorts?: () => Promise<CliApplicationPorts>;
   readonly probe?: StoreCompatibilityProbe;
+  readonly saveViewerTheme?: (themeName: string) => Promise<void>;
   readonly viewer?: EvidenceOpener;
 }) {
   const stdout: string[] = [];
@@ -120,6 +121,7 @@ function harness(options: {
       ask: () => Promise.reject(new Error("prompt must not run for this command")),
     },
     validateWorkingDirectory: () => Promise.resolve(),
+    ...(options.saveViewerTheme === undefined ? {} : { saveViewerTheme: options.saveViewerTheme }),
     upgrade: {
       check: () =>
         Promise.resolve({
@@ -300,6 +302,118 @@ describe("Commander CLI wiring", () => {
       expect(viewerContext?.scope).toEqual({ repo: "other-app" });
       expect(stdout).toEqual([]);
       expect(stderr).toEqual([]);
+    } finally {
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("resolves the viewer theme by flag, then environment, then config", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-cli-theme-"));
+    const store = createSqliteStore(join(directory, "quest.db"));
+    const ports = {
+      blobStore: new LocalBlobStore(join(directory, "evidence")),
+      clock,
+      questStore: store,
+    } satisfies CliApplicationPorts;
+    const themeFor = async (options: {
+      readonly arguments?: readonly string[];
+      readonly configTheme?: string;
+      readonly environmentTheme?: string;
+    }) => {
+      let viewerContext: FutureTuiContext | undefined;
+      const { dependencies } = harness({
+        ...(options.configTheme === undefined
+          ? {}
+          : { config: { ...config, tui: { theme: options.configTheme } } }),
+        ...(options.environmentTheme === undefined
+          ? {}
+          : { environment: { QUEST_THEME: options.environmentTheme } }),
+        isTty: true,
+        launchTui: async (context) => {
+          viewerContext = context;
+        },
+        openApplicationPorts: () => Promise.resolve(ports),
+        viewer: { openEvidence: () => Promise.resolve(), openUrl: () => Promise.resolve() },
+      });
+      expect(await runQuestCli(options.arguments ?? [], dependencies)).toBe(EXIT_SUCCESS);
+      return viewerContext?.theme;
+    };
+
+    try {
+      expect((await themeFor({}))?.name).toBe("dense");
+      expect((await themeFor({ configTheme: "dense" }))?.name).toBe("dense");
+      expect((await themeFor({ arguments: ["--theme", "dense"] }))?.name).toBe("dense");
+      expect((await themeFor({ environmentTheme: "dense" }))?.name).toBe("dense");
+
+      // A config naming a theme this build lacks warns instead of failing.
+      const stale = await themeFor({ configTheme: "from-a-newer-quest" });
+      expect(stale?.name).toBe("dense");
+      expect(stale?.warnings[0]).toContain('Config theme "from-a-newer-quest"');
+    } finally {
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("an unknown theme from a flag or the environment is a usage error", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-cli-theme-unknown-"));
+    const store = createSqliteStore(join(directory, "quest.db"));
+    const ports = {
+      blobStore: new LocalBlobStore(join(directory, "evidence")),
+      clock,
+      questStore: store,
+    } satisfies CliApplicationPorts;
+    const viewerHarness = (environment?: Readonly<Record<string, string | undefined>>) =>
+      harness({
+        ...(environment === undefined ? {} : { environment }),
+        isTty: true,
+        launchTui: () => Promise.reject(new Error("the viewer must not launch on a bad theme")),
+        openApplicationPorts: () => Promise.resolve(ports),
+        viewer: { openEvidence: () => Promise.resolve(), openUrl: () => Promise.resolve() },
+      });
+
+    try {
+      const flagRun = viewerHarness();
+      expect(await runQuestCli(["--theme", "tavren"], flagRun.dependencies)).toBe(EXIT_USAGE_ERROR);
+      expect(flagRun.stderr[0]).toContain("[QUEST_UNKNOWN_THEME]");
+      expect(flagRun.stderr[0]).toContain("Valid themes: dense");
+
+      const environmentRun = viewerHarness({ QUEST_THEME: "ledgr" });
+      expect(await runQuestCli([], environmentRun.dependencies)).toBe(EXIT_USAGE_ERROR);
+      expect(environmentRun.stderr[0]).toContain("QUEST_THEME=ledgr");
+    } finally {
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("the viewer saves a theme through the config writer the CLI supplies", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-cli-theme-save-"));
+    const store = createSqliteStore(join(directory, "quest.db"));
+    const ports = {
+      blobStore: new LocalBlobStore(join(directory, "evidence")),
+      clock,
+      questStore: store,
+    } satisfies CliApplicationPorts;
+    const saved: string[] = [];
+    let viewerContext: FutureTuiContext | undefined;
+    const { dependencies } = harness({
+      isTty: true,
+      launchTui: async (context) => {
+        viewerContext = context;
+      },
+      openApplicationPorts: () => Promise.resolve(ports),
+      saveViewerTheme: async (themeName) => {
+        saved.push(themeName);
+      },
+      viewer: { openEvidence: () => Promise.resolve(), openUrl: () => Promise.resolve() },
+    });
+
+    try {
+      expect(await runQuestCli([], dependencies)).toBe(EXIT_SUCCESS);
+      await viewerContext?.theme.save("dense");
+      expect(saved).toEqual(["dense"]);
     } finally {
       store.close();
       await rm(directory, { force: true, recursive: true });

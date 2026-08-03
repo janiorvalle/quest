@@ -15,4 +15,19 @@ export {
 } from "./interaction";
 export { launchQuestLog } from "./launch";
 export { QuestLogApp } from "./quest-log";
-export { DENSE_THEME, QUEST_THEMES, type QuestTheme, themeByName } from "./theme";
+export {
+  DENSE_THEME,
+  findQuestTheme,
+  QUEST_THEMES,
+  type QuestTheme,
+  questThemeAfter,
+  questThemeNames,
+} from "./theme";
+export {
+  selectQuestTheme,
+  type ThemeSelection,
+  type ThemeSelectionSources,
+  UNKNOWN_THEME_CODE,
+  UnknownThemeError,
+  type ViewerTheme,
+} from "./theme-selection";

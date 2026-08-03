@@ -28,4 +28,5 @@ export {
   writeHostedRepositoryRoutes,
   writeRepositoryStoreConfig,
   writeRepositoryStoreConfigIfUnchanged,
+  writeViewerTheme,
 } from "./writer";

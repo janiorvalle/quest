@@ -24,8 +24,15 @@ import {
 } from "./interaction";
 import { MAIN_CHROME_ROWS, mainPaneGeometry } from "./layout";
 import { openPrWithNotice } from "./pr";
-import { themeByName } from "./theme";
+import {
+  DENSE_THEME,
+  findQuestTheme,
+  QUEST_THEMES,
+  type QuestTheme,
+  questThemeAfter,
+} from "./theme";
 import { QuestThemeContext, useQuestTheme } from "./theme-context";
+import type { ViewerTheme } from "./theme-selection";
 
 function areaTabs(items: readonly QuestLogItem[]): readonly (string | null)[] {
   const areas = new Set<string>();
@@ -250,19 +257,36 @@ function ReadOnlyLayout({
   );
 }
 
+function initialThemeNotice(warnings: readonly string[]): string {
+  return warnings.length === 0 ? "Watching for quest changes" : warnings.join(" · ");
+}
+
+function savedThemeNotice(theme: QuestTheme): string {
+  return `Theme: ${theme.name} (saved as default)`;
+}
+
+function unsavedThemeNotice(theme: QuestTheme, error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  return `Theme: ${theme.name} (not saved: ${detail})`;
+}
+
 export function QuestLogApp({
   branch,
   identity,
   runtime,
-  themeName,
+  theme: viewerTheme,
 }: {
   readonly branch?: string | undefined;
   readonly identity?: string | undefined;
   readonly runtime: QuestLogRuntime;
-  readonly themeName?: string | undefined;
+  readonly theme: ViewerTheme;
 }) {
   const renderer = useRenderer();
   const dimensions = useTerminalDimensions();
+  const themeRegistry = viewerTheme.registry ?? QUEST_THEMES;
+  const [theme, setTheme] = useState(
+    () => findQuestTheme(viewerTheme.name, themeRegistry) ?? DENSE_THEME,
+  );
   const [snapshot, setSnapshot] = useState<QuestLogSnapshot>({
     currentRepo: null,
     items: [],
@@ -271,8 +295,10 @@ export function QuestLogApp({
     scope: "all",
   });
   const [interaction, setInteraction] = useState(INITIAL_QUEST_LOG_INTERACTION);
-  const [notice, setNotice] = useState("Watching for quest changes");
+  const [notice, setNotice] = useState(() => initialThemeNotice(viewerTheme.warnings));
   const interactionRef = useRef(INITIAL_QUEST_LOG_INTERACTION);
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
 
   useEffect(() => runtime.subscribe(setSnapshot), [runtime]);
 
@@ -378,6 +404,27 @@ export function QuestLogApp({
           },
         );
         return;
+      case "cycle-theme": {
+        const next = questThemeAfter(themeRef.current, themeRegistry);
+        themeRef.current = next;
+        setTheme(next);
+        setNotice(`Theme: ${next.name}`);
+        // A later press wins the notice line; a settled save must not overwrite it.
+        const stillCurrent = () => themeRef.current.name === next.name;
+        viewerTheme.save(next.name).then(
+          () => {
+            if (stillCurrent()) {
+              setNotice(savedThemeNotice(next));
+            }
+          },
+          (error: unknown) => {
+            if (stillCurrent()) {
+              setNotice(unsavedThemeNotice(next, error));
+            }
+          },
+        );
+        return;
+      }
       case "notice":
         setNotice(result.intent.message);
         return;
@@ -400,7 +447,7 @@ export function QuestLogApp({
   });
 
   return (
-    <QuestThemeContext.Provider value={themeByName(themeName)}>
+    <QuestThemeContext.Provider value={theme}>
       <ReadOnlyLayout
         branch={branch}
         counts={counts}
