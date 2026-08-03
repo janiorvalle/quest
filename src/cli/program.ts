@@ -326,8 +326,11 @@ async function readStoreCompatibility(
   return result;
 }
 
-function olderStoreMessage(result: Extract<StoreCompatibilityResult, { outcome: "store-older" }>) {
-  return `store schema ${result.store_version} is older than this binary supports (${result.supported_version}); run quest migrate before retrying`;
+function olderStoreMessage(
+  result: Extract<StoreCompatibilityResult, { outcome: "store-older" }>,
+  olderStoreRemedy?: string,
+) {
+  return `store schema ${result.store_version} is older than this binary supports (${result.supported_version}); ${olderStoreRemedy ?? "run quest migrate before retrying"}`;
 }
 
 async function requireCompatibleStore(probe: StoreCompatibilityProbe): Promise<number> {
@@ -340,7 +343,7 @@ async function requireCompatibleStore(probe: StoreCompatibilityProbe): Promise<n
         `store schema ${result.store_version} was written by a newer quest; upgrade the quest binary (this binary supports schema ${result.supported_version})`,
       );
     case "store-older":
-      throw new StoreCompatibilityError(olderStoreMessage(result));
+      throw new StoreCompatibilityError(olderStoreMessage(result, probe.olderStoreRemedy));
   }
 }
 
@@ -348,7 +351,7 @@ async function migrateStore(probe: StoreCompatibilityProbe): Promise<number> {
   const result = await readStoreCompatibility(probe);
   if (result.outcome === "store-older") {
     if (probe.migrate === undefined) {
-      throw new StoreCompatibilityError(olderStoreMessage(result));
+      throw new StoreCompatibilityError(olderStoreMessage(result, probe.olderStoreRemedy));
     }
     await probe.migrate();
   }
@@ -904,6 +907,7 @@ async function executeDoctorRequest(
       compatibilityError,
       doctor: backend.doctor ?? dependencies.doctor,
       format: flags.format,
+      olderStoreRemedy: backend.compatibilityProbe.olderStoreRemedy,
       output: dependencies.output,
     });
   } finally {

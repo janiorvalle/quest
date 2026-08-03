@@ -906,19 +906,19 @@ describe("SqliteStore", () => {
       const accepted = await store.acceptQuest({ id: quest.id, owner: "ryan" });
       expect(accepted).toMatchObject({
         outcome: "accepted",
-        lease_expires_at: "2026-07-31T00:30:00.000Z",
+        lease_expires_at: "2026-08-01T00:00:00.000Z",
         quest: { assignee: "ryan", status: "accepted" },
       });
 
       now = "2026-07-31T00:10:00Z";
       const touched = await store.touchQuest({ id: quest.id, owner: "ryan" });
-      expect(touched.lease_expires_at).toBe("2026-07-31T00:40:00.000Z");
+      expect(touched.lease_expires_at).toBe("2026-08-01T00:10:00.000Z");
       expect((await store.events(quest.id)).at(-1)?.action).toBe("touch");
       await expect(store.touchQuest({ id: quest.id, owner: "amy" })).rejects.toThrow(
         "lease owned by ryan",
       );
 
-      now = "2026-07-31T00:41:00Z";
+      now = "2026-08-01T00:11:00Z";
       expect(await store.getQuest(quest.id)).toMatchObject({
         assignee: null,
         lease_expires_at: null,
@@ -935,6 +935,7 @@ describe("SqliteStore", () => {
         }),
       ).rejects.toThrow("re-accept to continue");
 
+      now = "2026-08-01T00:41:00Z";
       const database = new Database(databasePath);
       try {
         runStatement(
@@ -942,7 +943,7 @@ describe("SqliteStore", () => {
           "UPDATE quests SET assignee = ?, status = ?, lease_expires_at = ? WHERE id = ?",
           "ryan",
           "accepted",
-          "2026-07-31T02:40:00+02:00",
+          "2026-08-01T02:40:00+02:00",
           quest.id,
         );
       } finally {
@@ -969,13 +970,42 @@ describe("SqliteStore", () => {
 
       now = "2026-07-31T03:00:00Z";
       const openBug = await store.addQuest(bugInput("expired untriaged bug"));
-      await store.acceptQuest({ id: openBug.id, owner: "ryan" });
+      await store.acceptQuest({ id: openBug.id, lease_ttl_minutes: 30, owner: "ryan" });
       now = "2026-07-31T03:31:00Z";
       expect(await store.getQuest(openBug.id)).toMatchObject({
         assignee: null,
         lease_expires_at: null,
         status: "open",
         verdict: null,
+      });
+    } finally {
+      store.close();
+      await removeDirectory(directory);
+    }
+  });
+
+  test("honors configured and per-accept lease durations", async () => {
+    const { databasePath, directory } = await createDatabasePath();
+    const now = "2026-07-31T00:00:00Z";
+    const store = new SqliteStore(databasePath, {
+      leaseTtlMinutes: 60,
+      now: () => now,
+    });
+    try {
+      const configuredQuest = await store.addQuest(taskInput("configured lease"));
+      const configured = await store.acceptQuest({ id: configuredQuest.id, owner: actor });
+      expect(configured).toMatchObject({
+        lease_expires_at: "2026-07-31T01:00:00.000Z",
+      });
+
+      const overriddenQuest = await store.addQuest(taskInput("overridden lease"));
+      const overridden = await store.acceptQuest({
+        id: overriddenQuest.id,
+        lease_ttl_minutes: 5,
+        owner: actor,
+      });
+      expect(overridden).toMatchObject({
+        lease_expires_at: "2026-07-31T00:05:00.000Z",
       });
     } finally {
       store.close();

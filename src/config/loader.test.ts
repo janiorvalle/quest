@@ -138,6 +138,36 @@ describe("config precedence", () => {
 });
 
 describe("config loading", () => {
+  test("warns once and ignores an unknown key in a known section", async () => {
+    const warnings: string[] = [];
+    const config = await loadConfig({
+      platform,
+      environment: {},
+      onWarning: (warning) => warnings.push(warning),
+      readFile: textReader('[store]\nlease_ttl_minutes = 60\nfuture_option = "ignored"'),
+    });
+
+    expect(config.store).toEqual({ backend: "sqlite", lease_ttl_minutes: 60 });
+    expect(warnings).toEqual([
+      'ignored unknown config key "store.future_option"; no value was applied; backend remains "sqlite"; upgrade the Quest binary before relying on this setting',
+    ]);
+  });
+
+  test("warns once and ignores an unknown top-level section", async () => {
+    const warnings: string[] = [];
+    const config = await loadConfig({
+      platform,
+      environment: {},
+      onWarning: (warning) => warnings.push(warning),
+      readFile: textReader('[future]\nnew_option = "ignored"'),
+    });
+
+    expect(config.store.backend).toBe("sqlite");
+    expect(warnings).toEqual([
+      'ignored unknown config section "future"; no settings from it were applied; upgrade the Quest binary before relying on this setting',
+    ]);
+  });
+
   test("resolves the session guild from config, environment, and flags", async () => {
     const resolved = await loadConfig({
       platform,
@@ -198,6 +228,7 @@ identity = "janior"
 [store]
 backend = "convex"
 convex_deployment = "dev:quest"
+lease_ttl_minutes = 60
 
 [dispatch]
 trust = "guarded"
@@ -215,6 +246,7 @@ retention = { daily = 2, weekly = 1, monthly = 0 }
       expect(config.store).toEqual({
         backend: "convex",
         convex_deployment: "dev:quest",
+        lease_ttl_minutes: 60,
       });
       expect(config.dispatch).toEqual({
         trust: "guarded",

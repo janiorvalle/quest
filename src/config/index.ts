@@ -2,6 +2,7 @@ export {
   type ConfigFileReader,
   ConfigLoadError,
   type ConfigOverrides,
+  type ConfigWarningWriter,
   type LoadConfigOptions,
   loadConfig,
   type QuestEnvironment,

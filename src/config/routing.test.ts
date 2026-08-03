@@ -36,6 +36,38 @@ describe("repository backend routing", () => {
     ]);
   });
 
+  test("inherits the global lease TTL unless a repository overrides it", () => {
+    const config = configSchema.parse({
+      store: { backend: "sqlite", lease_ttl_minutes: 60 },
+      repos: {
+        inherited: {
+          store: { backend: "convex", deployment: "dev:inherited" },
+        },
+        overridden: {
+          store: { backend: "sqlite", lease_ttl_minutes: 5 },
+        },
+      },
+    });
+
+    expect(resolveRepositoryStore(config, "inherited")).toEqual({
+      backend: "convex",
+      deployment: "dev:inherited",
+      lease_ttl_minutes: 60,
+    });
+    expect(resolveRepositoryStore(config, "overridden")).toEqual({
+      backend: "sqlite",
+      lease_ttl_minutes: 5,
+    });
+    expect(configuredRepositoryStores(config)).toEqual([
+      {
+        backend: "convex",
+        deployment: "dev:inherited",
+        lease_ttl_minutes: 60,
+      },
+      { backend: "sqlite", lease_ttl_minutes: 5 },
+    ]);
+  });
+
   test("rejects repository alias cycles with an actionable configuration error", () => {
     const config = configSchema.parse({
       repos: {

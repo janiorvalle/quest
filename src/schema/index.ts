@@ -81,6 +81,7 @@ export {
   eventFilterSchema,
   type LaneConflictReference,
   laneConflictReferenceSchema,
+  MAX_LEASE_TTL_MINUTES,
   type NewChain,
   type NewEvidence,
   type NewQuest,

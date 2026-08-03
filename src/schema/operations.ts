@@ -6,9 +6,11 @@ import { nonEmptyTextSchema } from "./primitives";
 
 const displayIdSchema = z.int().positive();
 
-// Dispatching open bugs is part of the Convex wire contract; deploy the matching backend
-// before a client that can claim them writes to it.
-export const STORE_SCHEMA_VERSION = 6;
+// Lease TTLs are part of the Convex wire contract; deploy the matching backend before
+// a client with configurable leases writes to it.
+export const STORE_SCHEMA_VERSION = 7;
+export const MAX_LEASE_TTL_MINUTES = 100_000_000;
+const leaseTtlMinutesSchema = z.int().positive().max(MAX_LEASE_TTL_MINUTES);
 
 const sessionGuildSchema = nonEmptyTextSchema.nullable().optional();
 const sessionAttributionFields = {
@@ -46,6 +48,7 @@ export const newQuestSchema = questSchema
   .extend({
     backfill: z.boolean().optional(),
     lease_expires_at: questSchema.shape.lease_expires_at.optional(),
+    lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     session_guild: sessionGuildSchema,
   });
 export type NewQuest = z.infer<typeof newQuestSchema>;
@@ -56,6 +59,7 @@ export const newEvidenceSchema = evidenceSchema
     created_at: true,
   })
   .extend({
+    lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     session_guild: sessionGuildSchema,
   });
 export type NewEvidence = z.infer<typeof newEvidenceSchema>;
@@ -81,6 +85,7 @@ export const acceptQuestInputSchema = z.strictObject({
   lane_conflict_guard: z.literal(true).optional(),
   lane_conflict_acknowledged: z.array(laneConflictReferenceSchema).optional(),
   lane_conflict_override: z.literal(true).optional(),
+  lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
   owner: nonEmptyTextSchema,
   ...sessionAttributionFields,
   session_guild: sessionGuildSchema,
@@ -120,6 +125,7 @@ export type AcceptResult = z.infer<typeof acceptResultSchema>;
 
 export const touchQuestInputSchema = z.strictObject({
   id: displayIdSchema,
+  lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
   owner: nonEmptyTextSchema,
   ...sessionAttributionFields,
   session_guild: sessionGuildSchema,
@@ -130,6 +136,7 @@ const verdictTransitionSchema = z
   .strictObject({
     action: z.literal("verdict"),
     actor: nonEmptyTextSchema,
+    lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     ...sessionAttributionFields,
     session_guild: sessionGuildSchema,
     verdict: verdictSchema,
@@ -152,6 +159,7 @@ export const questTransitionSchema = z.union([
   z.strictObject({
     action: z.literal("abandon"),
     actor: nonEmptyTextSchema,
+    lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     ...sessionAttributionFields,
     session_guild: sessionGuildSchema,
   }),
@@ -159,6 +167,7 @@ export const questTransitionSchema = z.union([
   z.strictObject({
     action: z.literal("turnin"),
     actor: nonEmptyTextSchema,
+    lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     ...sessionAttributionFields,
     session_guild: sessionGuildSchema,
     // Non-code tasks may turn in with evidence only; DATA-MODEL keeps both fields nullable.
@@ -170,6 +179,7 @@ export const questTransitionSchema = z.union([
     .strictObject({
       action: z.literal("complete"),
       actor: nonEmptyTextSchema,
+      lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
       ...sessionAttributionFields,
       session_guild: sessionGuildSchema,
       pr_unverified: z.literal(true).optional(),
@@ -186,6 +196,7 @@ export const questTransitionSchema = z.union([
   z.strictObject({
     action: z.literal("reopen"),
     actor: nonEmptyTextSchema,
+    lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     ...sessionAttributionFields,
     session_guild: sessionGuildSchema,
     notes: nonEmptyTextSchema,
@@ -193,6 +204,7 @@ export const questTransitionSchema = z.union([
   z.strictObject({
     action: z.literal("cancel"),
     actor: nonEmptyTextSchema,
+    lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     ...sessionAttributionFields,
     session_guild: sessionGuildSchema,
     reason: nonEmptyTextSchema,
@@ -200,6 +212,7 @@ export const questTransitionSchema = z.union([
   z.strictObject({
     action: z.literal("update"),
     actor: nonEmptyTextSchema,
+    lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     ...sessionAttributionFields,
     session_guild: sessionGuildSchema,
     changes: z
@@ -223,6 +236,7 @@ export type QuestTransition = z.infer<typeof questTransitionSchema>;
 export const chainMutationSchema = z.strictObject({
   link: newChainSchema,
   actor: nonEmptyTextSchema,
+  lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
   session_guild: sessionGuildSchema,
 });
 export type ChainMutation = z.infer<typeof chainMutationSchema>;

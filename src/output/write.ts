@@ -5,6 +5,7 @@ export type CliTextWriter = (text: string) => void;
 
 export interface CliOutputBoundary {
   readonly write: CliTextWriter;
+  readonly writeWarning: (warning: string) => void;
   readonly writeError: (error: CliError) => ExitCode;
 }
 
@@ -16,6 +17,9 @@ export interface CliOutputBoundaryOptions {
 const defaultTextWriter: CliTextWriter = (text) => {
   process.stdout.write(text);
 };
+const defaultWarningWriter: CliTextWriter = (warning) => {
+  process.stderr.write(`warning: ${warning}\n`);
+};
 
 export function createCliOutputBoundary(options: CliOutputBoundaryOptions = {}): CliOutputBoundary {
   const stdout = options.stdout ?? defaultTextWriter;
@@ -23,6 +27,8 @@ export function createCliOutputBoundary(options: CliOutputBoundaryOptions = {}):
 
   return {
     write: (text) => stdout(text),
+    writeWarning: (warning) =>
+      stderr === undefined ? defaultWarningWriter(warning) : stderr(`warning: ${warning}`),
     writeError: (error) =>
       stderr === undefined ? writeCliError(error) : writeCliError(error, stderr),
   };

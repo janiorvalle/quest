@@ -27,6 +27,7 @@ export interface ExecuteDoctorCliOptions {
   readonly compatibilityError?: unknown;
   readonly doctor?: DoctorOperations | undefined;
   readonly format: CliFormat;
+  readonly olderStoreRemedy?: string | undefined;
   readonly output: CliOutputBoundary;
 }
 
@@ -65,6 +66,7 @@ export async function executeDoctorCli(options: ExecuteDoctorCliOptions): Promis
   const data = await runDoctor({
     compatibility: options.compatibility,
     compatibilityError: options.compatibilityError,
+    olderStoreRemedy: options.olderStoreRemedy,
     operations: options.doctor,
     now,
   });

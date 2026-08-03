@@ -173,6 +173,11 @@ async function readQuests(ctx: QueryContext, timestamp: string): Promise<Quest[]
     .sort((left, right) => left.id - right.id);
 }
 
+async function readRawQuests(ctx: QueryContext): Promise<Quest[]> {
+  const documents = await ctx.db.query("quests").collect();
+  return documents.map(parseQuestDocument).sort((left, right) => left.id - right.id);
+}
+
 async function findQuestRecord(ctx: QueryContext, id: number) {
   return ctx.db
     .query("quests")
@@ -252,10 +257,10 @@ function requireStatusTransition(
   }
 }
 
-function renewLease(quest: Quest, timestamp: string): Quest {
+function renewLease(quest: Quest, timestamp: string, leaseTtlMinutes?: number): Quest {
   return questSchema.parse({
     ...quest,
-    lease_expires_at: leaseExpiry(timestamp),
+    lease_expires_at: leaseExpiry(timestamp, leaseTtlMinutes),
     updated_at: timestamp,
   });
 }
@@ -402,7 +407,7 @@ function applyUpdate(
     predicted_files: transition.changes.predicted_files ?? current.predicted_files,
     lease_expires_at:
       current.status === "accepted" && current.assignee !== null
-        ? leaseExpiry(timestamp)
+        ? leaseExpiry(timestamp, transition.lease_ttl_minutes)
         : current.lease_expires_at,
     updated_at: timestamp,
   });
@@ -619,15 +624,23 @@ async function removeDuplicateLinks(
   }
 }
 
-async function exportDump(ctx: QueryContext, timestamp: string): Promise<QuestDump> {
+async function createQuestDump(ctx: QueryContext, quests: readonly Quest[]): Promise<QuestDump> {
   const dump = {
     schema_version: STORE_SCHEMA_VERSION,
-    quests: await readQuests(ctx, timestamp),
+    quests: [...quests],
     evidence: await readEvidence(ctx),
     chains: await readChains(ctx),
     events: await readEvents(ctx),
   } satisfies QuestDump;
   return questDumpSchema.parse(dump);
+}
+
+async function exportDump(ctx: QueryContext, timestamp: string): Promise<QuestDump> {
+  return createQuestDump(ctx, await readQuests(ctx, timestamp));
+}
+
+async function exportRawDump(ctx: QueryContext): Promise<QuestDump> {
+  return createQuestDump(ctx, await readRawQuests(ctx));
 }
 
 function hardLaneConflictsForQuest(
@@ -1201,7 +1214,9 @@ export const addQuest = mutationGeneric({
       reopen_count: parsed.reopen_count,
       lease_expires_at:
         parsed.lease_expires_at ??
-        (parsed.status === "accepted" && parsed.assignee !== null ? leaseExpiry(timestamp) : null),
+        (parsed.status === "accepted" && parsed.assignee !== null
+          ? leaseExpiry(timestamp, parsed.lease_ttl_minutes)
+          : null),
       id,
       created_at: timestamp,
       updated_at: timestamp,
@@ -1259,7 +1274,7 @@ async function accept(
     ...stored,
     assignee: input.owner,
     status: "accepted",
-    lease_expires_at: leaseExpiry(timestamp),
+    lease_expires_at: leaseExpiry(timestamp, input.lease_ttl_minutes),
     updated_at: timestamp,
   });
   await ctx.db.replace(storedRecord._id, updated);
@@ -1319,7 +1334,7 @@ export const touchQuest = mutationGeneric({
     await requireRepositoryNotFenced(ctx, current.repo);
     const timestamp = now();
     requireActiveLeaseOwner(current, input.owner, timestamp);
-    const updated = renewLease(current, timestamp);
+    const updated = renewLease(current, timestamp, input.lease_ttl_minutes);
     await ctx.db.replace(record._id, updated);
     await appendEvent(
       ctx,
@@ -1365,13 +1380,14 @@ export const transition = mutationGeneric({
     if (transitionInput.action === "reopen" && current.verdict === "duplicate") {
       await removeDuplicateLinks(ctx, id, transitionInput, timestamp, args.test_failure);
     }
+    const { lease_ttl_minutes: _leaseTtlMinutes, ...persistedTransition } = transitionInput;
     await appendEvent(
       ctx,
       id,
       timestamp,
       transitionInput.actor,
       transitionInput.action,
-      { ...transitionInput, session_guild: transitionInput.session_guild ?? null },
+      { ...persistedTransition, session_guild: transitionInput.session_guild ?? null },
       args.test_failure,
     );
     return updated;
@@ -1410,7 +1426,7 @@ export const addChainLink = mutationGeneric({
     const events = await readQuestEvents(ctx, current.id);
     requireLeaseOwner(current, events, input.actor, timestamp);
     if (current.status === "accepted") {
-      await ctx.db.replace(record._id, renewLease(current, timestamp));
+      await ctx.db.replace(record._id, renewLease(current, timestamp, input.lease_ttl_minutes));
     }
     await ctx.db.insert("chains", input.link);
     await appendEvent(
@@ -1455,7 +1471,10 @@ export const removeChainLink = mutationGeneric({
     requireLeaseOwner(current, events, input.actor, timestamp);
     await ctx.db.delete(record._id);
     if (current.status === "accepted") {
-      await ctx.db.replace(questRecord._id, renewLease(current, timestamp));
+      await ctx.db.replace(
+        questRecord._id,
+        renewLease(current, timestamp, input.lease_ttl_minutes),
+      );
     }
     await appendEvent(
       ctx,
@@ -1484,7 +1503,7 @@ export const addEvidence = mutationGeneric({
     const events = await readQuestEvents(ctx, current.id);
     requireLeaseOwner(current, events, input.added_by, timestamp);
     if (current.status === "accepted") {
-      await ctx.db.replace(record._id, renewLease(current, timestamp));
+      await ctx.db.replace(record._id, renewLease(current, timestamp, input.lease_ttl_minutes));
     }
     const evidenceId = await nextDocumentId(ctx, "evidence", "evidence");
     const evidence = evidenceSchema.parse({
@@ -1498,13 +1517,14 @@ export const addEvidence = mutationGeneric({
       created_at: timestamp,
     });
     await ctx.db.insert("evidence", evidence);
+    const { lease_ttl_minutes: _leaseTtlMinutes, ...persistedInput } = input;
     await appendEvent(
       ctx,
       input.quest_id,
       timestamp,
       input.added_by,
       "update",
-      { evidence_id: evidenceId, ...input, session_guild: input.session_guild ?? null },
+      { evidence_id: evidenceId, ...persistedInput, session_guild: input.session_guild ?? null },
       args.test_failure,
     );
     return evidence;
@@ -1611,6 +1631,14 @@ export const exportAll = queryGeneric({
   handler: async (ctx, args) => {
     await requireMemberQueryActor(ctx, args.auth_token);
     return exportDump(ctx, parseLeaseCutoff(args.lease_cutoff));
+  },
+});
+
+export const rawExportAll = queryGeneric({
+  args: { auth_token: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    await requireMemberQueryActor(ctx, args.auth_token);
+    return exportRawDump(ctx);
   },
 });
 

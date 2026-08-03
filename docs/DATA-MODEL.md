@@ -100,11 +100,14 @@ open ──claim─────────────────────�
 - `open` — filed, not yet triaged (bugs only); open bugs are still dispatchable
   and may be claimed directly.
 - `ready` — actionable and unclaimed. Tasks are born here.
-- `accepted` — claimed for a 30-minute lease. Claiming is atomic; every write
+- `accepted` — claimed for a 24-hour lease by default. Claiming is atomic; every write
   by the assignee renews it. A read observes an expired lease and returns the
   quest to its dispatch state (`open` for an untriaged bug, otherwise `ready`)
   without a daemon. `quest touch <id>` renews a long-running claim. Zero rows
   updated = claim conflict.
+  Configure `[store] lease_ttl_minutes` or use `accept --lease` for a one-off
+  duration. Existing recorded expiry timestamps are never recalculated. Zero
+  rows updated = claim conflict.
 - `turned_in` — change made and submitted (merged / in review), awaiting
   independent verification.
 - `complete` — verified.

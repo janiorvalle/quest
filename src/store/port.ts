@@ -207,6 +207,8 @@ export interface Clock {
  * about opening a backend, not a quest-domain operation.
  */
 export interface StoreCompatibilityProbe {
+  /** Gives callers an actionable remedy when the backend is older than this binary. */
+  readonly olderStoreRemedy?: string | undefined;
   check(): Promise<StoreCompatibilityResult>;
   migrate?(): Promise<void>;
 }

@@ -56,7 +56,11 @@ async function createHarness(
   const stdout: string[] = [];
   const stderr: string[] = [];
   const answers = [...promptAnswers];
-  const store = new SqliteStore(join(directory, "quest.db"));
+  const configuredLeaseTtl = configOverride.store.lease_ttl_minutes;
+  const store = new SqliteStore(join(directory, "quest.db"), {
+    now: () => generatedAt,
+    ...(configuredLeaseTtl === undefined ? {} : { leaseTtlMinutes: configuredLeaseTtl }),
+  });
   const dependencies = {
     applicationVersion: "1.2.3",
     clock: { now: () => Promise.resolve(generatedAt) },
@@ -342,6 +346,29 @@ describe("lifecycle CLI behavior", () => {
         "accept",
         "touch",
       ]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  test("gives accept flags precedence over the configured lease duration", async () => {
+    const harness = await createHarness([], {
+      ...config,
+      store: { backend: "sqlite", lease_ttl_minutes: 60 },
+    });
+    try {
+      await harness.runJson(["add", "Configured lease"]);
+      const configured = await harness.runJson(["accept", "1"]);
+      expect(reportData(configured.report)).toMatchObject({
+        lease_expires_at: "2026-07-29T13:00:00.000Z",
+      });
+
+      await harness.runJson(["abandon", "1"]);
+      await harness.runJson(["add", "One-off lease"]);
+      const overridden = await harness.runJson(["accept", "2", "--lease", "5"]);
+      expect(reportData(overridden.report)).toMatchObject({
+        lease_expires_at: "2026-07-29T12:05:00.000Z",
+      });
     } finally {
       await harness.stop();
     }

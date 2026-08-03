@@ -181,6 +181,7 @@ interface AcceptLifecycleQuestOptions {
   readonly laneConflictGuard?: boolean;
   readonly laneConflictAcknowledged?: readonly LaneConflictReference[];
   readonly laneConflictOverride?: boolean;
+  readonly leaseTtlMinutes?: number;
   readonly mode?: QuestAcceptanceMode;
   readonly sessionAttribution?: SessionAttribution;
   readonly sessionGuild?: string | null;
@@ -494,6 +495,13 @@ async function acceptLifecycleQuestWithOperation(
 ): Promise<QuestMutationResult> {
   const sessionGuild = options.sessionGuild ?? null;
   const sessionAttribution = options.sessionAttribution ?? {};
+  const acceptWithLeaseTtl: AcceptOperation = (input) =>
+    accept({
+      ...input,
+      ...(options.leaseTtlMinutes === undefined
+        ? {}
+        : { lease_ttl_minutes: options.leaseTtlMinutes }),
+    });
   const laneConflictGuard = options.laneConflictGuard === true;
   const laneConflictAcknowledged = options.laneConflictAcknowledged ?? [];
   const laneConflictOverride = options.laneConflictOverride === true;
@@ -512,7 +520,7 @@ async function acceptLifecycleQuestWithOperation(
           laneConflictAcknowledged,
           laneConflictOverride,
           warning,
-          accept,
+          acceptWithLeaseTtl,
         )
       : {
           changed: false,
@@ -532,7 +540,7 @@ async function acceptLifecycleQuestWithOperation(
     laneConflictAcknowledged,
     laneConflictOverride,
     force ? "force" : "normal",
-    accept,
+    acceptWithLeaseTtl,
   );
 }
 

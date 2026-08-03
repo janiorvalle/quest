@@ -200,12 +200,17 @@ trusted agent can fake inputs, so the event ledger records what was observed.
 When the retest finds a problem, do not complete: attach the findings and write
 up what the human needs to decide instead.
 
-An accepted quest carries a 30-minute `lease_expires_at` in the `accept` JSON
-data. Assignee writes renew the lease; use `quest --format json touch <id>` for
-long-running work. Expiry is passive: reads return the quest to its dispatch
-state (`open` for an untriaged bug, otherwise `ready`), so re-accept before
-continuing. If another owner reclaims it, stop and use the new owner's handoff
-instead of writing to the quest.
+An accepted quest carries a 24-hour `lease_expires_at` by default in the `accept`
+JSON data. Set `[store] lease_ttl_minutes` for new accepts and touches, or use
+`accept --lease <minutes>` for one claim; the flag wins over config. Assignee
+writes renew the lease; use `quest --format json touch <id>` for long-running
+work. Existing recorded expiry timestamps are never recalculated. The tradeoff
+is that a crashed manual lane can hold its claim for up to a day: `abandon`
+releases it and `doctor` still reports stale claims. Expiry is passive: reads
+return the quest to its dispatch state (`open` for an untriaged bug, otherwise
+`ready`), so re-accept before continuing. If another owner
+reclaims it, stop and use the new owner's handoff instead of writing to the
+quest.
 
 ## Intake
 
@@ -277,7 +282,7 @@ printf '%s' '{"pr":"1234","summary":"Changed the parser. Verified with bun test.
   quest --format json turnin <id> --json -
 ```
 next [--claim] [--brief]
-accept <id> [--as owner] [--force]
+accept <id> [--as owner] [--force] [--lease minutes]
 touch <id>
 abandon <id>
 verdict <id> <verdict> [--notes text] [--retest]

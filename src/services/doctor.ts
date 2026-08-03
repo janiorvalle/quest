@@ -46,6 +46,7 @@ export interface DoctorOperations {
 export interface RunDoctorOptions {
   readonly compatibility?: StoreCompatibilityResult | undefined;
   readonly compatibilityError?: unknown;
+  readonly olderStoreRemedy?: string | undefined;
   readonly operations: DoctorOperations;
   readonly now: string;
 }
@@ -65,7 +66,10 @@ function finding(input: {
   return doctorFindingSchema.parse(input);
 }
 
-function compatibilityRemedy(compatibility: StoreCompatibilityResult | undefined): string {
+function compatibilityRemedy(
+  compatibility: StoreCompatibilityResult | undefined,
+  olderStoreRemedy?: string,
+): string {
   if (compatibility === undefined) {
     return "check the store path and permissions, then rerun quest doctor";
   }
@@ -75,7 +79,7 @@ function compatibilityRemedy(compatibility: StoreCompatibilityResult | undefined
     case "store-newer":
       return "upgrade the quest binary, then rerun quest doctor";
     case "store-older":
-      return "run quest migrate, then rerun quest doctor";
+      return olderStoreRemedy ?? "run quest migrate, then rerun quest doctor";
   }
 }
 
@@ -96,6 +100,7 @@ function compatibilitySummary(compatibility: StoreCompatibilityResult | undefine
 function schemaFinding(
   compatibility: StoreCompatibilityResult | undefined,
   compatibilityError: unknown,
+  olderStoreRemedy: string | undefined,
   inspection: DoctorStoreInspection | undefined,
   inspectionError: string | undefined,
 ): DoctorFinding {
@@ -107,7 +112,7 @@ function schemaFinding(
     return finding({
       check: "schema",
       details: { error: detail, store_exists: inspection?.state === "present" },
-      remedy: compatibilityRemedy(compatibility),
+      remedy: compatibilityRemedy(compatibility, olderStoreRemedy),
       status: "fail",
       summary: `store schema could not be checked: ${detail}`,
     });
@@ -121,7 +126,7 @@ function schemaFinding(
         store_schema_version: compatibility.store_version,
         supported_schema_version: compatibility.supported_version,
       },
-      remedy: compatibilityRemedy(compatibility),
+      remedy: compatibilityRemedy(compatibility, olderStoreRemedy),
       status: "fail",
       summary: compatibilitySummary(compatibility),
     });
@@ -135,7 +140,7 @@ function schemaFinding(
         store_schema_version: compatibility.store_version,
         supported_schema_version: compatibility.supported_version,
       },
-      remedy: compatibilityRemedy(compatibility),
+      remedy: compatibilityRemedy(compatibility, olderStoreRemedy),
       status: "fail",
       summary: `store schema matches, but the store could not be read: ${inspectionError}`,
     });
@@ -294,6 +299,7 @@ function unavailableStoreFinding(
   compatibility: StoreCompatibilityResult | undefined,
   inspectionError: string | undefined,
   compatibilityError: unknown,
+  olderStoreRemedy: string | undefined,
 ): DoctorFinding {
   const detail =
     inspectionError ??
@@ -309,7 +315,7 @@ function unavailableStoreFinding(
       error: detail,
       store_schema: compatibilitySummary(compatibility),
     },
-    remedy: compatibilityRemedy(compatibility),
+    remedy: compatibilityRemedy(compatibility, olderStoreRemedy),
     status: "warn",
     summary: `${check === "leases" ? "lease" : "evidence"} check skipped: ${detail}`,
   });
@@ -326,6 +332,7 @@ function storeIntegrityIsHealthy(
 function leaseFinding(
   compatibility: StoreCompatibilityResult | undefined,
   compatibilityError: unknown,
+  olderStoreRemedy: string | undefined,
   inspection: DoctorStoreInspection | undefined,
   inspectionError: string | undefined,
   now: string,
@@ -337,7 +344,13 @@ function leaseFinding(
     inspectionError !== undefined ||
     inspection === undefined
   ) {
-    return unavailableStoreFinding("leases", compatibility, inspectionError, compatibilityError);
+    return unavailableStoreFinding(
+      "leases",
+      compatibility,
+      inspectionError,
+      compatibilityError,
+      olderStoreRemedy,
+    );
   }
   if (inspection.state === "missing") {
     return finding({
@@ -358,7 +371,13 @@ function leaseFinding(
     });
   }
   if (inspection.dump === undefined) {
-    return unavailableStoreFinding("leases", compatibility, inspectionError, compatibilityError);
+    return unavailableStoreFinding(
+      "leases",
+      compatibility,
+      inspectionError,
+      compatibilityError,
+      olderStoreRemedy,
+    );
   }
 
   const staleClaims = inspection.dump.quests
@@ -522,6 +541,7 @@ async function inspectEvidenceBlob(
 async function evidenceFinding(
   compatibility: StoreCompatibilityResult | undefined,
   compatibilityError: unknown,
+  olderStoreRemedy: string | undefined,
   inspection: DoctorStoreInspection | undefined,
   inspectionError: string | undefined,
   blobStore: BlobStore | undefined,
@@ -533,7 +553,13 @@ async function evidenceFinding(
     inspectionError !== undefined ||
     inspection === undefined
   ) {
-    return unavailableStoreFinding("evidence", compatibility, inspectionError, compatibilityError);
+    return unavailableStoreFinding(
+      "evidence",
+      compatibility,
+      inspectionError,
+      compatibilityError,
+      olderStoreRemedy,
+    );
   }
   if (inspection.state === "missing") {
     return finding({
@@ -554,7 +580,13 @@ async function evidenceFinding(
     });
   }
   if (inspection.dump === undefined) {
-    return unavailableStoreFinding("evidence", compatibility, inspectionError, compatibilityError);
+    return unavailableStoreFinding(
+      "evidence",
+      compatibility,
+      inspectionError,
+      compatibilityError,
+      olderStoreRemedy,
+    );
   }
   if (blobStore === undefined) {
     return finding({
@@ -610,11 +642,18 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorData> 
     viewerTempFinding(options.operations, options.now),
   ]);
   const checks = [
-    schemaFinding(options.compatibility, options.compatibilityError, inspection, inspectionError),
+    schemaFinding(
+      options.compatibility,
+      options.compatibilityError,
+      options.olderStoreRemedy,
+      inspection,
+      inspectionError,
+    ),
     backup,
     leaseFinding(
       options.compatibility,
       options.compatibilityError,
+      options.olderStoreRemedy,
       inspection,
       inspectionError,
       options.now,
@@ -624,6 +663,7 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorData> 
     await evidenceFinding(
       options.compatibility,
       options.compatibilityError,
+      options.olderStoreRemedy,
       inspection,
       inspectionError,
       options.operations.blobStore,

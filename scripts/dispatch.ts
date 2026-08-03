@@ -12,13 +12,13 @@ import { z } from "zod";
 import { createCliPrompter } from "../src/cli/prompt";
 import { briefDataSchema } from "../src/cli/query";
 import { loadConfig, resolveRepositoryStore } from "../src/config";
-import { LEASE_TTL_MS } from "../src/domain";
 import { createPlatform } from "../src/platform";
 import { type Config, type Quest, questSchema } from "../src/schema";
 
 const dispatchAgentSchema = z.enum(["codex", "claude"]);
 const trustModeSchema = z.enum(["full", "guarded"]);
 const ORCHESTRATION_COMMAND_TIMEOUT_MS = 60_000;
+const DISPATCH_HEARTBEAT_WINDOW_MS = 30 * 60 * 1_000;
 const WORKER_BRIEF_FILE_PREFIX = ".quest-dispatch-brief-";
 const dispatchArgumentsSchema = z.strictObject({
   agent: dispatchAgentSchema.default("codex"),
@@ -42,6 +42,15 @@ const nextReportSchema = z.strictObject({
     claimed: z.boolean(),
     quest: questSchema.nullable(),
   }),
+});
+
+const touchReportSchema = z.strictObject({
+  schema: z.literal("quest.report/v1"),
+  command: z.literal("touch"),
+  generated_at: z.iso.datetime({ offset: true }),
+  filters: z.strictObject({ repo: z.string().nullable() }),
+  warnings: z.array(z.string()),
+  data: z.object({ quest: questSchema }),
 });
 
 type DispatchQuestBrief = z.infer<typeof briefDataSchema>;
@@ -330,6 +339,9 @@ function questStoreConfigToml(store: Config["store"]): string {
   return [
     "[store]",
     `backend = ${tomlString(store.backend)}`,
+    ...(store.lease_ttl_minutes === undefined
+      ? []
+      : [`lease_ttl_minutes = ${store.lease_ttl_minutes}`]),
     ...(deployment === undefined || store.backend !== "convex"
       ? []
       : [`convex_deployment = ${tomlString(deployment)}`]),
@@ -633,6 +645,7 @@ export class DispatchError extends Error {
 
 interface ClaimedQuest {
   readonly brief: DispatchQuestBrief;
+  readonly leaseObservedAt: string;
   readonly owner: string;
   readonly quest: Quest;
 }
@@ -2601,7 +2614,7 @@ function touchCommand(
   timeoutMs: number,
 ): CommandSpec {
   return {
-    args: ["touch", String(target.questId), "--as", target.owner],
+    args: ["--format", "json", "touch", String(target.questId), "--as", target.owner],
     command: questCliCommand(runtime),
     cwd: runtime.repoRoot,
     env: questEnvironment(
@@ -2620,8 +2633,49 @@ interface QuestLeaseHeartbeat {
 }
 
 interface QuestLeaseTarget {
+  readonly leaseObservedAt: string;
   readonly owner: string;
   readonly questId: number;
+  readonly leaseExpiresAt: string | null;
+}
+
+function dispatchHeartbeatWindowMs(target: QuestLeaseTarget): number {
+  if (target.leaseExpiresAt === null) {
+    return DISPATCH_HEARTBEAT_WINDOW_MS;
+  }
+  const leaseRemainingMs = Date.parse(target.leaseExpiresAt) - Date.parse(target.leaseObservedAt);
+  if (!Number.isFinite(leaseRemainingMs)) {
+    return DISPATCH_HEARTBEAT_WINDOW_MS;
+  }
+  return Math.max(1000, Math.min(DISPATCH_HEARTBEAT_WINDOW_MS, leaseRemainingMs));
+}
+
+function dispatchHeartbeatIntervalMs(
+  target: QuestLeaseTarget,
+  configuredIntervalMs: number | undefined,
+): number {
+  const heartbeatWindowMs = dispatchHeartbeatWindowMs(target);
+  return Math.max(
+    1,
+    Math.min(configuredIntervalMs ?? heartbeatWindowMs / 3, heartbeatWindowMs / 3),
+  );
+}
+
+function parseTouchLease(
+  result: CommandResult,
+): { readonly leaseExpiresAt: string | null; readonly leaseObservedAt: string } | null {
+  try {
+    const parsed = touchReportSchema.safeParse(JSON.parse(result.stdout));
+    if (!parsed.success) {
+      return null;
+    }
+    return {
+      leaseExpiresAt: parsed.data.data.quest.lease_expires_at,
+      leaseObservedAt: parsed.data.generated_at,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function timedCommand(
@@ -2651,11 +2705,11 @@ function startQuestLeaseHeartbeat(
   runtime: DispatchRuntime,
   target: QuestLeaseTarget,
 ): QuestLeaseHeartbeat {
-  const intervalMs = runtime.heartbeatIntervalMs ?? LEASE_TTL_MS / 3;
-  const timeoutMs =
-    runtime.heartbeatTimeoutMs ?? Math.max(1000, Math.min(LEASE_TTL_MS / 3, intervalMs));
+  let currentTarget = target;
+  let intervalMs = dispatchHeartbeatIntervalMs(currentTarget, runtime.heartbeatIntervalMs);
   let failureMessage: string | null = null;
   let inFlight: Promise<void> | null = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   let resolveFailure: ((message: string | null) => void) | undefined;
   let stopped = false;
   const failure = new Promise<string | null>((resolveFailurePromise) => {
@@ -2670,23 +2724,52 @@ function startQuestLeaseHeartbeat(
     resolveFailure?.(message);
   };
 
-  const renew = (): void => {
+  function scheduleRenewal(delayMs: number): void {
+    if (stopped || failureMessage !== null) {
+      return;
+    }
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+    timer = setTimeout(() => {
+      timer = undefined;
+      renew();
+    }, delayMs);
+  }
+
+  function renew(): void {
     if (stopped || failureMessage !== null || inFlight !== null) {
       return;
     }
+    const heartbeatWindowMs = dispatchHeartbeatWindowMs(currentTarget);
+    const timeoutMs =
+      runtime.heartbeatTimeoutMs ?? Math.max(1000, Math.min(heartbeatWindowMs / 3, intervalMs));
     inFlight = timedCommand(
       runtime.runCommand,
-      touchCommand(options, runtime, target, timeoutMs),
+      touchCommand(options, runtime, currentTarget, timeoutMs),
       timeoutMs,
     )
       .then((result) => {
         if (result.exitCode !== 0) {
-          recordFailure(`quest ${target.questId} lease renewal failed: ${commandOutput(result)}`);
+          recordFailure(
+            `quest ${currentTarget.questId} lease renewal failed: ${commandOutput(result)}`,
+          );
+          return;
         }
+        const renewedLease = parseTouchLease(result);
+        if (renewedLease === null) {
+          recordFailure(
+            `quest ${currentTarget.questId} lease renewal returned an invalid JSON report; rerun with --format json and retry`,
+          );
+          return;
+        }
+        currentTarget = { ...currentTarget, ...renewedLease };
+        intervalMs = dispatchHeartbeatIntervalMs(currentTarget, runtime.heartbeatIntervalMs);
+        scheduleRenewal(intervalMs);
       })
       .catch((error: unknown) => {
         recordFailure(
-          `quest ${target.questId} lease renewal failed: ${
+          `quest ${currentTarget.questId} lease renewal failed: ${
             error instanceof Error ? error.message : String(error)
           }`,
         );
@@ -2694,9 +2777,20 @@ function startQuestLeaseHeartbeat(
       .finally(() => {
         inFlight = null;
       });
-  };
+  }
 
-  const timer = setInterval(renew, intervalMs);
+  scheduleRenewal(intervalMs);
+  const leaseRemainingMs =
+    target.leaseExpiresAt === null
+      ? null
+      : Date.parse(target.leaseExpiresAt) - Date.parse(target.leaseObservedAt);
+  if (
+    leaseRemainingMs !== null &&
+    Number.isFinite(leaseRemainingMs) &&
+    leaseRemainingMs <= intervalMs
+  ) {
+    renew();
+  }
 
   return {
     get currentFailure(): string | null {
@@ -2705,7 +2799,9 @@ function startQuestLeaseHeartbeat(
     failure,
     async stop(): Promise<void> {
       stopped = true;
-      clearInterval(timer);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
       if (inFlight !== null) {
         await inFlight;
       }
@@ -2922,7 +3018,12 @@ async function claimNextQuest(
     );
   }
   return {
-    claimed: { brief: report.data.brief, owner, quest: report.data.quest },
+    claimed: {
+      brief: report.data.brief,
+      leaseObservedAt: report.generated_at,
+      owner,
+      quest: report.data.quest,
+    },
     warnings: report.warnings,
   };
 }
@@ -3836,6 +3937,8 @@ async function startNextWorker(
     return { activeWorker: null, exhausted: true, failed: false };
   }
   const heartbeat = startQuestLeaseHeartbeat(options, runtime, {
+    leaseExpiresAt: next.claimed.quest.lease_expires_at,
+    leaseObservedAt: next.claimed.leaseObservedAt,
     owner: next.claimed.owner,
     questId: next.claimed.quest.id,
   });

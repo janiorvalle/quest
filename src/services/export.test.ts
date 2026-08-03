@@ -124,7 +124,7 @@ describe("logical backup export", () => {
         quest(7, {
           assignee: "owner",
           status: "accepted",
-          lease_expires_at: "2026-07-29T16:30:00.000Z",
+          lease_expires_at: "2026-07-30T16:00:00.000Z",
         }),
       ],
       events: [
@@ -175,6 +175,13 @@ describe("logical backup export", () => {
     const previous = { ...currentWithFederatedEvent, schema_version: 5 };
 
     expect(parseQuestBackupExport(JSON.stringify(previous))).toEqual(currentWithFederatedEvent);
+  });
+
+  test("normalizes v6 logical backups after the lease TTL wire schema bump", () => {
+    const current = fixtureDump();
+    const previous = { ...current, schema_version: 6 };
+
+    expect(parseQuestBackupExport(JSON.stringify(previous))).toEqual(current);
   });
 
   test("rejects a logical backup tagged with an unsupported schema version", () => {

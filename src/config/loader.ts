@@ -28,6 +28,7 @@ export interface ConfigOverrides {
 }
 
 export type ConfigFileReader = (filePath: string) => Promise<string>;
+export type ConfigWarningWriter = (warning: string) => void;
 
 export interface QuestEnvironment extends Readonly<Record<string, string | undefined>> {
   readonly QUEST_IDENTITY?: string;
@@ -47,6 +48,7 @@ export interface LoadConfigOptions {
   readonly defaults?: ConfigOverrides;
   readonly configFile?: string;
   readonly readFile?: ConfigFileReader;
+  readonly onWarning?: ConfigWarningWriter;
 }
 
 export class ConfigLoadError extends Error {
@@ -86,9 +88,69 @@ function mergeConfigValues(lower: unknown, higher: unknown): unknown {
   return merged;
 }
 
-function formatValidationIssues(source: string, value: unknown): Config {
+interface UnknownConfigPath {
+  readonly kind: "key" | "section";
+  readonly path: string;
+}
+
+function findUnknownConfigPaths(
+  value: unknown,
+  normalized: unknown,
+  parentPath: readonly string[] = [],
+): readonly UnknownConfigPath[] {
+  if (!isRecord(value) || !isRecord(normalized)) {
+    return [];
+  }
+
+  const normalizedKeys = new Set(Object.keys(normalized));
+  const unknown = Object.keys(value)
+    .filter((key) => !normalizedKeys.has(key))
+    .map((key) => ({
+      kind:
+        parentPath.length === 0 && isRecord(value[key]) ? ("section" as const) : ("key" as const),
+      path: [...parentPath, key].join("."),
+    }));
+  const nested = Object.keys(value)
+    .filter((key) => normalizedKeys.has(key))
+    .flatMap((key) => findUnknownConfigPaths(value[key], normalized[key], [...parentPath, key]));
+
+  return [...unknown, ...nested];
+}
+
+function backendAtConfigPath(config: unknown, unknownPath: string): string | undefined {
+  const segments = unknownPath.split(".");
+  if (segments.at(-2) !== "store") {
+    return undefined;
+  }
+
+  let value = config;
+  for (const segment of segments.slice(0, -1)) {
+    if (!isRecord(value)) {
+      return undefined;
+    }
+    value = value[segment];
+  }
+  return isRecord(value) && typeof value["backend"] === "string" ? value["backend"] : undefined;
+}
+
+function unknownConfigWarning(unknown: UnknownConfigPath, normalized: Config): string {
+  const consequence =
+    unknown.kind === "section" ? "no settings from it were applied" : "no value was applied";
+  const backend = backendAtConfigPath(normalized, unknown.path);
+  const routingConsequence = backend === undefined ? "" : `; backend remains "${backend}"`;
+  return `ignored unknown config ${unknown.kind} "${unknown.path}"; ${consequence}${routingConsequence}; upgrade the Quest binary before relying on this setting`;
+}
+
+function formatValidationIssues(
+  source: string,
+  value: unknown,
+  onWarning: ConfigWarningWriter,
+): Config {
   const result = configSchema.safeParse(value);
   if (result.success) {
+    for (const unknown of findUnknownConfigPaths(value, result.data)) {
+      onWarning(unknownConfigWarning(unknown, result.data));
+    }
     return result.data;
   }
 
@@ -271,19 +333,28 @@ async function readMissingConfigAfterWriter(filePath: string): Promise<unknown> 
 }
 
 const defaultConfigFileReader: ConfigFileReader = (filePath) => readFile(filePath, "utf8");
+const defaultConfigWarningWriter: ConfigWarningWriter = (warning) => {
+  process.stderr.write(`warning: ${warning}\n`);
+};
 
 export async function loadConfig(options: LoadConfigOptions): Promise<Config> {
   const configFile =
     options.configFile ?? join(options.platform.directories.config, CONFIG_FILE_NAME);
   const environment = options.environment ?? process.env;
   const readTextFile = options.readFile ?? defaultConfigFileReader;
+  const onWarning = options.onWarning ?? defaultConfigWarningWriter;
 
-  let config = formatValidationIssues("built-in defaults", {
-    backup: { root: options.platform.directories.backup },
-  });
+  let config = formatValidationIssues(
+    "built-in defaults",
+    {
+      backup: { root: options.platform.directories.backup },
+    },
+    onWarning,
+  );
   config = formatValidationIssues(
     "defaults",
     mergeConfigValues(config, overridesToConfigLayer(options.defaults)),
+    onWarning,
   );
 
   if (options.readFile === undefined) {
@@ -299,13 +370,16 @@ export async function loadConfig(options: LoadConfigOptions): Promise<Config> {
   config = formatValidationIssues(
     `config file ${configFile}`,
     mergeConfigValues(config, fileConfig),
+    onWarning,
   );
   config = formatValidationIssues(
     "environment variables",
     mergeConfigValues(config, environmentToConfigLayer(environment)),
+    onWarning,
   );
   return formatValidationIssues(
     "command-line flags",
     mergeConfigValues(config, overridesToConfigLayer(options.flags)),
+    onWarning,
   );
 }

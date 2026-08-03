@@ -60,6 +60,14 @@ const preOpenBugDispatchQuestDumpSchema = z.strictObject({
   events: z.array(eventSchema),
 });
 
+const preLeaseTtlQuestDumpSchema = z.strictObject({
+  schema_version: z.literal(6),
+  quests: z.array(questSchema),
+  evidence: z.array(evidenceSchema),
+  chains: z.array(chainSchema),
+  events: z.array(eventSchema),
+});
+
 const preLeaseQuestDumpSchema = z.strictObject({
   schema_version: z.literal(3),
   quests: z.array(preLeaseQuestSchema),
@@ -116,6 +124,14 @@ export function parseQuestBackupExport(serialized: string): QuestDump {
   const current = questDumpSchema.safeParse(value);
   if (current.success) {
     return current.data;
+  }
+
+  const preLeaseTtl = preLeaseTtlQuestDumpSchema.safeParse(value);
+  if (preLeaseTtl.success) {
+    return questDumpSchema.parse({
+      ...preLeaseTtl.data,
+      schema_version: STORE_SCHEMA_VERSION,
+    });
   }
 
   const preOpenBugDispatch = preOpenBugDispatchQuestDumpSchema.safeParse(value);

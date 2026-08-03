@@ -165,8 +165,10 @@ function deploymentTable(
 }
 
 function configStoreValue(store: StoreConfig): StoreConfig {
+  const leaseTtl =
+    store.lease_ttl_minutes === undefined ? {} : { lease_ttl_minutes: store.lease_ttl_minutes };
   if (store.backend === "sqlite") {
-    return { backend: "sqlite" };
+    return { backend: "sqlite", ...leaseTtl };
   }
   const deployment = store.deployment ?? store.convex_deployment;
   if (deployment === undefined) {
@@ -174,7 +176,7 @@ function configStoreValue(store: StoreConfig): StoreConfig {
       "[MIGRATION_DEPLOYMENT_REQUIRED] a Convex routing block needs a deployment; pass --deployment <url> and retry",
     );
   }
-  return { backend: "convex", deployment };
+  return { backend: "convex", deployment, ...leaseTtl };
 }
 
 function repositoryEntryWithStore(
@@ -543,10 +545,9 @@ function tuiTable(config: TomlTable, configFile: string): TomlTable {
  * The one write the read-only viewer is allowed to make: its own display preference, in the user
  * config file. It never touches the quest store or repository routing.
  *
- * The preference goes in [tui] rather than a section named for the viewer because the config root
- * schema is strict: a released quest rejects a config carrying an unknown section outright, and
- * that failure takes down every command, not just the viewer. [tui] is the section every shipped
- * version already accepts, so a config this viewer writes stays readable by the binary next door.
+ * The preference goes in [tui] rather than a section named for the viewer so display settings stay
+ * grouped under one stable section. Older binaries ignore newer keys with a warning, while the
+ * existing section keeps the file shape readable by the binary next door.
  */
 export async function writeViewerTheme(configFile: string, theme: string): Promise<void> {
   const normalizedTheme = theme.trim();

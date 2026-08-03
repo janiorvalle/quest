@@ -139,6 +139,57 @@ describe("CLI composition root", () => {
     }
   });
 
+  test("writes config compatibility warnings to stderr without corrupting JSON stdout", async () => {
+    const homeDirectory = await mkdtemp(join(tmpdir(), "quest-cli-config-warning-"));
+    const configDirectory = join(homeDirectory, "config");
+    const basePlatform = platformFactory({ environment: {}, workingDirectory: homeDirectory });
+    await mkdir(configDirectory, { recursive: true });
+    await writeFile(join(configDirectory, "config.toml"), '[future]\nnew_option = "ignored"\n');
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const testPlatformFactory: PlatformFactory = () => ({
+      ...basePlatform,
+      directories: {
+        ...basePlatform.directories,
+        backup: join(homeDirectory, "backups"),
+        config: configDirectory,
+        evidence: join(homeDirectory, "evidence"),
+        state: join(homeDirectory, "state"),
+      },
+    });
+
+    try {
+      const root = await createCompositionRoot({
+        backendFactories: {
+          sqlite: backendFactory([], "sqlite"),
+          convex: backendFactory([], "convex"),
+        },
+        cleanupStaleEvidence: false,
+        environment: {},
+        initialWorkingDirectory: homeDirectory,
+        isTty: false,
+        output: createCliOutputBoundary({
+          stderr: (line) => stderr.push(line),
+          stdout: (text) => stdout.push(text),
+        }),
+        platformFactory: testPlatformFactory,
+        version: "1.2.3",
+      });
+
+      expect(stderr).toEqual([
+        'warning: ignored unknown config section "future"; no settings from it were applied; upgrade the Quest binary before relying on this setting',
+      ]);
+      expect(await root.run(["--format", "json", "--version"])).toBe(EXIT_SUCCESS);
+      expect(JSON.parse(stdout.join(""))).toMatchObject({
+        command: "version",
+        data: { version: "1.2.3" },
+      });
+    } finally {
+      await rm(homeDirectory, { force: true, recursive: true });
+    }
+  });
+
   test("runs upgrade before initializing the configured backend", async () => {
     const stdout: string[] = [];
     const stderr: string[] = [];
@@ -681,6 +732,53 @@ describe("CLI composition root", () => {
       }
       await rm(directory, { force: true, recursive: true });
     }
+  });
+
+  test("keeps the federated compatibility result paired with its remedy", async () => {
+    const configWithOverride = {
+      ...config,
+      repos: {
+        remote: {
+          store: { backend: "convex", deployment: "dev:remote" },
+        },
+      },
+    } satisfies Config;
+    const factory =
+      (name: "sqlite" | "convex"): CliBackendFactory =>
+      () =>
+        Promise.resolve({
+          clock: { now: () => Promise.resolve("2026-07-29T12:00:00Z") },
+          compatibilityProbe: {
+            olderStoreRemedy: `${name} remedy`,
+            check: () =>
+              Promise.resolve({
+                action: "migrate-store" as const,
+                outcome: "store-older" as const,
+                store_version: name === "sqlite" ? 6 : 5,
+                supported_version: 7,
+              }),
+          },
+          openApplicationPorts: () => Promise.reject(new Error("not needed")),
+        });
+    const root = await createCompositionRoot({
+      backendFactories: { sqlite: factory("sqlite"), convex: factory("convex") },
+      configLoader: () => Promise.resolve(configWithOverride),
+      environment: {},
+      initialWorkingDirectory: "/work/quest",
+      platformFactory,
+    });
+
+    if (root.dependencies.openBackend === undefined) {
+      throw new Error("federated compatibility pairing test did not expose its backend resolver");
+    }
+    const backend = await root.dependencies.openBackend({ repo: null });
+    await expect(backend.compatibilityProbe.check()).resolves.toEqual({
+      action: "migrate-store",
+      outcome: "store-older",
+      store_version: 6,
+      supported_version: 7,
+    });
+    expect(backend.compatibilityProbe.olderStoreRemedy).toBe("sqlite remedy");
   });
 
   test("wires the real read-only SQLite version reader without creating a missing store", async () => {

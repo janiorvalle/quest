@@ -118,6 +118,17 @@ function nextReport(item: Quest | null): string {
   });
 }
 
+function touchReport(item: Quest): string {
+  return JSON.stringify({
+    command: "touch",
+    data: { changed: true, evidence: [], quest: item },
+    filters: { repo: "quest" },
+    generated_at: "2026-07-31T05:00:00Z",
+    schema: "quest.report/v1",
+    warnings: [],
+  });
+}
+
 function showReport(item: Quest, status: Quest["status"] = "turned_in"): string {
   return JSON.stringify({
     command: "show",
@@ -1523,7 +1534,11 @@ model = "gpt-5-slow"
         githubToken: "test-token",
         questBackendDomains: ["quest.example.test"],
         questRepositoryName: "quest",
-        questStore: { backend: "convex", deployment: "https://quest.example.test" },
+        questStore: {
+          backend: "convex",
+          deployment: "https://quest.example.test",
+          lease_ttl_minutes: 5,
+        },
         async runCommand(spec) {
           commands.push(spec);
           await prepareFakeWorktree(spec);
@@ -1558,6 +1573,7 @@ model = "gpt-5-slow"
                 expect(loadedQuestConfig.store).toEqual({
                   backend: "convex",
                   convex_deployment: "https://quest.example.test",
+                  lease_ttl_minutes: 5,
                 });
               }
               activeWorkers += 1;
@@ -1581,6 +1597,7 @@ model = "gpt-5-slow"
       }
       expect(workerQuestConfig).toContain('backend = "convex"');
       expect(workerQuestConfig).toContain('convex_deployment = "https://quest.example.test"');
+      expect(workerQuestConfig).toContain("lease_ttl_minutes = 5");
       const claimCommands = commands.filter((command) => command.args.includes("next"));
       expect(claimCommands.length).toBeGreaterThanOrEqual(2);
       expect(claimCommands.every((command) => command.args.includes("--brief"))).toBeTrue();
@@ -1796,7 +1813,11 @@ model = "gpt-5-slow"
                 if (workerStarted) {
                   resolveWorker?.(0);
                 }
-                return { exitCode: 0, stderr: "", stdout: "" };
+                return {
+                  exitCode: 0,
+                  stderr: "",
+                  stdout: touchReport(quest(3, "Long work")),
+                };
               },
             ],
             [
@@ -1849,7 +1870,11 @@ model = "gpt-5-slow"
           if (spec.args.includes("touch")) {
             touches += 1;
             if (touches === 1) {
-              return { exitCode: 0, stderr: "", stdout: "" };
+              return {
+                exitCode: 0,
+                stderr: "",
+                stdout: touchReport(quest(4, "Lease failure")),
+              };
             }
             return new Promise<CommandResult>((resolve) => {
               releaseTouchFailure = () =>

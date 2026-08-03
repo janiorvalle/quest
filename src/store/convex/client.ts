@@ -137,6 +137,9 @@ export const convexApi = {
     { readonly auth_token?: string; readonly lease_cutoff: string },
     QuestDump
   >("quest:exportAll"),
+  rawExportAll: makeFunctionReference<"query", { readonly auth_token?: string }, QuestDump>(
+    "quest:rawExportAll",
+  ),
   replaceAll: makeFunctionReference<
     "mutation",
     { readonly auth_token?: string; readonly dump: QuestDump },

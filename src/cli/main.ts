@@ -42,6 +42,7 @@ import {
 import {
   type BlobStore,
   type Clock,
+  CONVEX_OLDER_STORE_REMEDY,
   ConvexBackupDatabase,
   ConvexBlobStore,
   ConvexStore,
@@ -210,15 +211,34 @@ function normalizeBackendStore(store: StoreConfig): StoreConfig {
 }
 
 function backendKey(store: StoreConfig): string {
-  return JSON.stringify({ backend: store.backend, deployment: backendDeployment(store) ?? null });
+  return JSON.stringify({
+    backend: store.backend,
+    deployment: backendDeployment(store) ?? null,
+    lease_ttl_minutes: store.lease_ttl_minutes ?? null,
+  });
+}
+
+function physicalBackendKey(store: StoreConfig): string {
+  return JSON.stringify({
+    backend: store.backend,
+    deployment: backendDeployment(store) ?? null,
+  });
 }
 
 function sameBackend(left: StoreConfig, right: StoreConfig): boolean {
   return backendKey(left) === backendKey(right);
 }
 
-function repositoryBelongsToBackend(config: Config, store: StoreConfig, repo: string): boolean {
-  return sameBackend(resolveRepositoryStore(config, repo), store);
+function samePhysicalBackend(left: StoreConfig, right: StoreConfig): boolean {
+  return physicalBackendKey(left) === physicalBackendKey(right);
+}
+
+function repositoryBelongsToPhysicalBackend(
+  config: Config,
+  store: StoreConfig,
+  repo: string,
+): boolean {
+  return samePhysicalBackend(resolveRepositoryStore(config, repo), store);
 }
 
 function sameRepositorySet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
@@ -281,10 +301,11 @@ function compatibleFederatedResult(
 
 function compatibilityFailureMessage(
   result: Exclude<StoreCompatibilityResult, { outcome: "compatible" }>,
+  olderStoreRemedy?: string,
 ): string {
   return result.outcome === "store-newer"
     ? `store schema ${result.store_version} was written by a newer quest; upgrade the quest binary (this binary supports schema ${result.supported_version})`
-    : `store schema ${result.store_version} is older than this binary supports (${result.supported_version}); run quest migrate before retrying`;
+    : `store schema ${result.store_version} is older than this binary supports (${result.supported_version}); ${olderStoreRemedy ?? "run quest migrate before retrying"}`;
 }
 
 function backendFailureMessage(error: unknown): string {
@@ -311,7 +332,7 @@ function recordCompatibilityAttempt(
   handle: BackendHandle,
   compatibilityFailures: Map<string, string>,
   compatible: StoreCompatibilityResult[],
-  incompatible: StoreCompatibilityResult[],
+  incompatible: IncompatibleCompatibility[],
 ): void {
   const key = backendKey(handle.store);
   if (attempt.status === "rejected") {
@@ -325,8 +346,17 @@ function recordCompatibilityAttempt(
     compatible.push(attempt.value);
     return;
   }
-  compatibilityFailures.set(key, compatibilityFailureMessage(attempt.value));
-  incompatible.push(attempt.value);
+  const olderStoreRemedy = handle.ports.compatibilityProbe.olderStoreRemedy;
+  compatibilityFailures.set(key, compatibilityFailureMessage(attempt.value, olderStoreRemedy));
+  incompatible.push({
+    result: attempt.value,
+    ...(olderStoreRemedy === undefined ? {} : { olderStoreRemedy }),
+  });
+}
+
+interface IncompatibleCompatibility {
+  readonly olderStoreRemedy?: string;
+  readonly result: Exclude<StoreCompatibilityResult, { outcome: "compatible" }>;
 }
 
 async function createFederatedStoreSource(
@@ -334,6 +364,11 @@ async function createFederatedStoreSource(
   handle: BackendHandle | undefined,
   application: CliApplicationPorts,
   compatibilityFailure: string | undefined,
+  repositoryMatcher: (
+    config: Config,
+    store: StoreConfig,
+    repo: string,
+  ) => boolean = repositoryBelongsToPhysicalBackend,
 ): Promise<FederatedStoreSource> {
   if (handle === undefined || application.questStore === undefined) {
     throw new Error(
@@ -407,11 +442,11 @@ async function createFederatedStoreSource(
       !routingStale &&
       readFailure === undefined &&
       !fencedRepositories.has(repo) &&
-      repositoryBelongsToBackend(config, handle.store, repo),
+      repositoryMatcher(config, handle.store, repo),
     questStore: application.questStore,
     readError,
     ...(readSnapshotPort === undefined ? {} : { readSnapshot: readSnapshotPort }),
-    routesRepository: (repo) => repositoryBelongsToBackend(config, handle.store, repo),
+    routesRepository: (repo) => repositoryMatcher(config, handle.store, repo),
     ...(readSnapshotPort !== undefined || listFencedRepositories === undefined ? {} : { refresh }),
   };
 }
@@ -440,7 +475,10 @@ function createUnavailableFederatedStoreSource(
       try {
         const compatibility = await handle.ports.compatibilityProbe.check();
         if (compatibility.outcome !== "compatible") {
-          currentFailure = compatibilityFailureMessage(compatibility);
+          currentFailure = compatibilityFailureMessage(
+            compatibility,
+            handle.ports.compatibilityProbe.olderStoreRemedy,
+          );
           return;
         }
         const application = await handle.ports.openApplicationPorts();
@@ -466,7 +504,7 @@ function createUnavailableFederatedStoreSource(
       return activeSource?.readSnapshot;
     },
     refresh,
-    routesRepository: (repo) => repositoryBelongsToBackend(config, handle.store, repo),
+    routesRepository: (repo) => repositoryBelongsToPhysicalBackend(config, handle.store, repo),
   };
 }
 
@@ -505,6 +543,11 @@ async function createFederatedSources(
   config: Config,
   applications: readonly OpenedBackendApplication[],
   compatibilityFailures: ReadonlyMap<string, string>,
+  repositoryMatcher: (
+    config: Config,
+    store: StoreConfig,
+    repo: string,
+  ) => boolean = repositoryBelongsToPhysicalBackend,
 ): Promise<FederatedSources> {
   const attempts = await Promise.allSettled(
     applications.map(({ application, handle }) =>
@@ -513,6 +556,7 @@ async function createFederatedSources(
         handle,
         application,
         compatibilityFailures.get(backendKey(handle.store)),
+        repositoryMatcher,
       ).then((source) => ({ handle, source })),
     ),
   );
@@ -548,26 +592,47 @@ function createFederatedBackend(
   const failedHandles =
     options.initialFailures?.map(({ store, message }) => failedBackendHandle(store, message)) ?? [];
   const allHandles = [...handles, ...failedHandles];
+  const physicalGroups: BackendHandle[][] = [];
+  for (const handle of allHandles) {
+    const group = physicalGroups.find((candidate) =>
+      samePhysicalBackend(candidate[0]?.store ?? handle.store, handle.store),
+    );
+    if (group === undefined) {
+      physicalGroups.push([handle]);
+    } else {
+      group.push(handle);
+    }
+  }
+  const sourceHandles = physicalGroups.flatMap((group) =>
+    group[0] === undefined ? [] : [group[0]],
+  );
+  let olderStoreRemedy: string | undefined;
   const compatibilityFailures = new Map(
     options.initialFailures?.map(({ store, message }) => [backendKey(store), message]) ?? [],
   );
   const compatibilityProbe: StoreCompatibilityProbe = {
+    get olderStoreRemedy() {
+      return olderStoreRemedy;
+    },
     check: async () => {
       const attempts = await Promise.allSettled(
-        allHandles.map((handle) => handle.ports.compatibilityProbe.check()),
+        sourceHandles.map((handle) => handle.ports.compatibilityProbe.check()),
       );
       const results: StoreCompatibilityResult[] = [];
-      const incompatible: StoreCompatibilityResult[] = [];
+      const incompatible: IncompatibleCompatibility[] = [];
+      olderStoreRemedy = undefined;
       for (const [index, attempt] of attempts.entries()) {
-        const handle = allHandles[index];
+        const handle = sourceHandles[index];
         if (handle === undefined) {
           continue;
         }
         recordCompatibilityAttempt(attempt, handle, compatibilityFailures, results, incompatible);
       }
       if (results.length === 0) {
-        if (incompatible.length > 0) {
-          return compatibleFederatedResult(incompatible);
+        const firstIncompatible = incompatible[0];
+        if (firstIncompatible !== undefined) {
+          olderStoreRemedy = firstIncompatible.olderStoreRemedy;
+          return firstIncompatible.result;
         }
         throw new Error(
           "[FEDERATED_BACKENDS_UNAVAILABLE] every configured backend is unreachable; retry when at least one deployment is reachable",
@@ -577,17 +642,18 @@ function createFederatedBackend(
     },
   };
   return {
-    clock: handles[0]?.ports.clock ?? createSystemClock(),
+    clock: sourceHandles[0]?.ports.clock ?? createSystemClock(),
     close: async () => {
       await Promise.all(allHandles.map((handle) => closeBackend(handle.ports)));
     },
     compatibilityProbe,
     openApplicationPorts: async () => {
-      const applications = await openFederatedApplications(allHandles, compatibilityFailures);
+      const applications = await openFederatedApplications(sourceHandles, compatibilityFailures);
       const sources = await createFederatedSources(
         config,
         applications.applications,
         compatibilityFailures,
+        repositoryBelongsToPhysicalBackend,
       );
       const constructionFailures = [
         ...applications.failures.values(),
@@ -647,7 +713,7 @@ function createBackendRouter(
     if (existing !== undefined) {
       return existing;
     }
-    const backendConfig = { ...config, store: effectiveStore };
+    const backendConfig = { ...config };
     const opened = backendFactory(
       effectiveStore.backend,
       options.backendFactories,
@@ -706,10 +772,12 @@ function migrationStoreConfig(
   repository: string,
   request: RepositoryMigrationRequest,
 ): StoreConfig {
-  if (request.target === "sqlite") {
-    return { backend: "sqlite" };
-  }
   const current = resolveRepositoryStore(config, repository);
+  const leaseTtl =
+    current.lease_ttl_minutes === undefined ? {} : { lease_ttl_minutes: current.lease_ttl_minutes };
+  if (request.target === "sqlite") {
+    return { backend: "sqlite", ...leaseTtl };
+  }
   const deployment =
     request.deployment ??
     current.deployment ??
@@ -721,7 +789,28 @@ function migrationStoreConfig(
       "[MIGRATION_DEPLOYMENT_REQUIRED] `quest migrate --to convex` needs --deployment <url> or a configured store deployment; retry with one",
     );
   }
-  return { backend: "convex", convex_deployment: normalizeConvexDeployment(deployment) };
+  return {
+    backend: "convex",
+    convex_deployment: normalizeConvexDeployment(deployment),
+    ...leaseTtl,
+  };
+}
+
+function repositoryHasLeaseOverride(config: Config, repository: string): boolean {
+  const entry = config.repos[repository];
+  return typeof entry === "object" && entry.store?.lease_ttl_minutes !== undefined;
+}
+
+function migrationRouteStoreConfig(
+  config: Config,
+  repository: string,
+  target: StoreConfig,
+): StoreConfig {
+  if (repositoryHasLeaseOverride(config, repository)) {
+    return target;
+  }
+  const { lease_ttl_minutes: _leaseTtlMinutes, ...withoutLeaseTtl } = target;
+  return withoutLeaseTtl;
 }
 
 function requireMigrationBackend(
@@ -753,6 +842,7 @@ interface PreparedRepositoryMigration {
   readonly routingSnapshot: Awaited<ReturnType<typeof readRepositoryRoutingSnapshot>>;
   readonly sourceConfig: StoreConfig;
   readonly targetConfig: StoreConfig;
+  readonly targetRouteConfig: StoreConfig;
 }
 
 async function prepareRepositoryMigration(
@@ -779,12 +869,14 @@ async function prepareRepositoryMigration(
       `[MIGRATION_ROUTE_OVERRIDDEN] active config layers route ${repository} to ${sourceConfig.backend}, but config.toml currently routes it to ${routingSnapshot.sourceStore.backend}; remove the override and retry`,
     );
   }
+  const targetConfig = migrationStoreConfig(activeConfig, repository, request);
   return {
     originalRepositoryConfig: routingSnapshot.repositoryEntry,
     repository,
     routingSnapshot,
     sourceConfig,
-    targetConfig: migrationStoreConfig(activeConfig, repository, request),
+    targetConfig,
+    targetRouteConfig: migrationRouteStoreConfig(activeConfig, repository, targetConfig),
   };
 }
 
@@ -796,8 +888,14 @@ function createRepositoryMigrationOperations(
   const configFile = join(platform.directories.config, "config.toml");
   return {
     migrate: async (request) => {
-      const { originalRepositoryConfig, repository, routingSnapshot, sourceConfig, targetConfig } =
-        await prepareRepositoryMigration(configFile, request, reloadConfig);
+      const {
+        originalRepositoryConfig,
+        repository,
+        routingSnapshot,
+        sourceConfig,
+        targetConfig,
+        targetRouteConfig,
+      } = await prepareRepositoryMigration(configFile, request, reloadConfig);
       const verifyEffectiveRoute = async (expectedStore: StoreConfig): Promise<boolean> => {
         const reloaded = await reloadConfig();
         return (
@@ -813,7 +911,7 @@ function createRepositoryMigrationOperations(
             ? typeof current.repositoryEntry === "object" &&
               current.repositoryEntry !== null &&
               current.repositoryEntry.store !== undefined &&
-              sameBackend(current.repositoryEntry.store, targetConfig)
+              sameBackend(current.repositoryEntry.store, targetRouteConfig)
             : await verifyRepositoryConfigEntry(configFile, repository, writtenRepositoryConfig);
         return (
           current.canonicalRepository === repository &&
@@ -822,7 +920,7 @@ function createRepositoryMigrationOperations(
           (await verifyEffectiveRoute(targetConfig))
         );
       };
-      if (sameBackend(sourceConfig, targetConfig)) {
+      if (samePhysicalBackend(sourceConfig, targetConfig)) {
         const recoveryBackend = await router.openConfiguredBackend(targetConfig);
         try {
           const recoveryApplication = await recoveryBackend.openApplicationPorts();
@@ -861,7 +959,7 @@ function createRepositoryMigrationOperations(
           writeRouting: async () => {
             writtenRepositoryConfig = await writeRepositoryStoreConfigIfUnchanged(
               configFile,
-              targetConfig,
+              targetRouteConfig,
               routingSnapshot,
             );
             const rawRouteWritten = await verifyRepositoryConfigEntry(
@@ -919,12 +1017,14 @@ async function closeBackend(backend: CliBackendPorts | undefined): Promise<void>
 
 function createLazyBackendPorts(
   openDefaultBackend: () => Promise<CliBackendPorts>,
+  olderStoreRemedy: string | undefined,
 ): CliBackendPorts {
   return {
     clock: {
       now: async () => (await openDefaultBackend()).clock.now(),
     },
     compatibilityProbe: {
+      ...(olderStoreRemedy === undefined ? {} : { olderStoreRemedy }),
       check: async () => (await openDefaultBackend()).compatibilityProbe.check(),
       migrate: async () => {
         const probe = (await openDefaultBackend()).compatibilityProbe;
@@ -938,11 +1038,17 @@ function createLazyBackendPorts(
   };
 }
 
-async function openSqliteStore(databasePath: string): Promise<SqliteStore> {
-  return createSqliteStore(databasePath);
+async function openSqliteStore(
+  databasePath: string,
+  leaseTtlMinutes: number | undefined,
+): Promise<SqliteStore> {
+  return createSqliteStore(databasePath, leaseTtlMinutes === undefined ? {} : { leaseTtlMinutes });
 }
 
-async function openSqliteStoreForRecovery(databasePath: string): Promise<SqliteStore | undefined> {
+async function openSqliteStoreForRecovery(
+  databasePath: string,
+  leaseTtlMinutes: number | undefined,
+): Promise<SqliteStore | undefined> {
   try {
     if (readSqliteSchemaVersion(databasePath) !== SQLITE_SCHEMA_VERSION) {
       return undefined;
@@ -952,7 +1058,7 @@ async function openSqliteStoreForRecovery(databasePath: string): Promise<SqliteS
   }
   let questStore: SqliteStore | undefined;
   try {
-    questStore = createSqliteStore(databasePath);
+    questStore = await openSqliteStore(databasePath, leaseTtlMinutes);
     const integrity = questStore.inspectBackupState().integrity_check;
     if (integrity.length !== 1 || integrity[0]?.toLowerCase() !== "ok") {
       questStore.close();
@@ -972,6 +1078,8 @@ export function createSqliteCliBackend(
   const configFile = join(context.platform.directories.config, "config.toml");
   const evidenceDirectory = context.platform.directories.evidence;
   const backupRoot = context.config.backup.root ?? context.platform.directories.backup;
+  const leaseTtlMinutes =
+    context.store?.lease_ttl_minutes ?? context.config.store.lease_ttl_minutes;
   const clock = createSystemClock();
   let activeQuestStore: SqliteStore | undefined;
   const doctor: DoctorOperations = {
@@ -1020,9 +1128,9 @@ export function createSqliteCliBackend(
     openApplicationPorts: async () => {
       const questStore = context.recoveryMode
         ? context.restoreMode
-          ? await openSqliteStoreForRecovery(databasePath)
+          ? await openSqliteStoreForRecovery(databasePath, leaseTtlMinutes)
           : undefined
-        : await openSqliteStore(databasePath);
+        : await openSqliteStore(databasePath, leaseTtlMinutes);
       activeQuestStore = questStore;
       return {
         backup: new LocalBackupService({
@@ -1048,12 +1156,14 @@ async function loadCompositionConfig(
   platform: PlatformModule,
   environment: QuestEnvironment,
 ): Promise<Config> {
+  const output = options.output ?? createCliOutputBoundary();
   try {
     return await (options.configLoader ?? loadConfig)({
       platform,
       environment,
       ...(options.configDefaults === undefined ? {} : { defaults: options.configDefaults }),
       ...(options.configFlags === undefined ? {} : { flags: options.configFlags }),
+      onWarning: output.writeWarning,
     });
   } catch (error: unknown) {
     if (!options.recoveryMode || !(error instanceof ConfigLoadError)) {
@@ -1089,7 +1199,11 @@ async function createConvexCliBackend(context: CliBackendFactoryContext): Promis
     deployment,
     token === undefined ? {} : { authToken: token },
   );
-  const questStore = new ConvexStore(deployment, { clients });
+  const leaseTtlMinutes = selectedStore.lease_ttl_minutes ?? context.config.store.lease_ttl_minutes;
+  const questStore = new ConvexStore(
+    deployment,
+    leaseTtlMinutes === undefined ? { clients } : { clients, leaseTtlMinutes },
+  );
   const blobStore = new ConvexBlobStore(deployment, { clients });
   const clock = createConvexClock(clients);
   const databasePath = join(context.platform.directories.state, "quest.convex.json");
@@ -1111,7 +1225,7 @@ async function createConvexCliBackend(context: CliBackendFactoryContext): Promis
       backup,
       blobStore,
       inspectStore: async () => ({
-        dump: await questStore.exportAll(),
+        dump: await questStore.exportAllRaw(),
         integrity_check: ["ok"],
         state: "present",
       }),
@@ -1322,7 +1436,10 @@ export async function createCompositionRoot(
   });
   const router = createBackendRouter(options, config, platform, environment);
   const openDefaultBackend = router.openDefaultBackend;
-  const ports = createLazyBackendPorts(openDefaultBackend);
+  const ports = createLazyBackendPorts(
+    openDefaultBackend,
+    config.store.backend === "convex" ? CONVEX_OLDER_STORE_REMEDY : undefined,
+  );
   const migration = createRepositoryMigrationOperations(platform, router, () =>
     loadCompositionConfig(options, platform, environment),
   );

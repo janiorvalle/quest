@@ -126,9 +126,8 @@ test("writeViewerTheme replaces the previous theme instead of appending a second
   }
 });
 
-// A released quest parses the config root strictly, so a section it has never heard of fails
-// every command on that binary — not just the viewer. Whatever the viewer saves has to land in a
-// section that already-shipped versions accept.
+// Keep the preference under the established viewer section so related settings remain easy to
+// discover across binary versions.
 test("writeViewerTheme saves into a section older quest versions already accept", async () => {
   const directory = await mkdtemp(join(tmpdir(), "quest-config-writer-theme-section-"));
   const configFile = join(directory, "config.toml");
@@ -262,6 +261,28 @@ describe("repository store config writer", () => {
         },
       });
       expect(config.store.backend).toBe("sqlite");
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("preserves a repository lease TTL when writing a routing block", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-config-writer-lease-ttl-"));
+    const configFile = join(directory, "config.toml");
+    try {
+      await writeRepositoryStoreConfig(configFile, "web-app", {
+        backend: "sqlite",
+        lease_ttl_minutes: 45,
+      });
+
+      const config = await loadConfig({
+        configFile,
+        platform: { directories: testDirectories(directory) },
+        environment: {},
+      });
+      expect(config.repos["web-app"]).toEqual({
+        store: { backend: "sqlite", lease_ttl_minutes: 45 },
+      });
     } finally {
       await rm(directory, { force: true, recursive: true });
     }
