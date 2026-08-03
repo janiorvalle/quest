@@ -1,15 +1,43 @@
 import { describe, expect, test } from "bun:test";
 
-import { DENSE_THEME, QUEST_THEMES, themeByName } from "./theme";
+import {
+  DENSE_THEME,
+  findQuestTheme,
+  QUEST_THEMES,
+  type QuestTheme,
+  questThemeAfter,
+  questThemeNames,
+} from "./theme";
 
-describe("dense theme", () => {
-  test("is the default and only shipped theme", () => {
+const SECOND_THEME: QuestTheme = { ...DENSE_THEME, name: "test-second" };
+const THIRD_THEME: QuestTheme = { ...DENSE_THEME, name: "test-third" };
+const REGISTRY: readonly QuestTheme[] = [DENSE_THEME, SECOND_THEME, THIRD_THEME];
+
+describe("theme registry", () => {
+  test("ships dense as the only theme, and dense is the default", () => {
     expect(QUEST_THEMES).toEqual([DENSE_THEME]);
-    expect(themeByName(undefined)).toBe(DENSE_THEME);
-    expect(themeByName("missing")).toBe(DENSE_THEME);
-    expect(themeByName("dense")).toBe(DENSE_THEME);
+    expect(questThemeNames()).toEqual(["dense"]);
+    expect(findQuestTheme("dense")).toBe(DENSE_THEME);
+    expect(findQuestTheme("tavern")).toBeUndefined();
   });
 
+  test("cycles through every registered theme and wraps back to the first", () => {
+    expect(questThemeAfter(DENSE_THEME, REGISTRY)).toBe(SECOND_THEME);
+    expect(questThemeAfter(SECOND_THEME, REGISTRY)).toBe(THIRD_THEME);
+    expect(questThemeAfter(THIRD_THEME, REGISTRY)).toBe(DENSE_THEME);
+  });
+
+  test("cycling a single-theme registry stays on that theme", () => {
+    expect(questThemeAfter(DENSE_THEME, [DENSE_THEME])).toBe(DENSE_THEME);
+    expect(questThemeAfter(DENSE_THEME)).toBe(DENSE_THEME);
+  });
+
+  test("cycling from a theme the registry does not hold lands on the first one", () => {
+    expect(questThemeAfter({ ...DENSE_THEME, name: "retired" }, REGISTRY)).toBe(DENSE_THEME);
+  });
+});
+
+describe("dense theme", () => {
   test("keeps the dense contract tokens stable", () => {
     expect(DENSE_THEME.palette).toEqual({
       accent: "#62c4c9",

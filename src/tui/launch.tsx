@@ -4,6 +4,7 @@ import { createRoot } from "@opentui/react";
 import type { QuestLogRuntime } from "../services/quest-log-model";
 import { QuestLogApp } from "./quest-log";
 import { createTerminalTitleController } from "./terminal-title";
+import type { ViewerTheme } from "./theme-selection";
 import { prepareTmuxPassthrough } from "./tmux";
 
 export async function launchQuestLog(
@@ -11,8 +12,8 @@ export async function launchQuestLog(
   options: {
     readonly branch?: string | undefined;
     readonly identity?: string | undefined;
-    readonly themeName?: string | undefined;
-  } = {},
+    readonly theme: ViewerTheme;
+  },
 ): Promise<void> {
   const tmuxPassthrough = await prepareTmuxPassthrough();
   const stdout = process.stdout;
@@ -46,7 +47,7 @@ export async function launchQuestLog(
         branch={options.branch}
         identity={options.identity}
         runtime={runtime}
-        themeName={options.themeName}
+        theme={options.theme}
       />,
     );
     await finished;

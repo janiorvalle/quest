@@ -319,14 +319,14 @@ deployment = "https://happy-fox-123.convex.cloud"
     }
   });
 
-  test("accepts the removed TUI section while preserving its value for compatibility", async () => {
+  test("reads the theme preference the viewer writes", async () => {
     const config = await loadConfig({
       platform,
       environment: {},
-      readFile: textReader('[tui]\ntheme = "dark"'),
+      readFile: textReader('[tui]\ntheme = "dense"'),
     });
 
-    expect(config.tui).toEqual({ theme: "dark" });
+    expect(config.tui).toEqual({ theme: "dense" });
   });
 });
 

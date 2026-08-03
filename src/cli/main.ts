@@ -15,6 +15,7 @@ import {
   writeConvexToken,
   writeHostedRepositoryRoutes,
   writeRepositoryStoreConfigIfUnchanged,
+  writeViewerTheme,
 } from "../config";
 import { cleanupStaleEvidenceMaterializations, createLocalEvidenceFileReader } from "../evidence";
 import type { CliOutputBoundary, ExitCode } from "../output";
@@ -923,6 +924,7 @@ function createCliDependencies(input: {
     output: options.output ?? createCliOutputBoundary(),
     prompter: options.prompter ?? createCliPrompter(),
     readStdin: () => Bun.stdin.text(),
+    saveViewerTheme: (themeName) => writeViewerTheme(configFile, themeName),
     upgrade,
     validateWorkingDirectory: options.validateWorkingDirectory ?? validateWorkingDirectory,
     ...(viewer === undefined ? {} : { viewer }),

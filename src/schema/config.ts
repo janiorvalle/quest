@@ -65,6 +65,9 @@ export const configSchema = objectInputSchema.pipe(
       )
       .default({ areas: {}, statuses: {}, verdicts: {} }),
     editor: nonEmptyTextSchema.optional(),
+    // The viewer's own display preferences. This root schema is strict, so a released quest
+    // rejects every config carrying a section it has not heard of — and that rejection fails the
+    // whole CLI, not just the viewer. New viewer settings belong under this existing section.
     tui: z
       .strictObject({
         theme: nonEmptyTextSchema.optional(),

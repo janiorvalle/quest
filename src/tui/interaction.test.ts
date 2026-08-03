@@ -42,6 +42,10 @@ describe("read-only quest log keymap", () => {
     expect(state.areaIndex).toBe(0);
   });
 
+  test("tab still switches areas rather than cycling the theme", () => {
+    expect(reduce(INITIAL_QUEST_LOG_INTERACTION, "tab", "\t").intent).toEqual({ type: "none" });
+  });
+
   test("exposes only the read-only actions", () => {
     expect(reduce(INITIAL_QUEST_LOG_INTERACTION, "d")).toEqual({
       intent: { type: "toggle-done" },
@@ -74,13 +78,17 @@ describe("read-only quest log keymap", () => {
       type: "cycle-scope",
     });
     expect(reduce(INITIAL_QUEST_LOG_INTERACTION, "q").intent).toEqual({ type: "quit" });
+    expect(reduce(INITIAL_QUEST_LOG_INTERACTION, "t")).toEqual({
+      intent: { type: "cycle-theme" },
+      state: INITIAL_QUEST_LOG_INTERACTION,
+    });
 
     const flat = reduce(INITIAL_QUEST_LOG_INTERACTION, "o");
     expect(flat.intent).toEqual({ type: "toggle-sort" });
     expect(flat.state.sortMode).toBe("flat");
     expect(reduce(flat.state, "o").state.sortMode).toBe("plan");
 
-    for (const forbidden of ["return", "a", "c", "s", "t", "v", "y", "/"]) {
+    for (const forbidden of ["return", "a", "c", "s", "v", "y", "/"]) {
       expect(reduce(INITIAL_QUEST_LOG_INTERACTION, forbidden).intent).toEqual({ type: "none" });
     }
   });

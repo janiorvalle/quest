@@ -19,6 +19,7 @@ export const globalCliOptionsSchema = z
     repo: nonEmptyOptionSchema.optional(),
     all: z.boolean().default(false),
     format: cliFormatSchema.default("human"),
+    theme: nonEmptyOptionSchema.optional(),
     version: z.boolean().default(false),
   })
   .refine((options) => !(options.all && options.repo !== undefined), {

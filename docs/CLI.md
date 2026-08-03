@@ -3,7 +3,8 @@
 Binary: `quest`. Bare `quest` on a terminal opens the read-only viewer;
 with `--format json` or when stdout is not a TTY it prints a compact scoped
 status followed by command help. All subcommands support `--format json`
-(envelope `quest.report/v1`), `-C <dir>`, `--repo <name>`, `--all`.
+(envelope `quest.report/v1`), `-C <dir>`, `--repo <name>`, `--all`. `--theme
+<name>` selects the viewer theme.
 
 ## Scoping rules
 
@@ -51,6 +52,33 @@ leave its variable unset; Quest omits the field rather than guessing. These
 values are self-declared like identity, not server-attested security facts.
 The dispatcher sets them for spawned workers only when its provider arguments or
 resolved provider configuration make the values explicit.
+
+## Viewer theme
+
+The viewer picks its theme from the first source that names one:
+`--theme <name>`, then `QUEST_THEME`, then `[tui] theme` in the user config,
+then the built-in default `dense`.
+
+`--theme <name>` with a name this build does not ship is a usage error on any
+command, listing the valid names — you typed it, so the command you typed it on
+reports it. `QUEST_THEME` is ambient rather than typed, so it is checked when the
+viewer opens and a stale export never fails commands that show no theme. A name
+that appears only in the config file warns in the viewer's notice line and falls
+back to `dense`, so a config written by a newer quest never bricks an older one.
+
+Pressing `t` in the viewer switches to the next theme and saves it as the
+default, writing one key to the user config file:
+
+```toml
+[tui]
+theme = "dense"
+```
+
+That preference is the only thing the read-only viewer ever writes. It never
+touches the quest store or repository routing. Viewer settings go under the
+existing `[tui]` section on purpose: the config root is parsed strictly, so a
+quest that predates a brand-new section rejects the whole config and fails every
+command, not just the viewer.
 
 ## Convex onboarding
 
