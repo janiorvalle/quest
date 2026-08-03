@@ -5,6 +5,7 @@ import { stringWidth } from "bun";
 import {
   DENSE_THEME,
   findQuestTheme,
+  LEDGER_THEME,
   QUEST_THEMES,
   type QuestTheme,
   questPriorityInk,
@@ -19,17 +20,19 @@ const THIRD_THEME: QuestTheme = { ...DENSE_THEME, name: "test-third" };
 const REGISTRY: readonly QuestTheme[] = [DENSE_THEME, SECOND_THEME, THIRD_THEME];
 
 describe("theme registry", () => {
-  test("ships dense and tavern, with dense first as the default", () => {
-    expect(QUEST_THEMES).toEqual([DENSE_THEME, TAVERN_THEME]);
-    expect(questThemeNames()).toEqual(["dense", "tavern"]);
+  test("ships dense, tavern and ledger, with dense first as the default", () => {
+    expect(QUEST_THEMES).toEqual([DENSE_THEME, TAVERN_THEME, LEDGER_THEME]);
+    expect(questThemeNames()).toEqual(["dense", "tavern", "ledger"]);
     expect(findQuestTheme("dense")).toBe(DENSE_THEME);
     expect(findQuestTheme("tavern")).toBe(TAVERN_THEME);
-    expect(findQuestTheme("ledger")).toBeUndefined();
+    expect(findQuestTheme("ledger")).toBe(LEDGER_THEME);
+    expect(findQuestTheme("parchment")).toBeUndefined();
   });
 
-  test("t reaches tavern from dense and comes back", () => {
+  test("t walks dense to tavern to ledger and back to dense", () => {
     expect(questThemeAfter(DENSE_THEME)).toBe(TAVERN_THEME);
-    expect(questThemeAfter(TAVERN_THEME)).toBe(DENSE_THEME);
+    expect(questThemeAfter(TAVERN_THEME)).toBe(LEDGER_THEME);
+    expect(questThemeAfter(LEDGER_THEME)).toBe(DENSE_THEME);
   });
 
   test("cycles through every registered theme and wraps back to the first", () => {
@@ -221,6 +224,100 @@ describe("tavern theme", () => {
     expect(TAVERN_THEME.labels).toEqual(DENSE_THEME.labels);
     expect(TAVERN_THEME.structure).toEqual(DENSE_THEME.structure);
     expect(TAVERN_THEME.border).toBe(DENSE_THEME.border);
+  });
+});
+
+/** WCAG 2.x relative luminance, the standard sRGB formulation. */
+function relativeLuminance(color: string): number {
+  const value = color.replace("#", "");
+  const channels = [value.slice(0, 2), value.slice(2, 4), value.slice(4, 6)]
+    .map((part) => Number.parseInt(part, 16) / 255)
+    .map((part) => (part <= 0.03928 ? part / 12.92 : ((part + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * (channels[0] ?? 0) + 0.7152 * (channels[1] ?? 0) + 0.0722 * (channels[2] ?? 0);
+}
+
+function contrastRatio(foreground: string, background: string): number {
+  const first = relativeLuminance(foreground);
+  const second = relativeLuminance(background);
+  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+}
+
+describe("ledger theme", () => {
+  test("is ink on paper", () => {
+    expect(LEDGER_THEME.palette.background).toBe("#f7f3ea");
+    expect(LEDGER_THEME.palette.textPrimary).toBe("#26221a");
+    expect(LEDGER_THEME.palette.selection).toBe("#e2dbc6");
+    expect(LEDGER_THEME.palette.selectionInk).toBe("#1a170f");
+    expect(LEDGER_THEME.palette.lane).toBe("#6b4fa0");
+    expect(LEDGER_THEME.palette.accent).toBe("#2f6f4f");
+  });
+
+  test("keeps the dense glyph set — this theme is palette only", () => {
+    for (const status of Object.keys(DENSE_THEME.status) as (keyof typeof DENSE_THEME.status)[]) {
+      expect(LEDGER_THEME.status[status].glyph).toBe(DENSE_THEME.status[status].glyph);
+      expect(LEDGER_THEME.status[status].label).toBe(DENSE_THEME.status[status].label);
+    }
+    expect(LEDGER_THEME.blockedStatus).toEqual(DENSE_THEME.blockedStatus);
+    expect(LEDGER_THEME.glyphs).toEqual(DENSE_THEME.glyphs);
+    expect(LEDGER_THEME.labels).toEqual(DENSE_THEME.labels);
+    expect(LEDGER_THEME.structure).toEqual(DENSE_THEME.structure);
+  });
+
+  test("every ink that renders words clears WCAG AA on every ground it can land on", () => {
+    // A row is drawn on the background or the alternating stripe, and the detail pane on the
+    // surface, so the bar has to hold on all three — not only on the base background.
+    const grounds = [
+      LEDGER_THEME.palette.background,
+      LEDGER_THEME.palette.stripe,
+      LEDGER_THEME.palette.surface,
+    ];
+    const inks = [
+      ...Object.values(LEDGER_THEME.status).map((status) => status.color),
+      ...Object.values(LEDGER_THEME.priorityInk),
+      LEDGER_THEME.palette.accent,
+      LEDGER_THEME.palette.hint,
+      LEDGER_THEME.palette.lane,
+      LEDGER_THEME.palette.pullRequest,
+      LEDGER_THEME.palette.sectionLabel,
+      LEDGER_THEME.palette.textBright,
+      LEDGER_THEME.palette.textDim,
+      LEDGER_THEME.palette.textMuted,
+      LEDGER_THEME.palette.textPrimary,
+      LEDGER_THEME.palette.textSecondary,
+      LEDGER_THEME.palette.warn,
+    ];
+    for (const ink of inks) {
+      for (const ground of grounds) {
+        expect(contrastRatio(ink, ground)).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+    // The selected row swaps in its own ink, so it is measured against its own band.
+    expect(
+      contrastRatio(LEDGER_THEME.palette.selectionInk, LEDGER_THEME.palette.selection),
+    ).toBeGreaterThanOrEqual(4.5);
+  });
+
+  test("keeps the grey ramp ordered so de-emphasis still reads as de-emphasis", () => {
+    const ground = LEDGER_THEME.palette.background;
+    const ramp = [
+      LEDGER_THEME.palette.textPrimary,
+      LEDGER_THEME.palette.textSecondary,
+      LEDGER_THEME.palette.textMuted,
+      LEDGER_THEME.palette.textDim,
+    ].map((ink) => contrastRatio(ink, ground));
+    for (let step = 1; step < ramp.length; step++) {
+      expect(ramp[step] ?? 0).toBeLessThan(ramp[step - 1] ?? 0);
+    }
+  });
+
+  test("gives every status its own ink", () => {
+    const colors = Object.values(LEDGER_THEME.status).map((status) => status.color);
+    expect(new Set(colors).size).toBe(colors.length);
+  });
+
+  test("paints the PR marker and the blocker id in one ochre, as the mockup does", () => {
+    expect(LEDGER_THEME.palette.pullRequest).toBe(LEDGER_THEME.palette.warn);
+    expect(LEDGER_THEME.status.open.color).toBe(LEDGER_THEME.palette.warn);
   });
 });
 

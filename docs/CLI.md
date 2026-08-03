@@ -59,11 +59,14 @@ The viewer picks its theme from the first source that names one:
 `--theme <name>`, then `QUEST_THEME`, then `[tui] theme` in the user config,
 then the built-in default `dense`.
 
-This build ships two themes. `dense` is the default. `tavern` is the quest-log
+This build ships three themes. `dense` is the default. `tavern` is the quest-log
 look: the status column reads `!` for a quest that is yours to take, `⚔` for one
 you are out on, `?` for one returned for review, and a dimmed `!` for one you
-cannot take yet, and priorities wear item-quality colors. A theme changes
-palette and glyphs only — every column stays exactly where `dense` puts it.
+cannot take yet, and priorities wear item-quality colors. `ledger` is ink on
+paper for light terminals, projectors and screenshares — dense's glyphs on a
+warm off-white ground, with every ink that renders words at or above WCAG AA
+4.5:1. A theme changes palette and glyphs only — every column stays exactly
+where `dense` puts it.
 
 `--theme <name>` with a name this build does not ship is a usage error on any
 command, listing the valid names — you typed it, so the command you typed it on
