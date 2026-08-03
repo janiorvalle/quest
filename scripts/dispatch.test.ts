@@ -1767,6 +1767,8 @@ model = "gpt-5-slow"
     const root = await mkdtemp(join(tmpdir(), "quest-dispatch-heartbeat-test-"));
     let touched = 0;
     let claimed = false;
+    let workerStarted = false;
+    let resolveWorker: ((exitCode: number) => void) | undefined;
     try {
       const runtime: DispatchRuntime = {
         environment: "local:test",
@@ -1791,6 +1793,9 @@ model = "gpt-5-slow"
               "touch",
               () => {
                 touched += 1;
+                if (workerStarted) {
+                  resolveWorker?.(0);
+                }
                 return { exitCode: 0, stderr: "", stdout: "" };
               },
             ],
@@ -1805,12 +1810,11 @@ model = "gpt-5-slow"
           ]);
         },
         spawnWorker() {
-          return workerHandle(
-            (async () => {
-              await new Promise((resolve) => setTimeout(resolve, 5));
-              return 0;
-            })(),
-          );
+          workerStarted = true;
+          const completion = new Promise<number>((resolve) => {
+            resolveWorker = resolve;
+          });
+          return workerHandle(completion);
         },
       };
 
@@ -1827,6 +1831,8 @@ model = "gpt-5-slow"
     const root = await mkdtemp(join(tmpdir(), "quest-dispatch-heartbeat-failure-test-"));
     let claimed = false;
     let touches = 0;
+    let workerStarted = false;
+    let releaseTouchFailure: (() => void) | undefined;
     let cancelled = false;
     let resolveWorker: ((exitCode: number) => void) | undefined;
     try {
@@ -1840,6 +1846,19 @@ model = "gpt-5-slow"
         repoRoot: root,
         async runCommand(spec) {
           await prepareFakeWorktree(spec);
+          if (spec.args.includes("touch")) {
+            touches += 1;
+            if (touches === 1) {
+              return { exitCode: 0, stderr: "", stdout: "" };
+            }
+            return new Promise<CommandResult>((resolve) => {
+              releaseTouchFailure = () =>
+                resolve({ exitCode: 1, stderr: "lease store unavailable", stdout: "" });
+              if (workerStarted) {
+                releaseTouchFailure();
+              }
+            });
+          }
           return fakeCommandResponse(spec, [
             [
               "next",
@@ -1847,15 +1866,6 @@ model = "gpt-5-slow"
                 const item = claimed ? null : quest(4, "Lease failure");
                 claimed = true;
                 return { exitCode: 0, stderr: "", stdout: nextReport(item) };
-              },
-            ],
-            [
-              "touch",
-              () => {
-                touches += 1;
-                return touches === 1
-                  ? { exitCode: 0, stderr: "", stdout: "" }
-                  : { exitCode: 1, stderr: "lease store unavailable", stdout: "" };
               },
             ],
             [
@@ -1869,6 +1879,8 @@ model = "gpt-5-slow"
           ]);
         },
         spawnWorker() {
+          workerStarted = true;
+          releaseTouchFailure?.();
           const completion = new Promise<number>((resolve) => {
             resolveWorker = resolve;
           });
