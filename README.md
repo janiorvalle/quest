@@ -50,8 +50,8 @@ compile target.
 File work as it comes up — quest checks for near-duplicates before writing:
 
 ```sh
-printf '%s' '{"title":"Login button does nothing on the accounts page","kind":"bug","description":"Mission: Make Login navigate to the accounts page.\n\nTHE WORK:\n- Reproduce the click path.\n- Verify the expected destination.\n\nFENCES:\n- Keep the fix scoped to the accounts flow.\n\nDoD:\n- Clicking Login navigates successfully."}' |
-  quest --format json add --json -
+quest add "Login button does nothing on the accounts page" --kind bug \
+  --desc "Steps: log in, click Accounts, click Login. Expected: navigates. Actual: nothing."
 ```
 
 An agent takes the next piece of work and gets its full briefing in one
