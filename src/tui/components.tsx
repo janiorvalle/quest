@@ -8,7 +8,7 @@ import type {
   QuestLogItem,
   QuestLogSessionAttribution,
 } from "../services/quest-log-model";
-import { DENSE_THEME, type QuestTheme } from "./theme";
+import { DENSE_THEME, type QuestTheme, questPriorityInk, questStatusText } from "./theme";
 import { useQuestTheme } from "./theme-context";
 
 export interface HeaderCounts {
@@ -119,7 +119,9 @@ function Counts({ counts, compact }: { readonly counts: HeaderCounts; readonly c
         <span fg={theme.status.turned_in.color}>{`  ${counts.review} review`}</span>
       )}
       {counts.blocked === 0 ? null : (
-        <span fg={theme.status.open.color}>{`  ${counts.blocked} ${theme.glyphs.blocked}`}</span>
+        <span
+          fg={theme.status.open.color}
+        >{`  ${counts.blocked} ${theme.glyphs.blockedFlag}`}</span>
       )}
     </text>
   );
@@ -255,17 +257,22 @@ function listHeader(showKind: boolean, showAssignee: boolean, statusWidth: numbe
   ].join(" ");
 }
 
-export function blockedStatusText(item: QuestLogItem): string | null {
+function blockerIdsOf(item: QuestLogItem): readonly number[] {
+  return item.blockerIds ?? (item.blockerId === undefined ? [] : [item.blockerId]);
+}
+
+export function blockedStatusText(theme: QuestTheme, item: QuestLogItem): string | null {
   if (item.computedState !== "blocked") {
     return null;
   }
-  const blockerIds = item.blockerIds ?? (item.blockerId === undefined ? [] : [item.blockerId]);
+  const blocked = `${theme.blockedStatus.glyph} ${theme.blockedStatus.label}`;
+  const blockerIds = blockerIdsOf(item);
   const firstBlocker = blockerIds[0];
   if (firstBlocker === undefined) {
-    return "○ blocked";
+    return blocked;
   }
   const additionalBlockers = blockerIds.length - 1;
-  return `○ blocked ${firstBlocker}${additionalBlockers > 0 ? ` +${additionalBlockers}` : ""}`;
+  return `${blocked} ${firstBlocker}${additionalBlockers > 0 ? ` +${additionalBlockers}` : ""}`;
 }
 
 export interface QuestLogLaneMarker {
@@ -338,40 +345,43 @@ export function laneMarkerFor(
       };
 }
 
+/** The status cell always leads with its glyph, rendered as bold as the cell allows. */
+function statusCell(glyph: string, rest: string, color: string) {
+  return (
+    <span fg={color}>
+      <strong>{glyph}</strong>
+      {rest}
+    </span>
+  );
+}
+
 function blockedStatusCell(
   theme: QuestTheme,
   item: QuestLogItem,
   selected: boolean,
-  blockedStatus: string,
   statusWidth: number,
 ) {
-  const blockerIds = item.blockerIds ?? (item.blockerId === undefined ? [] : [item.blockerId]);
+  const dim = selected ? theme.palette.selectionInk : theme.palette.textDim;
+  const { glyph, label } = theme.blockedStatus;
+  const wordWidth = Math.max(1, statusWidth - stringWidth(glyph) - 1);
+  const blockerIds = blockerIdsOf(item);
   const firstBlocker = blockerIds[0];
-  if (firstBlocker === undefined) {
-    return (
-      <span fg={selected ? theme.palette.selectionInk : theme.palette.textDim}>
-        {`${pad(blockedStatus, statusWidth)} `}
-      </span>
-    );
-  }
-  const prefix = "○ blocked ";
   const suffix = blockerIds.length > 1 ? ` +${blockerIds.length - 1}` : "";
-  const blockerWidth = statusWidth - stringWidth(prefix) - stringWidth(suffix);
-  if (blockerWidth <= 0) {
-    const fittedStatus = fit(blockedStatus, statusWidth);
-    return (
-      <span fg={selected ? theme.palette.selectionInk : theme.palette.textDim}>
-        {`${fittedStatus}${" ".repeat(Math.max(0, statusWidth + 1 - stringWidth(fittedStatus)))}`}
-      </span>
-    );
+  const blockerWidth = wordWidth - stringWidth(label) - 1 - stringWidth(suffix);
+  if (firstBlocker === undefined || blockerWidth <= 0) {
+    const crowded = firstBlocker === undefined ? label : `${label} ${firstBlocker}${suffix}`;
+    return statusCell(glyph, ` ${pad(crowded, wordWidth)} `, dim);
   }
   const visibleBlocker = fit(String(firstBlocker), blockerWidth);
-  const contentWidth = stringWidth(`${prefix}${visibleBlocker}${suffix}`);
+  const contentWidth = stringWidth(glyph) + stringWidth(` ${label} ${visibleBlocker}${suffix}`);
   return (
     <span>
-      <span fg={selected ? theme.palette.selectionInk : theme.palette.textDim}>{prefix}</span>
+      <span fg={dim}>
+        <strong>{glyph}</strong>
+        {` ${label} `}
+      </span>
       <span fg={selected ? theme.palette.selectionInk : theme.palette.warn}>{visibleBlocker}</span>
-      <span fg={selected ? theme.palette.selectionInk : theme.palette.textDim}>{suffix}</span>
+      <span fg={dim}>{suffix}</span>
       <span>{" ".repeat(Math.max(0, statusWidth + 1 - contentWidth))}</span>
     </span>
   );
@@ -410,7 +420,7 @@ export function pullRequestGlyphColor(
   if (selected) {
     return theme.palette.selectionInk;
   }
-  return item.prState === "awaiting-review" ? theme.palette.warn : theme.palette.textDim;
+  return item.prState === "awaiting-review" ? theme.palette.pullRequest : theme.palette.textDim;
 }
 
 function pullRequestPrefixFor(theme: QuestTheme, item: QuestLogItem): string {
@@ -439,7 +449,7 @@ function titlePrefixLayout(
   availableWidth: number,
 ): TitlePrefixLayout {
   const blockedPrefix =
-    item.computedState === "blocked" ? "" : item.blocked ? `${theme.glyphs.blocked} ` : "";
+    item.computedState === "blocked" ? "" : item.blocked ? `${theme.glyphs.blockedFlag} ` : "";
   const pullRequestPrefix = pullRequestPrefixFor(theme, item);
   const candidates = [
     { blockedPrefix, pullRequestPrefix },
@@ -492,21 +502,22 @@ function rowText(
   const markerSuffix = visibleMarkerText === "" ? "" : ` ${visibleMarkerText}`;
   const fittedTitleWidth = Math.max(1, titleWidth - stringWidth(markerSuffix));
   const titleLayout = titlePrefixLayout(theme, item, fittedTitleWidth);
-  const blockedStatus = blockedStatusText(item);
   return (
     <span>
       <span fg={colors.muted}>{`${pad(String(item.id), 5, "right")} `}</span>
-      {blockedStatus === null ? (
-        <span fg={colors.status}>{`${pad(status.label, statusWidth)} `}</span>
-      ) : (
-        blockedStatusCell(theme, item, selected, blockedStatus, statusWidth)
-      )}
+      {item.computedState === "blocked"
+        ? blockedStatusCell(theme, item, selected, statusWidth)
+        : statusCell(
+            status.glyph,
+            ` ${pad(status.label, Math.max(1, statusWidth - stringWidth(status.glyph) - 1))} `,
+            colors.status,
+          )}
       {showKind ? <span fg={colors.muted}>{`${pad(item.kind, 7)} `}</span> : null}
       <span
         fg={
-          selected || item.priority !== 1 || item.computedState === "blocked"
+          selected || item.computedState === "blocked"
             ? colors.muted
-            : theme.status.open.color
+            : questPriorityInk(theme, item.priority)
         }
       >
         {`${pad(`${theme.glyphs.priority}${item.priority}`, 4)} `}
@@ -548,7 +559,10 @@ export function QuestListPane({
   const showKind = terminalWidth >= 90;
   const statusWidth = items.reduce(
     (width, item) =>
-      Math.max(width, stringWidth(blockedStatusText(item) ?? theme.status[item.status].label)),
+      Math.max(
+        width,
+        stringWidth(blockedStatusText(theme, item) ?? questStatusText(theme.status[item.status])),
+      ),
     13,
   );
   const titleWidth = Math.max(
@@ -1641,7 +1655,7 @@ function DetailHeader({
   const assigneeWithAttribution = attribution === null ? assignee : `${assignee} · ${attribution}`;
   const titlePrefix = `quest ${item.id} · `;
   const statusPrefix = `${item.kind} · ${item.area ?? "unassigned"} · `;
-  const statusSuffix = `${status.label} · ${theme.labels.statusPhrase[item.status]}`;
+  const statusSuffix = `${questStatusText(status)} · ${theme.labels.statusPhrase[item.status]}`;
   const statusSuffixWidth = Math.min(detailContentWidth, stringWidth(statusSuffix));
   const statusPrefixWidth = Math.max(0, detailContentWidth - statusSuffixWidth);
   const rows = [
