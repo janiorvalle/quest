@@ -263,8 +263,14 @@ describe("ledger theme", () => {
     expect(LEDGER_THEME.structure).toEqual(DENSE_THEME.structure);
   });
 
-  test("every ink that renders words clears WCAG AA on the paper ground", () => {
-    const ground = LEDGER_THEME.palette.background;
+  test("every ink that renders words clears WCAG AA on every ground it can land on", () => {
+    // A row is drawn on the background or the alternating stripe, and the detail pane on the
+    // surface, so the bar has to hold on all three — not only on the base background.
+    const grounds = [
+      LEDGER_THEME.palette.background,
+      LEDGER_THEME.palette.stripe,
+      LEDGER_THEME.palette.surface,
+    ];
     const inks = [
       ...Object.values(LEDGER_THEME.status).map((status) => status.color),
       ...Object.values(LEDGER_THEME.priorityInk),
@@ -281,8 +287,11 @@ describe("ledger theme", () => {
       LEDGER_THEME.palette.warn,
     ];
     for (const ink of inks) {
-      expect(contrastRatio(ink, ground)).toBeGreaterThanOrEqual(4.5);
+      for (const ground of grounds) {
+        expect(contrastRatio(ink, ground)).toBeGreaterThanOrEqual(4.5);
+      }
     }
+    // The selected row swaps in its own ink, so it is measured against its own band.
     expect(
       contrastRatio(LEDGER_THEME.palette.selectionInk, LEDGER_THEME.palette.selection),
     ).toBeGreaterThanOrEqual(4.5);
@@ -304,6 +313,11 @@ describe("ledger theme", () => {
   test("gives every status its own ink", () => {
     const colors = Object.values(LEDGER_THEME.status).map((status) => status.color);
     expect(new Set(colors).size).toBe(colors.length);
+  });
+
+  test("paints the PR marker and the blocker id in one ochre, as the mockup does", () => {
+    expect(LEDGER_THEME.palette.pullRequest).toBe(LEDGER_THEME.palette.warn);
+    expect(LEDGER_THEME.status.open.color).toBe(LEDGER_THEME.palette.warn);
   });
 });
 

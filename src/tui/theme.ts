@@ -230,10 +230,14 @@ export const TAVERN_THEME: QuestTheme = {
  * Ink on paper — the first light theme, for light terminals, projectors and screenshares.
  * Palette only: every glyph and word is dense's, so the two themes differ in color and nothing else.
  *
- * A light ground is unforgiving, so every ink that renders words clears WCAG AA 4.5:1 against
- * #f7f3ea. That floor compresses the mockup's grey ramp: the ramp bottoms out at 4.5:1, so the
- * faintest two roles (dim rows and column headers) share the floor tone instead of stacking two
- * unreadable greys. Each adjusted ink is the mockup's hue darkened to the bar, nothing more.
+ * A light ground is unforgiving, so every ink that renders words clears WCAG AA 4.5:1 — measured
+ * against the darkest ground it can land on, which is the surface, not the base background. Rows
+ * alternate onto the stripe and the detail pane sits on the surface, so tuning to the base alone
+ * would leave text on those rows below the bar.
+ *
+ * That floor compresses the mockup's grey ramp: it bottoms out at 4.5:1, so the faintest two roles
+ * (dim rows and column headers) share the floor tone instead of stacking two unreadable greys.
+ * Each adjusted ink is the mockup's own hue darkened to the bar, nothing more.
  */
 export const LEDGER_THEME: QuestTheme = {
   ...DENSE_THEME,
@@ -245,27 +249,27 @@ export const LEDGER_THEME: QuestTheme = {
     borderIdle: "#ddd5c2",
     hint: "#2f6f4f",
     lane: "#6b4fa0",
-    pullRequest: "#9c6314",
-    sectionLabel: "#756f61",
+    pullRequest: "#935e13",
+    sectionLabel: "#6f695c",
     selection: "#e2dbc6",
     selectionInk: "#1a170f",
     stripe: "#f3eee2",
     surface: "#efe9db",
     textBright: "#1a170f",
-    textDim: "#756f61",
+    textDim: "#6f695c",
     textMuted: "#605c51",
     textPrimary: "#26221a",
     textSecondary: "#4b473c",
-    warn: "#9c6314",
+    warn: "#935e13",
   },
   priorityInk: { 1: "#9e2f24", 2: "#26221a", 3: "#605c51" },
   status: {
     accepted: { ...DENSE_THEME.status.accepted, color: "#2f6f4f" },
     complete: { ...DENSE_THEME.status.complete, color: "#605c51" },
-    dropped: { ...DENSE_THEME.status.dropped, color: "#756f61" },
-    open: { ...DENSE_THEME.status.open, color: "#9c6314" },
+    dropped: { ...DENSE_THEME.status.dropped, color: "#6f695c" },
+    open: { ...DENSE_THEME.status.open, color: "#935e13" },
     ready: { ...DENSE_THEME.status.ready, color: "#1f5c3d" },
-    turned_in: { ...DENSE_THEME.status.turned_in, color: "#886c1f" },
+    turned_in: { ...DENSE_THEME.status.turned_in, color: "#81661d" },
   },
 };
 
