@@ -59,6 +59,7 @@ import {
 import type {
   AcceptQuestAndExportResult,
   BackupDatabaseInspection,
+  FederatedReadSnapshot,
   QuestStore,
   QuestWatchListener,
   StoreMigrationSession,
@@ -747,6 +748,17 @@ export class SqliteStore implements QuestStore {
     return this.#readTransaction(() => this.#listQuests(parsed));
   }
 
+  async listFencedRepositories(): Promise<readonly string[]> {
+    return this.#readTransaction(() => this.#readFencedRepositories());
+  }
+
+  async readFederatedSnapshot(): Promise<FederatedReadSnapshot> {
+    return this.#readTransaction(() => ({
+      dump: this.#readQuestDump(),
+      fencedRepositories: this.#readFencedRepositories(),
+    }));
+  }
+
   async getQuest(id: number): Promise<Quest | null> {
     const parsedId = questSchema.shape.id.parse(id);
     return this.#readTransaction(() => this.#getQuest(parsedId));
@@ -1290,6 +1302,15 @@ export class SqliteStore implements QuestStore {
       ...dump,
       quests: dump.quests.map((quest) => materializeExpiredLease(quest, timestamp)),
     });
+  }
+
+  #readFencedRepositories(): string[] {
+    return getRows<{ repo: string }, [string]>(
+      this.#database,
+      `SELECT repo FROM ${SQLITE_TABLE_NAMES.migrationFences}
+       WHERE repo <> ? ORDER BY repo`,
+      SQLITE_MIGRATION_GLOBAL_GUARD,
+    ).map(({ repo }) => repo);
   }
 
   #readSequenceHighWater(): SqliteSequenceHighWater {

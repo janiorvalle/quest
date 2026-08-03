@@ -26,12 +26,22 @@ import {
   STORE_SCHEMA_VERSION,
   verdictSchema,
 } from "../schema";
-import type { BlobStore, QuestStore, QuestWatchListener, WatchSubscription } from "./port";
+import type {
+  BlobStore,
+  FederatedReadSnapshot,
+  QuestStore,
+  QuestWatchListener,
+  WatchSubscription,
+} from "./port";
 
 export interface FederatedStoreSource {
   readonly blobStore: BlobStore;
   readonly includeRepository: (repo: string) => boolean;
   readonly questStore: QuestStore;
+  readonly readError?: (repository: string | undefined) => Error | undefined;
+  readonly readSnapshot?: (() => Promise<FederatedReadSnapshot>) | undefined;
+  readonly refresh?: () => Promise<void>;
+  readonly routesRepository?: (repo: string) => boolean;
 }
 
 export class FederatedReadError extends Error {
@@ -51,14 +61,179 @@ function compareEvents(left: Event, right: Event): number {
   );
 }
 
+function sourceRoutesRepository(source: FederatedStoreSource, repository: string): boolean {
+  return (source.routesRepository ?? source.includeRepository)(repository);
+}
+
+function sourceIncludesRepository(
+  source: FederatedStoreSource,
+  repository: string,
+  fencedRepositories: ReadonlySet<string> | undefined = undefined,
+): boolean {
+  return fencedRepositories === undefined
+    ? source.includeRepository(repository)
+    : sourceRoutesRepository(source, repository) && !fencedRepositories.has(repository);
+}
+
+function sourceReadError(
+  source: FederatedStoreSource,
+  repository: string | undefined,
+): Error | undefined {
+  return source.readError?.(repository);
+}
+
 function filterQuests(
   quests: readonly Quest[],
   source: FederatedStoreSource,
   scope: QuestScope | undefined = undefined,
+  fencedRepositories: ReadonlySet<string> | undefined = undefined,
 ): Quest[] {
   return quests
-    .filter((quest) => source.includeRepository(quest.repo))
+    .filter((quest) => sourceIncludesRepository(source, quest.repo, fencedRepositories))
     .filter((quest) => scope === undefined || scope.repo === null || quest.repo === scope.repo);
+}
+
+function filterSnapshotQuests(
+  snapshot: FederatedReadSnapshot,
+  source: FederatedStoreSource,
+  filter: QuestFilter,
+): Quest[] {
+  const fencedRepositories = new Set(snapshot.fencedRepositories);
+  const statusById = new Map(snapshot.dump.quests.map((quest) => [quest.id, quest.status]));
+  const blockedIds =
+    filter.blocked === undefined
+      ? undefined
+      : new Set(
+          snapshot.dump.chains
+            .filter(
+              (link) => link.type === "requires" && statusById.get(link.target_id) !== "complete",
+            )
+            .map((link) => link.quest_id),
+        );
+  return snapshot.dump.quests.filter(
+    (quest) =>
+      sourceIncludesRepository(source, quest.repo, fencedRepositories) &&
+      (filter.repo === undefined || quest.repo === filter.repo) &&
+      (filter.status === undefined || quest.status === filter.status) &&
+      (filter.area === undefined || quest.area === filter.area) &&
+      (filter.kind === undefined || quest.kind === filter.kind) &&
+      (filter.assignee === undefined || quest.assignee === filter.assignee) &&
+      (filter.blocked === undefined || blockedIds?.has(quest.id) === filter.blocked),
+  );
+}
+
+function statsForQuests(quests: readonly Quest[]): QuestStats {
+  const repos = new Map<string, RepoStats>();
+  for (const quest of quests) {
+    const current = repos.get(quest.repo) ?? {
+      repo: quest.repo,
+      total: 0,
+      status_counts: {},
+      verdict_counts: {},
+      reopen_count: 0,
+      assignee_load: {},
+    };
+    current.total += 1;
+    current.status_counts[quest.status] = (current.status_counts[quest.status] ?? 0) + 1;
+    if (quest.verdict !== null) {
+      current.verdict_counts[quest.verdict] = (current.verdict_counts[quest.verdict] ?? 0) + 1;
+    }
+    current.reopen_count += quest.reopen_count;
+    if (quest.assignee !== null) {
+      current.assignee_load[quest.assignee] = (current.assignee_load[quest.assignee] ?? 0) + 1;
+    }
+    repos.set(quest.repo, current);
+  }
+  return {
+    repos: [...repos.values()].sort((left, right) => left.repo.localeCompare(right.repo)),
+  };
+}
+
+function filterSnapshotEvents(
+  snapshot: FederatedReadSnapshot,
+  source: FederatedStoreSource,
+  filter: EventFilter,
+): Event[] {
+  const fencedRepositories = new Set(snapshot.fencedRepositories);
+  const questsById = new Map(snapshot.dump.quests.map((quest) => [quest.id, quest]));
+  return snapshot.dump.events
+    .filter((event) => {
+      const quest = questsById.get(event.quest_id);
+      return (
+        quest !== undefined &&
+        sourceIncludesRepository(source, quest.repo, fencedRepositories) &&
+        (filter.repo === undefined || quest.repo === filter.repo) &&
+        (filter.quest_id === undefined || event.quest_id === filter.quest_id) &&
+        (filter.after_id === undefined || event.id > filter.after_id) &&
+        (filter.since === undefined || Date.parse(event.at) >= Date.parse(filter.since)) &&
+        (filter.until === undefined || Date.parse(event.at) <= Date.parse(filter.until)) &&
+        (filter.actor === undefined || event.actor === filter.actor) &&
+        (filter.action === undefined || event.action === filter.action) &&
+        (filter.area === undefined || quest.area === filter.area)
+      );
+    })
+    .map((event) => {
+      const quest = questsById.get(event.quest_id);
+      return quest === undefined ? event : { ...event, repo: quest.repo };
+    });
+}
+
+function repositoryScope(repository: string | undefined): QuestScope | undefined {
+  return repository === undefined ? undefined : { repo: repository };
+}
+
+function chainNeighbors(chain: Chain, questId: number): readonly number[] {
+  if (chain.quest_id === questId) {
+    return [chain.target_id];
+  }
+  return chain.target_id === questId ? [chain.quest_id] : [];
+}
+
+function expandExportQuestIds(
+  dump: QuestDump,
+  source: FederatedStoreSource,
+  allowedIds: Set<number>,
+  fencedRepositories: ReadonlySet<string> | undefined,
+): void {
+  const pending = [...allowedIds];
+  while (pending.length > 0) {
+    const questId = pending.pop();
+    if (questId === undefined) {
+      continue;
+    }
+    for (const chain of dump.chains) {
+      for (const relatedId of chainNeighbors(chain, questId)) {
+        const quest = dump.quests.find((candidate) => candidate.id === relatedId);
+        if (
+          quest === undefined ||
+          !sourceIncludesRepository(source, quest.repo, fencedRepositories) ||
+          allowedIds.has(relatedId)
+        ) {
+          continue;
+        }
+        allowedIds.add(relatedId);
+        pending.push(relatedId);
+      }
+    }
+  }
+}
+
+function exportQuestIds(
+  dump: QuestDump,
+  source: FederatedStoreSource,
+  repository: string | undefined,
+  fencedRepositories: ReadonlySet<string> | undefined = undefined,
+): ReadonlySet<number> {
+  const allowedIds = new Set(
+    filterQuests(dump.quests, source, repositoryScope(repository), fencedRepositories).map(
+      (quest) => quest.id,
+    ),
+  );
+  if (repository === undefined) {
+    return allowedIds;
+  }
+  expandExportQuestIds(dump, source, allowedIds, fencedRepositories);
+  return allowedIds;
 }
 
 function mergeStatusCounts(left: RepoStats, right: RepoStats): RepoStats["status_counts"] {
@@ -106,6 +281,101 @@ function mergeQuestSnapshots(snapshots: readonly (readonly Quest[])[]): Quest[] 
   return snapshots.flat().sort(compareQuests);
 }
 
+interface FederatedWatchResult {
+  readonly error?: Error;
+  readonly snapshot?: Quest[];
+}
+
+interface FederatedSourceRead {
+  readonly source: FederatedStoreSource;
+  readonly snapshot?: FederatedReadSnapshot;
+}
+
+async function readFederatedSource(source: FederatedStoreSource): Promise<FederatedSourceRead> {
+  if (source.readSnapshot === undefined) {
+    return { source };
+  }
+  const snapshot = await source.readSnapshot();
+  const readError = source.readError?.(undefined);
+  if (readError !== undefined) {
+    throw readError;
+  }
+  return { source, snapshot };
+}
+
+function federatedWatchReadError(filter: QuestFilter, error: unknown): FederatedReadError {
+  if (error instanceof FederatedReadError) {
+    return error;
+  }
+  if (error instanceof Error && /^\[[A-Z0-9_]+\]/.test(error.message)) {
+    return new FederatedReadError(error.message);
+  }
+  const scope = filter.repo === undefined ? "a routed backend" : `repository ${filter.repo}`;
+  return new FederatedReadError(
+    `[FEDERATED_SCOPE_UNAVAILABLE] ${scope} stopped responding; retry when its deployment is reachable`,
+  );
+}
+
+async function readFederatedWatchSnapshot(
+  filter: QuestFilter,
+  source: FederatedStoreSource,
+): Promise<FederatedWatchResult> {
+  try {
+    if (source.readSnapshot !== undefined) {
+      const readError = source.readError?.(filter.repo);
+      if (readError !== undefined) {
+        return { error: readError };
+      }
+      const snapshot = await source.readSnapshot();
+      const refreshedReadError = source.readError?.(filter.repo);
+      return refreshedReadError === undefined
+        ? { snapshot: filterSnapshotQuests(snapshot, source, filter) }
+        : { error: refreshedReadError };
+    }
+    await source.refresh?.();
+    const readError = source.readError?.(filter.repo);
+    if (readError !== undefined) {
+      return { error: readError };
+    }
+    return {
+      snapshot: filterQuests(await source.questStore.listQuests(filter), source),
+    };
+  } catch (error: unknown) {
+    return { error: federatedWatchReadError(filter, error) };
+  }
+}
+
+async function refreshFederatedWatchResult(
+  filter: QuestFilter,
+  source: FederatedStoreSource,
+  quests: readonly Quest[],
+  sourceError: Error | undefined,
+): Promise<FederatedWatchResult> {
+  if (sourceError !== undefined) {
+    return { error: federatedWatchReadError(filter, sourceError) };
+  }
+  try {
+    if (source.readSnapshot !== undefined) {
+      const readError = source.readError?.(filter.repo);
+      if (readError !== undefined) {
+        return { error: readError };
+      }
+      const snapshot = await source.readSnapshot();
+      const refreshedReadError = source.readError?.(filter.repo);
+      return refreshedReadError === undefined
+        ? { snapshot: filterSnapshotQuests(snapshot, source, filter) }
+        : { error: refreshedReadError };
+    }
+    await source.refresh?.();
+  } catch (error: unknown) {
+    return { error: federatedWatchReadError(filter, error) };
+  }
+  const readError = source.readError?.(filter.repo);
+  return readError === undefined
+    ? { snapshot: filterQuests(quests, source) }
+    : { error: readError };
+}
+
 function readOnlyMutationError(): FederatedReadError {
   return new FederatedReadError(
     "[FEDERATED_READ_ONLY] --all is a read-only scope; rerun without --all and pass --repo <name> for mutations",
@@ -127,16 +397,40 @@ function federatedCursorError(): FederatedReadError {
 interface FederatedQuestMatch {
   readonly quest: Quest;
   readonly source: FederatedStoreSource;
+  readonly snapshot?: FederatedReadSnapshot;
 }
 
 async function matchingQuestSources(
   sources: readonly FederatedStoreSource[],
   id: number,
+  repository?: string,
 ): Promise<readonly FederatedQuestMatch[]> {
   const matches = await Promise.all(
     sources.map(async (source) => {
+      if (source.readSnapshot !== undefined) {
+        const snapshot = await source.readSnapshot();
+        const readError = source.readError?.(repository);
+        if (readError !== undefined) {
+          throw readError;
+        }
+        const quest = snapshot.dump.quests.find(
+          (candidate) =>
+            candidate.id === id &&
+            (repository === undefined || candidate.repo === repository) &&
+            sourceIncludesRepository(source, candidate.repo, new Set(snapshot.fencedRepositories)),
+        );
+        return quest === undefined ? null : { quest, source, snapshot };
+      }
+      const readError = source.readError?.(undefined);
+      if (readError !== undefined) {
+        throw readError;
+      }
       const quest = await source.questStore.getQuest(id);
-      return quest !== null && source.includeRepository(quest.repo) ? { quest, source } : null;
+      return quest !== null &&
+        (repository === undefined || quest.repo === repository) &&
+        source.includeRepository(quest.repo)
+        ? { quest, source }
+        : null;
     }),
   );
   return matches.flatMap((match) => (match === null ? [] : [match]));
@@ -163,9 +457,17 @@ function assertUniqueQuestIds(quests: readonly Quest[]): void {
 
 export class FederatedQuestStore implements QuestStore {
   readonly #sources: readonly FederatedStoreSource[];
+  readonly #repositoryScope: string | undefined;
+  readonly #allowPartialReads: boolean;
 
-  constructor(sources: readonly FederatedStoreSource[]) {
+  constructor(
+    sources: readonly FederatedStoreSource[],
+    repositoryScope?: string,
+    options: { readonly allowPartialReads?: boolean } = {},
+  ) {
     this.#sources = [...sources];
+    this.#repositoryScope = repositoryScope;
+    this.#allowPartialReads = options.allowPartialReads ?? false;
   }
 
   addQuest(_input: NewQuest): Promise<Quest> {
@@ -200,29 +502,118 @@ export class FederatedQuestStore implements QuestStore {
     return Promise.reject(readOnlyMutationError());
   }
 
+  #selectSourcesForRepository(repository: string | undefined): readonly FederatedStoreSource[] {
+    const scopedRepository = this.#repositoryScope ?? repository;
+    return scopedRepository === undefined
+      ? this.#sources
+      : this.#sources.filter((source) =>
+          (source.routesRepository ?? source.includeRepository)(scopedRepository),
+        );
+  }
+
+  #sourcesForRepository(repository: string | undefined): readonly FederatedStoreSource[] {
+    const sources = this.#selectSourcesForRepository(repository);
+    if (repository === undefined) {
+      const unavailable = sources.find(
+        (source) => sourceReadError(source, undefined) !== undefined,
+      );
+      if (!this.#allowPartialReads && unavailable !== undefined) {
+        const readError = sourceReadError(unavailable, undefined);
+        if (readError !== undefined) {
+          throw readError;
+        }
+      }
+      return this.#allowPartialReads
+        ? sources.filter((source) => sourceReadError(source, undefined) === undefined)
+        : sources;
+    }
+    const unavailable = sources.find((source) => sourceReadError(source, repository) !== undefined);
+    const readError =
+      unavailable === undefined ? undefined : sourceReadError(unavailable, repository);
+    if (readError !== undefined) {
+      throw readError;
+    }
+    return sources;
+  }
+
+  async #readSources(repository: string | undefined): Promise<readonly FederatedStoreSource[]> {
+    await Promise.all(
+      this.#sources
+        .filter((source) => source.readSnapshot === undefined)
+        .map((source) => source.refresh?.()),
+    );
+    return this.#sourcesForRepository(this.#repositoryScope ?? repository);
+  }
+
+  async #readSourceSnapshots(
+    repository: string | undefined,
+  ): Promise<readonly FederatedSourceRead[]> {
+    const sources = await this.#readSources(repository);
+    const attempts = await Promise.allSettled(sources.map((source) => readFederatedSource(source)));
+    const rejected = attempts.filter(
+      (attempt): attempt is PromiseRejectedResult => attempt.status === "rejected",
+    );
+    if (rejected.length > 0 && (!this.#allowPartialReads || repository !== undefined)) {
+      throw federatedWatchReadError({ repo: repository }, rejected[0]?.reason);
+    }
+    return attempts.flatMap((attempt) => (attempt.status === "fulfilled" ? [attempt.value] : []));
+  }
+
+  #sourcesForRepositoryScope(): Promise<readonly FederatedStoreSource[]> {
+    return this.#readSources(this.#repositoryScope);
+  }
+
+  forRepository(repository: string): QuestStore {
+    return new FederatedQuestStore(this.#selectSourcesForRepository(repository), repository, {
+      allowPartialReads: this.#allowPartialReads,
+    });
+  }
+
   async listQuests(filter: QuestFilter): Promise<Quest[]> {
+    const scopedFilter =
+      this.#repositoryScope === undefined ? filter : { ...filter, repo: this.#repositoryScope };
+    const reads = await this.#readSourceSnapshots(scopedFilter.repo);
     const results = await Promise.all(
-      this.#sources.map(async (source) =>
-        filterQuests(await source.questStore.listQuests(filter), source),
+      reads.map(async ({ source, snapshot }) =>
+        snapshot === undefined
+          ? filterQuests(
+              await source.questStore.listQuests(scopedFilter),
+              source,
+              repositoryScope(scopedFilter.repo),
+            )
+          : filterSnapshotQuests(snapshot, source, scopedFilter),
       ),
     );
     return mergeQuestSnapshots(results);
   }
 
   async getQuest(id: number): Promise<Quest | null> {
-    const matches = await matchingQuestSources(this.#sources, id);
+    const sources = await this.#sourcesForRepositoryScope();
+    const matches = await matchingQuestSources(sources, id, this.#repositoryScope);
     requireUnambiguousQuest(matches, id);
     return matches[0]?.quest ?? null;
   }
 
   async stats(scope: QuestScope): Promise<QuestStats> {
+    const scopedRepository =
+      this.#repositoryScope ?? (scope.repo === null ? undefined : scope.repo);
+    const reads = await this.#readSourceSnapshots(scopedRepository);
     const stats = await Promise.all(
-      this.#sources.map(async (source) => {
+      reads.map(async ({ source, snapshot }) => {
+        if (snapshot !== undefined) {
+          return statsForQuests(
+            filterSnapshotQuests(
+              snapshot,
+              source,
+              scopedRepository === undefined ? {} : { repo: scopedRepository },
+            ),
+          ).repos;
+        }
         const result = await source.questStore.stats({ repo: null });
         return result.repos.filter(
           (repo) =>
             source.includeRepository(repo.repo) &&
-            (scope.repo === null || repo.repo === scope.repo),
+            (scopedRepository === undefined || repo.repo === scopedRepository),
         );
       }),
     );
@@ -237,12 +628,19 @@ export class FederatedQuestStore implements QuestStore {
   }
 
   async events(questId: number): Promise<Event[]> {
-    const matches = await matchingQuestSources(this.#sources, questId);
+    const sources = await this.#sourcesForRepositoryScope();
+    const matches = await matchingQuestSources(sources, questId, this.#repositoryScope);
     requireUnambiguousQuest(matches, questId);
     const match = matches[0];
     return match === undefined
       ? []
-      : (await match.source.questStore.events(questId))
+      : (match.snapshot === undefined
+          ? await match.source.questStore.events(questId)
+          : filterSnapshotEvents(match.snapshot, match.source, {
+              quest_id: questId,
+              ...(this.#repositoryScope === undefined ? {} : { repo: this.#repositoryScope }),
+            })
+        )
           .map((event) => ({ ...event, repo: match.quest.repo }))
           .sort(compareEvents);
   }
@@ -251,15 +649,25 @@ export class FederatedQuestStore implements QuestStore {
     if (filter.after_id !== undefined) {
       throw federatedCursorError();
     }
+    const scopedFilter =
+      this.#repositoryScope === undefined ? filter : { ...filter, repo: this.#repositoryScope };
+    const reads = await this.#readSourceSnapshots(scopedFilter.repo);
     if (filter.quest_id !== undefined) {
-      const matches = await matchingQuestSources(this.#sources, filter.quest_id);
+      const matches = await matchingQuestSources(
+        reads.map((read) => read.source),
+        filter.quest_id,
+        scopedFilter.repo,
+      );
       requireUnambiguousQuest(matches, filter.quest_id);
     }
     const events = await Promise.all(
-      this.#sources.map(async (source) => {
-        const result = await source.questStore.queryEvents(filter);
+      reads.map(async ({ source, snapshot }) => {
+        if (snapshot !== undefined) {
+          return filterSnapshotEvents(snapshot, source, scopedFilter);
+        }
+        const result = await source.questStore.queryEvents(scopedFilter);
         const dump = await source.questStore.exportAll();
-        const allowedQuests = filterQuests(dump.quests, source);
+        const allowedQuests = filterQuests(dump.quests, source, repositoryScope(scopedFilter.repo));
         const repositoriesById = new Map(allowedQuests.map((quest) => [quest.id, quest.repo]));
         return result.flatMap((event) => {
           const repo = repositoriesById.get(event.quest_id);
@@ -271,9 +679,12 @@ export class FederatedQuestStore implements QuestStore {
   }
 
   async exportAll(): Promise<QuestDump> {
+    const reads = await this.#readSourceSnapshots(this.#repositoryScope);
     const dumps = await Promise.all(
-      this.#sources.map(async (source) => ({
-        dump: await source.questStore.exportAll(),
+      reads.map(async ({ source, snapshot }) => ({
+        dump: snapshot?.dump ?? (await source.questStore.exportAll()),
+        fencedRepositories:
+          snapshot === undefined ? undefined : new Set(snapshot.fencedRepositories),
         source,
       })),
     );
@@ -281,9 +692,14 @@ export class FederatedQuestStore implements QuestStore {
     const evidence: Evidence[] = [];
     const chains: Chain[] = [];
     const events: Event[] = [];
-    for (const { dump, source } of dumps) {
-      const allowedQuests = filterQuests(dump.quests, source);
-      const allowedQuestIds = new Set(allowedQuests.map((quest) => quest.id));
+    for (const { dump, fencedRepositories, source } of dumps) {
+      const allowedQuestIds = exportQuestIds(
+        dump,
+        source,
+        this.#repositoryScope,
+        fencedRepositories,
+      );
+      const allowedQuests = dump.quests.filter((quest) => allowedQuestIds.has(quest.id));
       quests.push(...allowedQuests);
       evidence.push(...dump.evidence.filter((item) => allowedQuestIds.has(item.quest_id)));
       chains.push(
@@ -314,29 +730,172 @@ export class FederatedQuestStore implements QuestStore {
   }
 
   async watch(filter: QuestFilter, listener: QuestWatchListener): Promise<WatchSubscription> {
-    const snapshots = await Promise.all(
-      this.#sources.map(async (source) =>
-        filterQuests(await source.questStore.listQuests(filter), source),
-      ),
+    const scopedFilter =
+      this.#repositoryScope === undefined ? filter : { ...filter, repo: this.#repositoryScope };
+    const sources = this.#selectSourcesForRepository(scopedFilter.repo);
+    await Promise.all(
+      sources
+        .filter((source) => source.readSnapshot === undefined)
+        .map((source) => source.refresh?.()),
     );
+    if (scopedFilter.repo === undefined && !this.#allowPartialReads) {
+      this.#sourcesForRepository(undefined);
+    }
+    if (scopedFilter.repo !== undefined) {
+      this.#sourcesForRepository(scopedFilter.repo);
+    }
+    const initialResults = await Promise.all(
+      sources.map((source) => readFederatedWatchSnapshot(scopedFilter, source)),
+    );
+    const initialError = initialResults.find((result) => result.error !== undefined)?.error;
+    const hasHealthySource = initialResults.some((result) => result.error === undefined);
+    if (
+      initialError !== undefined &&
+      (scopedFilter.repo !== undefined || !this.#allowPartialReads || !hasHealthySource)
+    ) {
+      throw initialError;
+    }
+    const sourceErrors = initialResults.map((result) => result.error);
+    const snapshots = initialResults.map((result) => result.snapshot ?? []);
+    let active = true;
+    let refreshRunning = false;
+    const sourceRefreshGenerations = sources.map(() => 0);
+    const beginSourceRefresh = (index: number): number => {
+      const generation = (sourceRefreshGenerations[index] ?? 0) + 1;
+      sourceRefreshGenerations[index] = generation;
+      return generation;
+    };
+    const inFlight = new Set<Promise<void>>();
+    const track = (action: Promise<void>): void => {
+      inFlight.add(action);
+      void action.then(
+        () => inFlight.delete(action),
+        () => inFlight.delete(action),
+      );
+    };
+    const waitForCallbacks = async (): Promise<void> => {
+      while (inFlight.size > 0) {
+        await Promise.allSettled([...inFlight]);
+      }
+    };
+    const emit = (readError?: Error): void => {
+      if (!active) {
+        return;
+      }
+      listener(
+        mergeQuestSnapshots(snapshots),
+        readError ?? sourceErrors.find((error) => error !== undefined),
+      );
+    };
+    const applyRefreshResults = (
+      generations: readonly number[],
+      results: readonly FederatedWatchResult[],
+    ): { readonly applied: boolean; readonly firstError: Error | undefined } => {
+      let firstError: Error | undefined;
+      let applied = false;
+      for (const [index, result] of results.entries()) {
+        if (generations[index] !== sourceRefreshGenerations[index]) {
+          continue;
+        }
+        applied = true;
+        sourceErrors[index] = result.error;
+        if (result.snapshot !== undefined) {
+          snapshots[index] = result.snapshot;
+        } else if (result.error !== undefined) {
+          snapshots[index] = [];
+        }
+        firstError ??= result.error;
+      }
+      return { applied, firstError };
+    };
+    const refreshSnapshot = async (): Promise<void> => {
+      if (!active || refreshRunning) {
+        return;
+      }
+      refreshRunning = true;
+      try {
+        const generations = sources.map((_source, index) => beginSourceRefresh(index));
+        const results = await Promise.all(
+          sources.map((source) => readFederatedWatchSnapshot(scopedFilter, source)),
+        );
+        if (!active) {
+          return;
+        }
+        const outcome = applyRefreshResults(generations, results);
+        if (outcome.applied) {
+          emit(outcome.firstError);
+        }
+      } finally {
+        refreshRunning = false;
+      }
+    };
+    const refreshTimer = setInterval(() => {
+      track(refreshSnapshot());
+    }, 1_000);
+    refreshTimer.unref?.();
     const subscriptions: WatchSubscription[] = [];
+    let unsubscribePromise: Promise<void> | undefined;
     try {
-      for (const [index, source] of this.#sources.entries()) {
+      for (const [index, source] of sources.entries()) {
+        if (
+          initialResults[index]?.error !== undefined ||
+          sourceReadError(source, scopedFilter.repo) !== undefined
+        ) {
+          continue;
+        }
         subscriptions.push(
-          await source.questStore.watch(filter, (quests) => {
-            snapshots[index] = filterQuests(quests, source);
-            listener(mergeQuestSnapshots(snapshots));
+          await source.questStore.watch(scopedFilter, (quests, sourceError) => {
+            const refreshGeneration = beginSourceRefresh(index);
+            const action = refreshFederatedWatchResult(
+              scopedFilter,
+              source,
+              quests,
+              sourceError,
+            ).then((result) => {
+              if (!active || refreshGeneration !== sourceRefreshGenerations[index]) {
+                return;
+              }
+              sourceErrors[index] = result.error;
+              if (result.error !== undefined) {
+                snapshots[index] = [];
+                emit(result.error);
+                return;
+              }
+              snapshots[index] = result.snapshot ?? [];
+              emit();
+            });
+            track(action);
           }),
         );
       }
+      emit();
     } catch (error: unknown) {
+      active = false;
+      clearInterval(refreshTimer);
       await Promise.allSettled(subscriptions.map((subscription) => subscription.unsubscribe()));
+      await waitForCallbacks();
       throw error;
     }
-    listener(mergeQuestSnapshots(snapshots));
     return {
-      unsubscribe: async () => {
-        await Promise.all(subscriptions.map((subscription) => subscription.unsubscribe()));
+      unsubscribe: () => {
+        if (unsubscribePromise !== undefined) {
+          return unsubscribePromise;
+        }
+        active = false;
+        clearInterval(refreshTimer);
+        unsubscribePromise = (async () => {
+          const results = await Promise.allSettled(
+            subscriptions.map((subscription) => subscription.unsubscribe()),
+          );
+          await waitForCallbacks();
+          const failure = results.find(
+            (result): result is PromiseRejectedResult => result.status === "rejected",
+          );
+          if (failure !== undefined) {
+            throw failure.reason;
+          }
+        })();
+        return unsubscribePromise;
       },
     };
   }
@@ -353,14 +912,53 @@ export class FederatedBlobStore implements BlobStore {
     return Promise.reject(readOnlyMutationError());
   }
 
+  async #readSources(repository: string): Promise<
+    readonly {
+      readonly source: FederatedStoreSource;
+      readonly fencedRepositories?: ReadonlySet<string>;
+    }[]
+  > {
+    const sources = this.#sources.filter((source) => sourceRoutesRepository(source, repository));
+    return Promise.all(
+      sources.map(async (source) => {
+        const initialError = source.readError?.(repository);
+        if (initialError !== undefined) {
+          throw initialError;
+        }
+        if (source.readSnapshot !== undefined) {
+          try {
+            const snapshot = await source.readSnapshot();
+            const readError = source.readError?.(repository);
+            if (readError !== undefined) {
+              throw readError;
+            }
+            return { source, fencedRepositories: new Set(snapshot.fencedRepositories) };
+          } catch (error: unknown) {
+            throw federatedWatchReadError({ repo: repository }, error);
+          }
+        }
+        await source.refresh?.();
+        const readError = source.readError?.(repository);
+        if (readError !== undefined) {
+          throw readError;
+        }
+        return { source };
+      }),
+    );
+  }
+
   async get(sha256: Sha256, repository?: string): Promise<Uint8Array | null> {
     if (repository === undefined) {
       throw new FederatedReadError(
         "[FEDERATED_BLOB_REPOSITORY_REQUIRED] evidence retrieval needs a repository; rerun with --repo <name> or select a quest before materializing evidence",
       );
     }
-    for (const source of this.#sources) {
-      if (!source.includeRepository(repository)) {
+    const sources = await this.#readSources(repository);
+    for (const { source, fencedRepositories } of sources) {
+      if (
+        fencedRepositories?.has(repository) === true ||
+        (fencedRepositories === undefined && !source.includeRepository(repository))
+      ) {
         continue;
       }
       const bytes = await source.blobStore.get(sha256);
@@ -377,8 +975,12 @@ export class FederatedBlobStore implements BlobStore {
         "[FEDERATED_BLOB_REPOSITORY_REQUIRED] evidence retrieval needs a repository; rerun with --repo <name> or select a quest before materializing evidence",
       );
     }
-    for (const source of this.#sources) {
-      if (!source.includeRepository(repository)) {
+    const sources = await this.#readSources(repository);
+    for (const { source, fencedRepositories } of sources) {
+      if (
+        fencedRepositories?.has(repository) === true ||
+        (fencedRepositories === undefined && !source.includeRepository(repository))
+      ) {
         continue;
       }
       if (await source.blobStore.has(sha256)) {

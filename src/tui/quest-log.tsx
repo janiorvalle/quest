@@ -79,12 +79,24 @@ function selectedQuest(
   return items[selectedIndex];
 }
 
+function questIdentity(item: QuestLogItem): string {
+  return `${item.repo}\u0000${item.id}`;
+}
+
 function selectedIndexForQuest(
   items: readonly QuestLogItem[],
   interaction: QuestLogInteractionState,
 ): number {
   if (items.length === 0) {
     return 0;
+  }
+  if (interaction.selectedQuestKey !== undefined) {
+    const identityIndex = items.findIndex(
+      (item) => questIdentity(item) === interaction.selectedQuestKey,
+    );
+    if (identityIndex >= 0) {
+      return identityIndex;
+    }
   }
   if (interaction.selectedQuestId !== undefined) {
     const identityIndex = items.findIndex((item) => item.id === interaction.selectedQuestId);
@@ -124,7 +136,8 @@ function useQuestDetail(runtime: QuestLogRuntime, current: QuestLogItem | undefi
   const [detail, setDetail] = useState<Awaited<ReturnType<QuestLogRuntime["loadDetail"]>> | null>(
     null,
   );
-  const detailKey = current === undefined ? "" : `${current.id}@${current.updatedAt}`;
+  const detailKey =
+    current === undefined ? "" : `${current.repo}\u0000${current.id}\u0000${current.updatedAt}`;
 
   useEffect(() => {
     if (detailKey === "") {
@@ -132,10 +145,12 @@ function useQuestDetail(runtime: QuestLogRuntime, current: QuestLogItem | undefi
       return;
     }
     setDetail(null);
-    const separator = detailKey.indexOf("@");
-    const id = Number(detailKey.slice(0, separator));
+    const separator = detailKey.indexOf("\u0000");
+    const secondSeparator = detailKey.indexOf("\u0000", separator + 1);
+    const repository = detailKey.slice(0, separator);
+    const id = Number(detailKey.slice(separator + 1, secondSeparator));
     let cancelled = false;
-    runtime.loadDetail(id).then(
+    runtime.loadDetail(id, repository).then(
       (value) => {
         if (!cancelled) {
           setDetail(value);
@@ -293,6 +308,7 @@ export function QuestLogApp({
   );
   const [snapshot, setSnapshot] = useState<QuestLogSnapshot>({
     currentRepo: null,
+    error: null,
     items: [],
     loading: true,
     plan: null,
@@ -339,6 +355,7 @@ export function QuestLogApp({
     [activeArea, policyItems],
   );
   const visibleQuestIds = useMemo(() => visibleItems.map((item) => item.id), [visibleItems]);
+  const visibleQuestKeys = useMemo(() => visibleItems.map(questIdentity), [visibleItems]);
   const activeSelectedIndex = selectedIndexForQuest(visibleItems, interaction);
   const current = selectedQuest(visibleItems, activeSelectedIndex);
   const currentPr = current?.pr;
@@ -387,6 +404,7 @@ export function QuestLogApp({
         questId: currentQuestId,
         visibleCount: visibleItems.length,
         visibleQuestIds,
+        visibleQuestKeys,
       },
     );
     if (
@@ -394,6 +412,7 @@ export function QuestLogApp({
       next.state.areaKey !== interaction.areaKey ||
       next.state.selectedIndex !== interaction.selectedIndex ||
       next.state.selectedQuestId !== interaction.selectedQuestId ||
+      next.state.selectedQuestKey !== interaction.selectedQuestKey ||
       next.state.detailScrollOffset !== interaction.detailScrollOffset
     ) {
       interactionRef.current = next.state;
@@ -411,8 +430,10 @@ export function QuestLogApp({
     interaction.areaKey,
     interaction.selectedIndex,
     interaction.selectedQuestId,
+    interaction.selectedQuestKey,
     visibleItems.length,
     visibleQuestIds,
+    visibleQuestKeys,
   ]);
 
   useKeyboard((key) => {
@@ -436,8 +457,10 @@ export function QuestLogApp({
         detailViewportRows: detailMetrics.viewportRows,
         ...(activeQuest === undefined ? {} : { pr: activeQuest.pr }),
         questId: activeQuest?.id,
+        ...(activeQuest === undefined ? {} : { repository: activeQuest.repo }),
         visibleCount: activeItems.length,
         visibleQuestIds: activeItems.map((item) => item.id),
+        visibleQuestKeys: activeItems.map(questIdentity),
       },
     );
     interactionRef.current = result.state;
@@ -478,7 +501,12 @@ export function QuestLogApp({
         setNotice(result.state.sortMode === "plan" ? "Plan order" : "Flat sort");
         return;
       case "open-evidence":
-        openEvidenceWithNotice(runtime.openEvidence, result.intent.id, setNotice);
+        openEvidenceWithNotice(
+          runtime.openEvidence,
+          result.intent.id,
+          setNotice,
+          result.intent.repository,
+        );
         return;
       case "open-pr":
         openPrWithNotice(runtime.openPr, result.intent.url, setNotice);
@@ -499,7 +527,7 @@ export function QuestLogApp({
         identity={identity}
         activeAreaIndex={activeAreaIndex}
         activeSelectedIndex={activeSelectedIndex}
-        notice={notice}
+        notice={snapshot.error ?? notice}
         policyItems={policyItems}
         planAvailable={planAvailable}
         runtime={runtime}

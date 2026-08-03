@@ -1,4 +1,4 @@
-export type EvidenceOpener = (id: number) => Promise<string>;
+export type EvidenceOpener = (id: number, repository?: string) => Promise<string>;
 export type NoticeSetter = (notice: string) => void;
 
 function errorDetail(error: unknown): string {
@@ -14,8 +14,9 @@ export function openEvidenceWithNotice(
   openEvidence: EvidenceOpener,
   id: number,
   setNotice: NoticeSetter,
+  repository?: string,
 ): void {
-  void openEvidence(id)
+  void openEvidence(id, repository)
     .then(setNotice)
     .catch((error: unknown) => setNotice(evidenceOpenFailureNotice(error)));
 }

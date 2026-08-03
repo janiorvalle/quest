@@ -161,6 +161,40 @@ describe("read-only quest log keymap", () => {
     expect(result.state.selectedQuestId).toBe(20);
   });
 
+  test("keeps duplicate display IDs distinct by repository", () => {
+    const federatedContext = {
+      ...context,
+      visibleQuestIds: [1, 1],
+      visibleQuestKeys: ["alpha\u00001", "beta\u00001"],
+    };
+    const selected = reduceReadOnlyInteraction(
+      INITIAL_QUEST_LOG_INTERACTION,
+      key("down"),
+      federatedContext,
+    );
+
+    expect(selected.state.selectedIndex).toBe(1);
+    expect(selected.state.selectedQuestId).toBe(1);
+    expect(selected.state.selectedQuestKey).toBe("beta\u00001");
+
+    const reordered = reduceReadOnlyInteraction(selected.state, key("", ""), {
+      ...federatedContext,
+      visibleQuestIds: [1, 1],
+      visibleQuestKeys: ["beta\u00001", "alpha\u00001"],
+    });
+    expect(reordered.state.selectedIndex).toBe(0);
+    expect(reordered.state.selectedQuestKey).toBe("beta\u00001");
+  });
+
+  test("carries the selected repository into evidence intents", () => {
+    expect(
+      reduceReadOnlyInteraction(INITIAL_QUEST_LOG_INTERACTION, key("e"), {
+        ...context,
+        repository: "beta",
+      }).intent,
+    ).toEqual({ id: 72, repository: "beta", type: "open-evidence" });
+  });
+
   test("uses uppercase J/K for bounded detail scrolling and resets on selection", () => {
     const scrollingContext = {
       ...context,

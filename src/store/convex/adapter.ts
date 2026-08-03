@@ -30,6 +30,7 @@ import {
   touchQuestInputSchema,
 } from "../../schema";
 import type {
+  FederatedReadSnapshot,
   AcceptQuestAndExportResult as PortAcceptQuestAndExportResult,
   QuestStore,
   QuestWatchListener,
@@ -68,6 +69,24 @@ function testableMutation<T>(
     input,
     ...(testFailure ? { test_failure: true } : {}),
   };
+}
+
+function isMissingFencedRepositoriesQuery(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /(?:could not find|not found|does not exist|not a function).*fencedRepositories|fencedRepositories.*(?:could not find|not found|does not exist|not a function)/i.test(
+      error.message,
+    )
+  );
+}
+
+function isMissingFederatedSnapshotQuery(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /(?:could not find|not found|does not exist|not a function).*federatedSnapshot|federatedSnapshot.*(?:could not find|not found|does not exist|not a function)/i.test(
+      error.message,
+    )
+  );
 }
 
 export class ConvexStore implements QuestStore {
@@ -163,6 +182,36 @@ export class ConvexStore implements QuestStore {
       filter: parsed,
       lease_cutoff: leaseCutoff,
     });
+  }
+
+  async listFencedRepositories(): Promise<readonly string[]> {
+    try {
+      return await this.#clients.http.query(convexApi.fencedRepositories, {
+        ...authTokenInput(this.#clients),
+      });
+    } catch (error: unknown) {
+      if (isMissingFencedRepositoriesQuery(error)) {
+        throw new Error(
+          "[FEDERATED_FENCE_QUERY_UNAVAILABLE] this Convex deployment does not expose `quest:fencedRepositories`; deploy the current Quest backend before federated reads",
+        );
+      }
+      throw error;
+    }
+  }
+
+  async readFederatedSnapshot(): Promise<FederatedReadSnapshot> {
+    try {
+      return await this.#clients.http.query(convexApi.federatedSnapshot, {
+        ...authTokenInput(this.#clients),
+      });
+    } catch (error: unknown) {
+      if (isMissingFederatedSnapshotQuery(error)) {
+        throw new Error(
+          "[FEDERATED_SNAPSHOT_QUERY_UNAVAILABLE] this Convex deployment does not expose `quest:federatedSnapshot`; deploy the current Quest backend before federated reads",
+        );
+      }
+      throw error;
+    }
   }
 
   async getQuest(id: number): Promise<Quest | null> {

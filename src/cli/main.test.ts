@@ -449,6 +449,240 @@ describe("CLI composition root", () => {
     }
   });
 
+  test("federated reads exclude fenced copies from list, stats, and export", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-cli-federated-fence-"));
+    const stores = new Map<string, SqliteStore>();
+    const configWithOverride = {
+      ...config,
+      repos: {
+        remote: {
+          store: { backend: "convex", deployment: "dev:remote" },
+        },
+      },
+    } satisfies Config;
+    const factory =
+      (name: string): CliBackendFactory =>
+      () => {
+        const store = new SqliteStore(join(directory, `${name}.db`), {
+          now: () => "2026-07-29T12:00:00Z",
+        });
+        stores.set(name, store);
+        return Promise.resolve({
+          clock: { now: () => Promise.resolve("2026-07-29T12:00:00Z") },
+          compatibilityProbe: {
+            check: () =>
+              Promise.resolve({
+                outcome: "compatible",
+                supported_version: SQLITE_SCHEMA_VERSION,
+                store_version: SQLITE_SCHEMA_VERSION,
+              }),
+          },
+          openApplicationPorts: () =>
+            Promise.resolve({
+              blobStore: new LocalBlobStore(join(directory, `${name}-evidence`)),
+              clock: { now: () => Promise.resolve("2026-07-29T12:00:00Z") },
+              questStore: store,
+            }),
+        });
+      };
+    const root = await createCompositionRoot({
+      backendFactories: { sqlite: factory("sqlite"), convex: factory("convex") },
+      configLoader: () => Promise.resolve(configWithOverride),
+      environment: {},
+      initialWorkingDirectory: directory,
+      isTty: false,
+      platformFactory,
+      validateWorkingDirectory: () => Promise.resolve(),
+    });
+
+    try {
+      if (root.dependencies.openBackend === undefined) {
+        throw new Error("federated test did not expose its scoped backend resolver");
+      }
+      const sqlite = await root.dependencies.openBackend({ repo: null });
+      const local = stores.get("sqlite");
+      const remote = stores.get("convex");
+      if (local === undefined || remote === undefined) {
+        throw new Error("federated fence test did not create both backend stores");
+      }
+      await local.addQuest(
+        newQuestSchema.parse({
+          repo: "local",
+          area: "cli",
+          kind: "task",
+          title: "Stale local quest",
+          description: "must stay hidden",
+          opened_by: "test",
+          assignee: null,
+          status: "ready",
+          verdict: null,
+          verdict_notes: null,
+          priority: 2,
+          pr: null,
+          guild: null,
+          predicted_files: [],
+          reopen_count: 0,
+          backfill: true,
+        }),
+      );
+      await remote.addQuest(
+        newQuestSchema.parse({
+          repo: "remote",
+          area: "cli",
+          kind: "task",
+          title: "Routed remote quest",
+          description: "must stay visible",
+          opened_by: "test",
+          assignee: null,
+          status: "ready",
+          verdict: null,
+          verdict_notes: null,
+          priority: 2,
+          pr: null,
+          guild: null,
+          predicted_files: [],
+          reopen_count: 0,
+          backfill: true,
+        }),
+      );
+      const migration = await local.beginMigration(await local.exportAll());
+      await migration.fence("local");
+      await migration.commit();
+      await migration.release();
+
+      const ports = await sqlite.openApplicationPorts();
+      if (ports.questStore === undefined) {
+        throw new Error("federated fence test did not open quest stores");
+      }
+      await expect(ports.questStore.listQuests({})).resolves.toMatchObject([
+        { repo: "remote", title: "Routed remote quest" },
+      ]);
+      await expect(ports.questStore.listQuests({ repo: "local" })).resolves.toEqual([]);
+      await expect(ports.questStore.stats({ repo: null })).resolves.toMatchObject({
+        repos: [{ repo: "remote", total: 1 }],
+      });
+      await expect(ports.questStore.exportAll()).resolves.toMatchObject({
+        quests: [{ repo: "remote", title: "Routed remote quest" }],
+      });
+    } finally {
+      for (const store of stores.values()) {
+        store.close();
+      }
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("keeps compatible backends readable when another store needs an upgrade", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-cli-federated-compatibility-"));
+    const stores = new Map<string, SqliteStore>();
+    const configWithOverride = {
+      ...config,
+      repos: {
+        remote: {
+          store: { backend: "convex", deployment: "dev:remote" },
+        },
+      },
+    } satisfies Config;
+    const factory =
+      (name: string): CliBackendFactory =>
+      () => {
+        const store = new SqliteStore(join(directory, `${name}.db`), {
+          now: () => "2026-07-29T12:00:00Z",
+        });
+        stores.set(name, store);
+        return Promise.resolve({
+          clock: { now: () => Promise.resolve("2026-07-29T12:00:00Z") },
+          compatibilityProbe: {
+            check: () =>
+              Promise.resolve(
+                name === "sqlite"
+                  ? {
+                      action: "upgrade-binary" as const,
+                      outcome: "store-newer" as const,
+                      store_version: SQLITE_SCHEMA_VERSION + 1,
+                      supported_version: SQLITE_SCHEMA_VERSION,
+                    }
+                  : {
+                      outcome: "compatible" as const,
+                      store_version: SQLITE_SCHEMA_VERSION,
+                      supported_version: SQLITE_SCHEMA_VERSION,
+                    },
+              ),
+          },
+          openApplicationPorts: () =>
+            Promise.resolve({
+              blobStore: new LocalBlobStore(join(directory, `${name}-evidence`)),
+              clock: { now: () => Promise.resolve("2026-07-29T12:00:00Z") },
+              questStore: store,
+            }),
+        });
+      };
+    const root = await createCompositionRoot({
+      backendFactories: { sqlite: factory("sqlite"), convex: factory("convex") },
+      configLoader: () => Promise.resolve(configWithOverride),
+      environment: {},
+      initialWorkingDirectory: directory,
+      isTty: false,
+      platformFactory,
+      validateWorkingDirectory: () => Promise.resolve(),
+    });
+
+    try {
+      if (root.dependencies.openBackend === undefined) {
+        throw new Error("federated compatibility test did not expose its backend resolver");
+      }
+      const strictBackend = await root.dependencies.openBackend({ repo: null });
+      const remote = stores.get("convex");
+      if (remote === undefined || strictBackend.openApplicationPorts === undefined) {
+        throw new Error("federated compatibility test did not open both backends");
+      }
+      await remote.addQuest(
+        newQuestSchema.parse({
+          repo: "remote",
+          area: "cli",
+          kind: "task",
+          title: "Readable remote quest",
+          description: "remote",
+          opened_by: "test",
+          assignee: null,
+          status: "ready",
+          verdict: null,
+          verdict_notes: null,
+          priority: 2,
+          pr: null,
+          guild: null,
+          predicted_files: [],
+          reopen_count: 0,
+          backfill: true,
+        }),
+      );
+
+      await expect(strictBackend.compatibilityProbe.check()).resolves.toMatchObject({
+        outcome: "compatible",
+      });
+      const strictPorts = await strictBackend.openApplicationPorts();
+      await expect(strictPorts.questStore?.listQuests({})).rejects.toThrow(
+        "[FEDERATED_SCOPE_UNAVAILABLE] the federated repository view",
+      );
+      const viewerBackend = await root.dependencies.openBackend({ repo: null }, { mode: "viewer" });
+      await expect(viewerBackend.compatibilityProbe.check()).resolves.toMatchObject({
+        outcome: "compatible",
+      });
+      const ports = await viewerBackend.openApplicationPorts();
+      await expect(ports.questStore?.listQuests({})).resolves.toMatchObject([
+        { repo: "remote", title: "Readable remote quest" },
+      ]);
+      await expect(ports.questStore?.listQuests({ repo: "local" })).rejects.toThrow(
+        "[FEDERATED_SCOPE_UNAVAILABLE] repository local",
+      );
+    } finally {
+      for (const store of stores.values()) {
+        store.close();
+      }
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
   test("wires the real read-only SQLite version reader without creating a missing store", async () => {
     const homeDirectory = await mkdtemp(join(tmpdir(), "quest-cli-composition-"));
     const platform = createPlatform({

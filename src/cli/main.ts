@@ -40,6 +40,7 @@ import {
   type UpgradeOperations,
 } from "../services";
 import {
+  type BlobStore,
   type Clock,
   ConvexBackupDatabase,
   ConvexBlobStore,
@@ -53,10 +54,12 @@ import {
   createSystemClock,
   FederatedBlobStore,
   FederatedQuestStore,
+  FederatedReadError,
   type FederatedStoreSource,
   inspectSqliteStore,
   LocalBlobStore,
   migrateSqliteStore,
+  type QuestStore,
   readSqliteSchemaVersion,
   SQLITE_SCHEMA_VERSION,
   SqliteBackupDatabase,
@@ -71,6 +74,7 @@ import {
   type FutureTuiLauncher,
   isBackupRecoveryRequest,
   parseQuestCliArguments,
+  type QuestCliBackendOpenOptions,
   type QuestCliDependencies,
   type QuestCliRequest,
   runParsedQuestCli,
@@ -145,6 +149,17 @@ interface BackendHandle {
   readonly store: StoreConfig;
 }
 
+interface OpenedBackendApplication {
+  readonly application: CliApplicationPorts;
+  readonly handle: BackendHandle;
+}
+
+interface FederatedSources {
+  readonly sourceFailures: ReadonlyMap<string, string>;
+  readonly sources: readonly FederatedStoreSource[];
+  readonly sourceHandles: readonly BackendHandle[];
+}
+
 export interface QuestCompositionRoot {
   readonly dependencies: QuestCliDependencies;
   readonly run: (argumentsWithoutRuntime: readonly string[]) => Promise<ExitCode>;
@@ -206,6 +221,18 @@ function repositoryBelongsToBackend(config: Config, store: StoreConfig, repo: st
   return sameBackend(resolveRepositoryStore(config, repo), store);
 }
 
+function sameRepositorySet(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size !== right.size) {
+    return false;
+  }
+  for (const repository of left) {
+    if (!right.has(repository)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function uniqueStoreConfigs(config: Config): StoreConfig[] {
   const stores = [config.store, ...configuredRepositoryStores(config)];
   const unique: StoreConfig[] = [];
@@ -220,7 +247,10 @@ function uniqueStoreConfigs(config: Config): StoreConfig[] {
 interface BackendRouter {
   readonly openDefaultBackend: () => Promise<CliBackendPorts>;
   readonly openConfiguredBackend: (store: StoreConfig) => Promise<CliBackendPorts>;
-  readonly openScopedBackend: (scope: QuestScope) => Promise<CliBackendPorts>;
+  readonly openScopedBackend: (
+    scope: QuestScope,
+    options?: QuestCliBackendOpenOptions,
+  ) => Promise<CliBackendPorts>;
 }
 
 function memoizeBackend(factory: () => Promise<BackendHandle>): () => Promise<BackendHandle> {
@@ -249,50 +279,355 @@ function compatibleFederatedResult(
   };
 }
 
+function compatibilityFailureMessage(
+  result: Exclude<StoreCompatibilityResult, { outcome: "compatible" }>,
+): string {
+  return result.outcome === "store-newer"
+    ? `store schema ${result.store_version} was written by a newer quest; upgrade the quest binary (this binary supports schema ${result.supported_version})`
+    : `store schema ${result.store_version} is older than this binary supports (${result.supported_version}); run quest migrate before retrying`;
+}
+
+function backendFailureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function failedBackendHandle(store: StoreConfig, failure: string): BackendHandle {
+  const retry = async (): Promise<never> => {
+    throw new Error(failure);
+  };
+  return {
+    ports: {
+      clock: createSystemClock(),
+      close: async () => undefined,
+      compatibilityProbe: { check: retry },
+      openApplicationPorts: retry,
+    },
+    store,
+  };
+}
+
+function recordCompatibilityAttempt(
+  attempt: PromiseSettledResult<StoreCompatibilityResult>,
+  handle: BackendHandle,
+  compatibilityFailures: Map<string, string>,
+  compatible: StoreCompatibilityResult[],
+  incompatible: StoreCompatibilityResult[],
+): void {
+  const key = backendKey(handle.store);
+  if (attempt.status === "rejected") {
+    const detail =
+      attempt.reason instanceof Error ? attempt.reason.message : String(attempt.reason);
+    compatibilityFailures.set(key, detail);
+    return;
+  }
+  if (attempt.value.outcome === "compatible") {
+    compatibilityFailures.delete(key);
+    compatible.push(attempt.value);
+    return;
+  }
+  compatibilityFailures.set(key, compatibilityFailureMessage(attempt.value));
+  incompatible.push(attempt.value);
+}
+
+async function createFederatedStoreSource(
+  config: Config,
+  handle: BackendHandle | undefined,
+  application: CliApplicationPorts,
+  compatibilityFailure: string | undefined,
+): Promise<FederatedStoreSource> {
+  if (handle === undefined || application.questStore === undefined) {
+    throw new Error(
+      "a configured backend did not provide a quest store; rerun without --all or configure a readable backend",
+    );
+  }
+
+  let fencedRepositories: ReadonlySet<string> = new Set();
+  let observedFences: ReadonlySet<string> | undefined;
+  let routingStale = false;
+  let readFailure = compatibilityFailure;
+  const listFencedRepositories = application.questStore.listFencedRepositories?.bind(
+    application.questStore,
+  );
+  const readSnapshot = application.questStore.readFederatedSnapshot?.bind(application.questStore);
+  const readSnapshotPort =
+    readSnapshot === undefined
+      ? undefined
+      : async () => {
+          const snapshot = await readSnapshot();
+          const nextFences = new Set(snapshot.fencedRepositories);
+          if (observedFences !== undefined && !sameRepositorySet(observedFences, nextFences)) {
+            routingStale = true;
+          }
+          observedFences = nextFences;
+          fencedRepositories = nextFences;
+          readFailure = compatibilityFailure;
+          return snapshot;
+        };
+  const refresh = async (): Promise<void> => {
+    if (listFencedRepositories === undefined) {
+      return;
+    }
+    try {
+      const nextFences = new Set(await listFencedRepositories());
+      if (observedFences !== undefined && !sameRepositorySet(observedFences, nextFences)) {
+        routingStale = true;
+      }
+      observedFences = nextFences;
+      fencedRepositories = nextFences;
+      readFailure = compatibilityFailure;
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error);
+      fencedRepositories = new Set();
+      readFailure = `[FEDERATED_FENCE_READ_UNAVAILABLE] cannot determine migration fences for ${handle.store.backend} backend; retry when it is reachable (${detail})`;
+    }
+  };
+  if (readSnapshotPort === undefined) {
+    await refresh();
+  }
+
+  const readError = (repository: string | undefined): Error | undefined => {
+    if (routingStale) {
+      return new FederatedReadError(
+        "[FEDERATED_ROUTING_STALE] repository routing changed while the viewer was open; restart the Quest viewer to reload configured backends before reading again",
+      );
+    }
+    if (readFailure === undefined) {
+      return undefined;
+    }
+    const scope =
+      repository === undefined ? "the federated repository view" : `repository ${repository}`;
+    return new FederatedReadError(
+      `[FEDERATED_SCOPE_UNAVAILABLE] ${scope} cannot read the routed ${handle.store.backend} backend; retry when its deployment is reachable. No local fallback was used (${readFailure})`,
+    );
+  };
+
+  return {
+    blobStore: application.blobStore,
+    includeRepository: (repo) =>
+      !routingStale &&
+      readFailure === undefined &&
+      !fencedRepositories.has(repo) &&
+      repositoryBelongsToBackend(config, handle.store, repo),
+    questStore: application.questStore,
+    readError,
+    ...(readSnapshotPort === undefined ? {} : { readSnapshot: readSnapshotPort }),
+    routesRepository: (repo) => repositoryBelongsToBackend(config, handle.store, repo),
+    ...(readSnapshotPort !== undefined || listFencedRepositories === undefined ? {} : { refresh }),
+  };
+}
+
+function createUnavailableFederatedStoreSource(
+  config: Config,
+  handle: BackendHandle,
+  questStore: QuestStore,
+  blobStore: BlobStore,
+  readFailure: string,
+): FederatedStoreSource {
+  let activeSource: FederatedStoreSource | undefined;
+  let currentFailure: string | undefined = readFailure;
+  const readError = (repository: string | undefined): Error | undefined => {
+    if (activeSource !== undefined) {
+      return activeSource.readError?.(repository);
+    }
+    const scope =
+      repository === undefined ? "the federated repository view" : `repository ${repository}`;
+    return new FederatedReadError(
+      `[FEDERATED_SCOPE_UNAVAILABLE] ${scope} cannot read the routed ${handle.store.backend} backend; retry after fixing its deployment. No local fallback was used (${currentFailure ?? "backend retry is in progress"})`,
+    );
+  };
+  const refresh = async (): Promise<void> => {
+    if (activeSource === undefined) {
+      try {
+        const compatibility = await handle.ports.compatibilityProbe.check();
+        if (compatibility.outcome !== "compatible") {
+          currentFailure = compatibilityFailureMessage(compatibility);
+          return;
+        }
+        const application = await handle.ports.openApplicationPorts();
+        activeSource = await createFederatedStoreSource(config, handle, application, undefined);
+        currentFailure = undefined;
+      } catch (error: unknown) {
+        currentFailure = error instanceof Error ? error.message : String(error);
+        return;
+      }
+    }
+    await activeSource?.refresh?.();
+  };
+  return {
+    get blobStore() {
+      return activeSource?.blobStore ?? blobStore;
+    },
+    includeRepository: (repo) => activeSource?.includeRepository(repo) ?? false,
+    get questStore() {
+      return activeSource?.questStore ?? questStore;
+    },
+    readError,
+    get readSnapshot() {
+      return activeSource?.readSnapshot;
+    },
+    refresh,
+    routesRepository: (repo) => repositoryBelongsToBackend(config, handle.store, repo),
+  };
+}
+
+async function openFederatedApplications(
+  handles: readonly BackendHandle[],
+  compatibilityFailures: ReadonlyMap<string, string>,
+): Promise<{
+  readonly applications: readonly OpenedBackendApplication[];
+  readonly failures: ReadonlyMap<string, string>;
+}> {
+  const readableHandles = handles.filter(
+    (handle) => compatibilityFailures.get(backendKey(handle.store)) === undefined,
+  );
+  const attempts = await Promise.allSettled(
+    readableHandles.map(async (handle) => ({
+      application: await handle.ports.openApplicationPorts(),
+      handle,
+    })),
+  );
+  const failures = new Map<string, string>();
+  const applications: OpenedBackendApplication[] = [];
+  for (const [index, attempt] of attempts.entries()) {
+    if (attempt.status === "fulfilled") {
+      applications.push(attempt.value);
+      continue;
+    }
+    const handle = readableHandles[index];
+    if (handle !== undefined) {
+      failures.set(backendKey(handle.store), backendFailureMessage(attempt.reason));
+    }
+  }
+  return { applications, failures };
+}
+
+async function createFederatedSources(
+  config: Config,
+  applications: readonly OpenedBackendApplication[],
+  compatibilityFailures: ReadonlyMap<string, string>,
+): Promise<FederatedSources> {
+  const attempts = await Promise.allSettled(
+    applications.map(({ application, handle }) =>
+      createFederatedStoreSource(
+        config,
+        handle,
+        application,
+        compatibilityFailures.get(backendKey(handle.store)),
+      ).then((source) => ({ handle, source })),
+    ),
+  );
+  const sourceFailures = new Map<string, string>();
+  const sources: FederatedStoreSource[] = [];
+  const sourceHandles: BackendHandle[] = [];
+  for (const [index, attempt] of attempts.entries()) {
+    if (attempt.status === "fulfilled") {
+      sources.push(attempt.value.source);
+      sourceHandles.push(attempt.value.handle);
+      continue;
+    }
+    const handle = applications[index]?.handle;
+    if (handle !== undefined) {
+      sourceFailures.set(backendKey(handle.store), backendFailureMessage(attempt.reason));
+    }
+  }
+  return {
+    sourceFailures,
+    sources,
+    sourceHandles,
+  };
+}
+
 function createFederatedBackend(
   config: Config,
   handles: readonly BackendHandle[],
+  options: {
+    readonly allowPartialReads: boolean;
+    readonly initialFailures?: readonly { readonly store: StoreConfig; readonly message: string }[];
+  },
 ): CliBackendPorts {
+  const failedHandles =
+    options.initialFailures?.map(({ store, message }) => failedBackendHandle(store, message)) ?? [];
+  const allHandles = [...handles, ...failedHandles];
+  const compatibilityFailures = new Map(
+    options.initialFailures?.map(({ store, message }) => [backendKey(store), message]) ?? [],
+  );
   const compatibilityProbe: StoreCompatibilityProbe = {
     check: async () => {
-      const results = await Promise.all(
-        handles.map((handle) => handle.ports.compatibilityProbe.check()),
+      const attempts = await Promise.allSettled(
+        allHandles.map((handle) => handle.ports.compatibilityProbe.check()),
       );
+      const results: StoreCompatibilityResult[] = [];
+      const incompatible: StoreCompatibilityResult[] = [];
+      for (const [index, attempt] of attempts.entries()) {
+        const handle = allHandles[index];
+        if (handle === undefined) {
+          continue;
+        }
+        recordCompatibilityAttempt(attempt, handle, compatibilityFailures, results, incompatible);
+      }
+      if (results.length === 0) {
+        if (incompatible.length > 0) {
+          return compatibleFederatedResult(incompatible);
+        }
+        throw new Error(
+          "[FEDERATED_BACKENDS_UNAVAILABLE] every configured backend is unreachable; retry when at least one deployment is reachable",
+        );
+      }
       return compatibleFederatedResult(results);
     },
   };
   return {
     clock: handles[0]?.ports.clock ?? createSystemClock(),
     close: async () => {
-      await Promise.all(handles.map((handle) => closeBackend(handle.ports)));
+      await Promise.all(allHandles.map((handle) => closeBackend(handle.ports)));
     },
     compatibilityProbe,
     openApplicationPorts: async () => {
-      const applications = await Promise.all(
-        handles.map((handle) => handle.ports.openApplicationPorts()),
+      const applications = await openFederatedApplications(allHandles, compatibilityFailures);
+      const sources = await createFederatedSources(
+        config,
+        applications.applications,
+        compatibilityFailures,
       );
-      const sources: FederatedStoreSource[] = [];
-      for (const [index, application] of applications.entries()) {
-        const handle = handles[index];
-        if (handle === undefined || application.questStore === undefined) {
-          throw new Error(
-            "a configured backend did not provide a quest store; rerun without --all or configure a readable backend",
-          );
-        }
-        sources.push({
-          blobStore: application.blobStore,
-          includeRepository: (repo) => repositoryBelongsToBackend(config, handle.store, repo),
-          questStore: application.questStore,
-        });
+      const constructionFailures = [
+        ...applications.failures.values(),
+        ...sources.sourceFailures.values(),
+      ];
+      if (constructionFailures.length > 0 && !options.allowPartialReads) {
+        throw new Error(constructionFailures[0]);
       }
-      const first = applications[0];
-      if (first === undefined) {
+      const firstSource = sources.sources[0];
+      if (firstSource === undefined) {
         throw new Error("no configured backends were available for the federated read");
       }
+      const failedHandles = allHandles.filter((handle) => {
+        const key = backendKey(handle.store);
+        return (
+          compatibilityFailures.get(key) !== undefined ||
+          applications.failures.get(key) !== undefined ||
+          sources.sourceFailures.get(key) !== undefined
+        );
+      });
+      const unavailableSources = failedHandles.map((handle) =>
+        createUnavailableFederatedStoreSource(
+          config,
+          handle,
+          firstSource.questStore,
+          firstSource.blobStore,
+          compatibilityFailures.get(backendKey(handle.store)) ??
+            applications.failures.get(backendKey(handle.store)) ??
+            sources.sourceFailures.get(backendKey(handle.store)) ??
+            "backend construction failed",
+        ),
+      );
       return {
-        blobStore: new FederatedBlobStore(sources),
-        clock: first.clock,
-        questStore: new FederatedQuestStore(sources),
+        blobStore: new FederatedBlobStore([...sources.sources, ...unavailableSources]),
+        clock: sources.sourceHandles[0]?.ports.clock ?? createSystemClock(),
+        questStore: new FederatedQuestStore(
+          [...sources.sources, ...unavailableSources],
+          undefined,
+          options,
+        ),
       };
     },
   };
@@ -334,14 +669,34 @@ function createBackendRouter(
   return {
     openDefaultBackend: async () => (await openDefault()).ports,
     openConfiguredBackend: async (store) => (await openConfiguredBackend(store)).ports,
-    openScopedBackend: async (scope) => {
+    openScopedBackend: async (scope, options = {}) => {
       if (scope.repo !== null) {
         return (await openConfiguredBackend(resolveRepositoryStore(config, scope.repo))).ports;
       }
-      const scopedHandles = await Promise.all(
-        uniqueStoreConfigs(config).map((store) => openConfiguredBackend(store)),
+      const configuredStores = uniqueStoreConfigs(config);
+      const attempts = await Promise.allSettled(
+        configuredStores.map(async (store) => openConfiguredBackend(store)),
       );
-      return createFederatedBackend(config, scopedHandles);
+      const scopedHandles: BackendHandle[] = [];
+      const initialFailures: Array<{ readonly store: StoreConfig; readonly message: string }> = [];
+      for (const [index, attempt] of attempts.entries()) {
+        const store = configuredStores[index];
+        if (store === undefined) {
+          continue;
+        }
+        if (attempt.status === "fulfilled") {
+          scopedHandles.push(attempt.value);
+        } else {
+          initialFailures.push({ store, message: backendFailureMessage(attempt.reason) });
+        }
+      }
+      if (initialFailures.length > 0 && options.mode !== "viewer") {
+        throw new Error(initialFailures[0]?.message ?? "backend construction failed");
+      }
+      return createFederatedBackend(config, scopedHandles, {
+        allowPartialReads: options.mode === "viewer",
+        ...(initialFailures.length === 0 ? {} : { initialFailures }),
+      });
     },
   };
 }
@@ -618,6 +973,7 @@ export function createSqliteCliBackend(
   const evidenceDirectory = context.platform.directories.evidence;
   const backupRoot = context.config.backup.root ?? context.platform.directories.backup;
   const clock = createSystemClock();
+  let activeQuestStore: SqliteStore | undefined;
   const doctor: DoctorOperations = {
     backup: new LocalBackupService({
       backupDatabase: new SqliteBackupDatabase(databasePath),
@@ -648,6 +1004,10 @@ export function createSqliteCliBackend(
   };
   return Promise.resolve({
     clock,
+    close: async () => {
+      activeQuestStore?.close();
+      activeQuestStore = undefined;
+    },
     compatibilityProbe: createStoreCompatibilityProbe({
       migrateStore: () =>
         migrateSqliteStore({
@@ -663,6 +1023,7 @@ export function createSqliteCliBackend(
           ? await openSqliteStoreForRecovery(databasePath)
           : undefined
         : await openSqliteStore(databasePath);
+      activeQuestStore = questStore;
       return {
         backup: new LocalBackupService({
           backupDatabase: new SqliteBackupDatabase(databasePath, questStore),
@@ -879,7 +1240,10 @@ function createCliDependencies(input: {
   readonly initialWorkingDirectory: string;
   readonly migration: RepositoryMigrationOperations;
   readonly openDefaultBackend: () => Promise<CliBackendPorts>;
-  readonly openScopedBackend: (scope: QuestScope) => Promise<CliBackendPorts>;
+  readonly openScopedBackend: (
+    scope: QuestScope,
+    options?: QuestCliBackendOpenOptions,
+  ) => Promise<CliBackendPorts>;
   readonly options: CreateCompositionRootOptions;
   readonly ports: CliBackendPorts;
   readonly upgrade: ReturnType<typeof createUpgradeOperations>;

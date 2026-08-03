@@ -1,6 +1,12 @@
 import type { PlanComputedState, PlanLaneCluster, PlanQuest } from "../domain/plan";
-import type { Event, Quest, QuestScope, QuestStatus } from "../schema";
-import type { Clock, QuestStore, WatchSubscription } from "../store";
+import {
+  type Event,
+  eventRepository,
+  type Quest,
+  type QuestScope,
+  type QuestStatus,
+} from "../schema";
+import { type Clock, FederatedReadError, type QuestStore, type WatchSubscription } from "../store";
 import { getQuestPlanSnapshot, type QuestPlanSnapshot } from "./plan";
 import { showQuestDetail } from "./query";
 
@@ -37,6 +43,7 @@ export interface QuestLogPlan {
 
 export interface QuestLogSnapshot {
   readonly currentRepo: string | null;
+  readonly error: string | null;
   readonly items: readonly QuestLogItem[];
   readonly loading: boolean;
   readonly plan: QuestLogPlan | null;
@@ -90,8 +97,8 @@ export interface QuestLogDetail {
 export interface QuestLogRuntime {
   readonly cycleScope: () => Promise<QuestLogScopeSelection>;
   readonly pollIntervalMs: number;
-  readonly loadDetail: (id: number) => Promise<QuestLogDetail>;
-  readonly openEvidence: (id: number) => Promise<string>;
+  readonly loadDetail: (id: number, repository?: string) => Promise<QuestLogDetail>;
+  readonly openEvidence: (id: number, repository?: string) => Promise<string>;
   readonly openPr: (url: string) => Promise<string>;
   readonly start: () => Promise<void>;
   readonly stop: () => Promise<void>;
@@ -101,7 +108,7 @@ export interface QuestLogRuntime {
 export interface QuestLogRuntimeOptions {
   readonly clock?: Clock;
   readonly initialScope: QuestScope;
-  readonly openEvidence?: (id: number) => Promise<string>;
+  readonly openEvidence?: (id: number, repository?: string) => Promise<string>;
   readonly openPr?: (url: string) => Promise<string>;
   readonly pollIntervalMs?: number;
   readonly store: QuestStore;
@@ -109,16 +116,21 @@ export interface QuestLogRuntimeOptions {
 
 export const EMPTY_QUEST_LOG_SNAPSHOT: QuestLogSnapshot = {
   currentRepo: null,
+  error: null,
   items: [],
   loading: true,
   plan: null,
   scope: "all",
 };
 
+function questIdentity(repository: string, id: number): string {
+  return `${repository}\u0000${id}`;
+}
+
 function toQuestLogItem(
   quest: Quest,
-  blockedIds: ReadonlySet<number>,
-  mergedPrQuestIds: ReadonlySet<number>,
+  blockedIds: ReadonlySet<string>,
+  mergedPrQuestIds: ReadonlySet<string>,
   planQuest: PlanQuest | undefined = undefined,
 ): QuestLogItem {
   const planMetadata =
@@ -134,7 +146,9 @@ function toQuestLogItem(
     area: quest.area,
     assignee: quest.assignee,
     blocked:
-      planQuest === undefined ? blockedIds.has(quest.id) : planQuest.computed_state === "blocked",
+      planQuest === undefined
+        ? blockedIds.has(questIdentity(quest.repo, quest.id))
+        : planQuest.computed_state === "blocked",
     description: quest.description,
     id: quest.id,
     kind: quest.kind,
@@ -209,7 +223,7 @@ function eventDetailRecord(detail: unknown): EventDetailRecord | null {
 
 function prStateForQuest(
   quest: Quest,
-  mergedPrQuestIds: ReadonlySet<number>,
+  mergedPrQuestIds: ReadonlySet<string>,
 ): QuestLogPrState | null {
   if (quest.pr === null) {
     return null;
@@ -217,20 +231,28 @@ function prStateForQuest(
   if (quest.status === "turned_in") {
     return "awaiting-review";
   }
-  if (quest.status === "complete" && mergedPrQuestIds.has(quest.id)) {
+  if (
+    quest.status === "complete" &&
+    (mergedPrQuestIds.has(questIdentity(quest.repo, quest.id)) ||
+      mergedPrQuestIds.has(questIdentity("", quest.id)))
+  ) {
     return "merged";
   }
   return "quiet";
 }
 
-function mergedPrQuestIdsFromEvents(events: readonly Event[]): ReadonlySet<number> {
-  const latestCompletionState = new Map<number, boolean>();
+function mergedPrQuestIdsFromEvents(
+  events: readonly Event[],
+  fallbackRepository?: string,
+): ReadonlySet<string> {
+  const latestCompletionState = new Map<string, boolean>();
   for (const event of [...events].sort((left, right) => left.id - right.id)) {
     if (event.action !== "complete") {
       continue;
     }
+    const repository = eventRepository(event) ?? fallbackRepository ?? "";
     latestCompletionState.set(
-      event.quest_id,
+      questIdentity(repository, event.quest_id),
       eventDetailRecord(event.detail)?.pr_verified_merged === true,
     );
   }
@@ -311,9 +333,10 @@ function toChainRef(reference: {
 export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLogRuntime {
   let currentRepo = options.initialScope.repo;
   let scope: QuestLogScope = currentRepo === null ? "all" : "current";
+  let error: string | null = null;
   let quests: readonly Quest[] = [];
-  let blockedIds: ReadonlySet<number> = new Set();
-  let mergedPrQuestIds: ReadonlySet<number> = new Set();
+  let blockedIds: ReadonlySet<string> = new Set();
+  let mergedPrQuestIds: ReadonlySet<string> = new Set();
   let planSnapshot: QuestPlanSnapshot | null = null;
   let planRevision = 0;
   let loading = true;
@@ -343,11 +366,12 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
   const loadMergedPrQuestIds = async (
     targetScope: QuestLogScope,
     targetRepo: string | null,
-  ): Promise<ReadonlySet<number>> =>
+  ): Promise<ReadonlySet<string>> =>
     mergedPrQuestIdsFromEvents(
       await options.store.queryEvents(
         targetScope === "current" && targetRepo !== null ? { repo: targetRepo } : {},
       ),
+      targetScope === "current" && targetRepo !== null ? targetRepo : undefined,
     );
 
   const enqueueScopeTransition = <Result>(operation: () => Promise<Result>): Promise<Result> => {
@@ -370,6 +394,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     );
     return {
       currentRepo,
+      error,
       items,
       loading,
       plan: planSnapshot === null ? null : planForItems(planSnapshot, items),
@@ -508,25 +533,45 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     scopeSetupGeneration = activeGeneration;
     const filter = filterForScope(targetScope, targetRepo);
     let nextQuests: readonly Quest[] = [];
-    let nextBlockedIds: ReadonlySet<number> = new Set();
-    let nextMergedPrQuestIds: ReadonlySet<number> = new Set();
+    let nextBlockedIds: ReadonlySet<string> = new Set();
+    let nextMergedPrQuestIds: ReadonlySet<string> = new Set();
     let nextLoading = true;
+    let nextError: string | null = null;
+    const nextReadErrors: Array<string | null> = [null, null];
+    const updateNextReadError = (index: number, readError?: FederatedReadError): void => {
+      nextReadErrors[index] = readError?.message ?? null;
+      nextError = nextReadErrors.find((message) => message !== null) ?? null;
+    };
+    const activeReadError = (): string | null =>
+      nextReadErrors.find((message) => message !== null) ?? null;
     const nextSubscriptions: WatchSubscription[] = [];
     const planRevisionBeforeSetup = planRevision;
     const [loadedPlanSnapshot, loadedMergedPrQuestIds] = await Promise.all([
       loadPlan(targetScope, targetRepo).catch(() => null),
-      loadMergedPrQuestIds(targetScope, targetRepo).catch(() => new Set<number>()),
+      loadMergedPrQuestIds(targetScope, targetRepo).catch(() => new Set<string>()),
     ]);
     const nextPlanSnapshot = loadedPlanSnapshot;
     nextMergedPrQuestIds = loadedMergedPrQuestIds;
     try {
       nextSubscriptions.push(
-        await options.store.watch(filter, (watchedQuests) => {
+        await options.store.watch(filter, (watchedQuests, readError) => {
+          if (readError instanceof FederatedReadError) {
+            nextQuests = watchedQuests;
+            nextLoading = false;
+            updateNextReadError(0, readError);
+            handleWatchReadError(activeGeneration, readError, () => {
+              quests = nextQuests;
+              loading = false;
+            });
+            return;
+          }
           nextQuests = watchedQuests;
           nextLoading = false;
+          updateNextReadError(0);
           if (activeGeneration !== generation) {
             return;
           }
+          error = activeReadError();
           quests = nextQuests;
           loading = false;
           emit();
@@ -535,11 +580,25 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
         }),
       );
       nextSubscriptions.push(
-        await options.store.watch({ ...filter, blocked: true }, (blockedQuests) => {
-          nextBlockedIds = new Set(blockedQuests.map((quest) => quest.id));
+        await options.store.watch({ ...filter, blocked: true }, (blockedQuests, readError) => {
+          if (readError instanceof FederatedReadError) {
+            nextBlockedIds = new Set(
+              blockedQuests.map((quest) => questIdentity(quest.repo, quest.id)),
+            );
+            updateNextReadError(1, readError);
+            handleWatchReadError(activeGeneration, readError, () => {
+              blockedIds = nextBlockedIds;
+            });
+            return;
+          }
+          nextBlockedIds = new Set(
+            blockedQuests.map((quest) => questIdentity(quest.repo, quest.id)),
+          );
+          updateNextReadError(1);
           if (activeGeneration !== generation) {
             return;
           }
+          error = activeReadError();
           blockedIds = nextBlockedIds;
           emit();
           requestPlanRefresh(activeGeneration, targetScope, targetRepo);
@@ -555,6 +614,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     generation = activeGeneration;
     currentRepo = targetRepo;
     scope = targetScope;
+    error = nextError;
     subscriptions = nextSubscriptions;
     quests = nextQuests;
     blockedIds = nextBlockedIds;
@@ -570,6 +630,48 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     await disposeSubscriptions(previousSubscriptions);
   };
 
+  const showScopeError = async (
+    targetScope: QuestLogScope,
+    targetRepo: string | null,
+    readError: FederatedReadError,
+  ): Promise<void> => {
+    await unsubscribeCurrent();
+    generation = ++generationSequence;
+    currentRepo = targetRepo;
+    scope = targetScope;
+    error = readError.message;
+    quests = [];
+    blockedIds = new Set();
+    mergedPrQuestIds = new Set();
+    planSnapshot = null;
+    loading = false;
+    emit();
+  };
+
+  const showPartialScopeWarning = (
+    activeGeneration: number,
+    readError: FederatedReadError,
+  ): void => {
+    if (activeGeneration !== generation) {
+      return;
+    }
+    error = readError.message;
+    loading = false;
+    emit();
+  };
+
+  const handleWatchReadError = (
+    activeGeneration: number,
+    readError: FederatedReadError,
+    applyPartialSnapshot: () => void,
+  ): void => {
+    if (activeGeneration !== generation) {
+      return;
+    }
+    applyPartialSnapshot();
+    showPartialScopeWarning(activeGeneration, readError);
+  };
+
   const knownRepositories = async (): Promise<readonly string[]> => {
     const stats = await options.store.stats({ repo: null });
     const repositories = new Set(stats.repos.map((repository) => repository.repo));
@@ -579,11 +681,40 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     return [...repositories].sort((left, right) => left.localeCompare(right));
   };
 
+  const readKnownRepositories = async (): Promise<readonly string[] | null> => {
+    try {
+      return await knownRepositories();
+    } catch (readError: unknown) {
+      if (!(readError instanceof FederatedReadError)) {
+        throw readError;
+      }
+      await showScopeError(scope, currentRepo, readError);
+      return null;
+    }
+  };
+
+  const subscribeWithReadError = async (
+    targetScope: QuestLogScope,
+    targetRepo: string | null,
+  ): Promise<void> => {
+    try {
+      await subscribeToScope(targetScope, targetRepo);
+    } catch (readError: unknown) {
+      if (!(readError instanceof FederatedReadError)) {
+        throw readError;
+      }
+      await showScopeError(targetScope, targetRepo, readError);
+    }
+  };
+
   const currentSelection = (): QuestLogScopeSelection => ({ currentRepo, scope });
 
   const cycleScope = (): Promise<QuestLogScopeSelection> =>
     enqueueScopeTransition(async () => {
-      const repositories = await knownRepositories();
+      const repositories = await readKnownRepositories();
+      if (repositories === null) {
+        return currentSelection();
+      }
       const nextRepo = nextScopeRepository(scope, currentRepo, repositories);
       const nextScope: QuestLogScope = nextRepo === null ? "all" : "current";
 
@@ -591,16 +722,32 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
         return currentSelection();
       }
 
-      await subscribeToScope(nextScope, nextRepo);
+      await subscribeWithReadError(nextScope, nextRepo);
       return currentSelection();
     });
 
-  const start = (): Promise<void> => enqueueScopeTransition(() => subscribeToScope());
+  const start = (): Promise<void> =>
+    enqueueScopeTransition(async () => {
+      try {
+        await subscribeToScope();
+      } catch (readError: unknown) {
+        if (!(readError instanceof FederatedReadError)) {
+          throw readError;
+        }
+        await showScopeError(scope, currentRepo, readError);
+      }
+    });
 
-  const loadDetail = async (id: number): Promise<QuestLogDetail> => {
+  const loadDetail = async (id: number, repository?: string): Promise<QuestLogDetail> => {
+    const store =
+      repository === undefined
+        ? options.store
+        : (options.store.forRepository?.(repository) ?? options.store);
+    const selectedScope: QuestScope =
+      repository === undefined ? { repo: null } : { repo: repository };
     const [detail, events] = await Promise.all([
-      showQuestDetail(options.store, { repo: null }, id),
-      options.store.events(id),
+      showQuestDetail(store, selectedScope, id),
+      store.events(id),
     ]);
     const orderedEvents = [...events].sort((left, right) => right.id - left.id);
     return {
@@ -626,12 +773,12 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     };
   };
 
-  const openEvidence = (id: number): Promise<string> => {
+  const openEvidence = (id: number, repository?: string): Promise<string> => {
     const action = (async () => {
       if (options.openEvidence === undefined) {
         return `Quest ${id} evidence opening is not available`;
       }
-      return await options.openEvidence(id);
+      return await options.openEvidence(id, repository);
     })();
     const completion = action.then(
       () => undefined,

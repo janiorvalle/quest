@@ -10,7 +10,7 @@ import {
   EXIT_USAGE_ERROR,
 } from "../output";
 import type { BackupScheduleStatus, EvidenceOpener } from "../platform";
-import type { Config } from "../schema";
+import type { Config, QuestScope } from "../schema";
 import {
   type Clock,
   createSqliteStore,
@@ -299,6 +299,44 @@ describe("Commander CLI wiring", () => {
 
     try {
       expect(await runQuestCli(["--repo", "other-app"], dependencies)).toBe(EXIT_SUCCESS);
+      expect(viewerContext?.scope).toEqual({ repo: "other-app" });
+      expect(stdout).toEqual([]);
+      expect(stderr).toEqual([]);
+    } finally {
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("bare TTY invocation opens the federated read backend regardless of launch scope", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-cli-tui-federated-"));
+    const store = createSqliteStore(join(directory, "quest.db"));
+    const ports = {
+      blobStore: new LocalBlobStore(join(directory, "evidence")),
+      clock,
+      questStore: store,
+    } satisfies CliApplicationPorts;
+    const scopes: QuestScope[] = [];
+    let viewerContext: FutureTuiContext | undefined;
+    const { dependencies, stderr, stdout } = harness({
+      isTty: true,
+      launchTui: async (context) => {
+        viewerContext = context;
+      },
+      openBackend: async (scope) => {
+        scopes.push(scope);
+        return {
+          clock,
+          compatibilityProbe: compatibilityProbe(),
+          openApplicationPorts: () => Promise.resolve(ports),
+        };
+      },
+      viewer: { openEvidence: () => Promise.resolve(), openUrl: () => Promise.resolve() },
+    });
+
+    try {
+      expect(await runQuestCli(["--repo", "other-app"], dependencies)).toBe(EXIT_SUCCESS);
+      expect(scopes).toEqual([{ repo: null }]);
       expect(viewerContext?.scope).toEqual({ repo: "other-app" });
       expect(stdout).toEqual([]);
       expect(stderr).toEqual([]);

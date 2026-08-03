@@ -55,11 +55,16 @@ export interface BackupDatabase {
 }
 
 export interface WatchSubscription {
-  /** Idempotently stops future emissions; an in-flight callback may finish before this resolves. */
+  /** Idempotently stops future emissions and waits for in-flight callbacks to settle. */
   unsubscribe(): Promise<void>;
 }
 
-export type QuestWatchListener = (quests: readonly Quest[]) => void;
+export type QuestWatchListener = (quests: readonly Quest[], error?: Error) => void;
+
+export interface FederatedReadSnapshot {
+  readonly dump: QuestDump;
+  readonly fencedRepositories: readonly string[];
+}
 
 export interface AcceptQuestAndExportResult {
   readonly acceptance: AcceptResult;
@@ -113,6 +118,15 @@ export interface QuestStore {
 
   /** Reads all matching quests from one backend-consistent query snapshot. */
   listQuests(filter: QuestFilter): Promise<Quest[]>;
+
+  /** Reads repositories fenced on this backend so federated reads can exclude stale copies. */
+  listFencedRepositories?(): Promise<readonly string[]>;
+
+  /** Reads the logical dump and migration fences from one backend-consistent snapshot. */
+  readFederatedSnapshot?(): Promise<FederatedReadSnapshot>;
+
+  /** Narrows read operations to one repository when the backend supports federated routing. */
+  forRepository?(repository: string): QuestStore;
 
   /** Reads one quest from one backend-consistent query snapshot, returning null when absent. */
   getQuest(id: number): Promise<Quest | null>;

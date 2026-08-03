@@ -6,6 +6,7 @@ export interface QuestLogInteractionState {
   readonly detailScrollOffset: number;
   readonly selectedIndex: number;
   readonly selectedQuestId: number | undefined;
+  readonly selectedQuestKey?: string | undefined;
   readonly showDone: boolean;
   readonly sortMode: QuestLogSortMode;
 }
@@ -26,8 +27,10 @@ export interface QuestLogInteractionContext {
   readonly detailViewportRows?: number;
   readonly pr?: string | null;
   readonly questId: number | undefined;
+  readonly repository?: string;
   readonly visibleCount: number;
   readonly visibleQuestIds?: readonly number[];
+  readonly visibleQuestKeys?: readonly string[];
 }
 
 export type QuestLogIntent =
@@ -35,7 +38,7 @@ export type QuestLogIntent =
   | { readonly type: "cycle-theme" }
   | { readonly type: "none" }
   | { readonly type: "notice"; readonly message: string }
-  | { readonly type: "open-evidence"; readonly id: number }
+  | { readonly type: "open-evidence"; readonly id: number; readonly repository?: string }
   | { readonly type: "open-pr"; readonly url: string }
   | { readonly type: "quit" }
   | { readonly type: "toggle-sort" }
@@ -93,7 +96,9 @@ function normalizeState(
   const areaIndex = Math.max(0, areaKeys.indexOf(state.areaKey));
   const selection = selectionForVisibleQuests(state, context);
   const selectionChanged =
-    context.visibleQuestIds !== undefined && selection.questId !== state.selectedQuestId;
+    context.visibleQuestKeys !== undefined
+      ? selection.questKey !== state.selectedQuestKey
+      : context.visibleQuestIds !== undefined && selection.questId !== state.selectedQuestId;
   return {
     areaIndex,
     areaKey: areaKeys[areaIndex] ?? "all",
@@ -102,6 +107,7 @@ function normalizeState(
       : Math.min(Math.max(0, state.detailScrollOffset), detailScrollLimit(context)),
     selectedIndex: selection.index,
     selectedQuestId: selection.questId,
+    ...(context.visibleQuestKeys === undefined ? {} : { selectedQuestKey: selection.questKey }),
     showDone: state.showDone,
     sortMode: state.sortMode,
   };
@@ -110,18 +116,44 @@ function normalizeState(
 function selectionForVisibleQuests(
   state: QuestLogInteractionState,
   context: QuestLogInteractionContext,
-): { readonly index: number; readonly questId: number | undefined } {
+): {
+  readonly index: number;
+  readonly questId: number | undefined;
+  readonly questKey: string | undefined;
+} {
   const visibleQuestIds = context.visibleQuestIds ?? [];
+  const visibleQuestKeys = context.visibleQuestKeys ?? [];
   if (context.visibleCount === 0) {
-    return { index: 0, questId: undefined };
+    return { index: 0, questId: undefined, questKey: undefined };
   }
   const identityIndex =
-    state.selectedQuestId === undefined ? -1 : visibleQuestIds.indexOf(state.selectedQuestId);
+    context.visibleQuestKeys !== undefined
+      ? state.selectedQuestKey === undefined
+        ? -1
+        : visibleQuestKeys.indexOf(state.selectedQuestKey)
+      : state.selectedQuestId === undefined
+        ? -1
+        : visibleQuestIds.indexOf(state.selectedQuestId);
   const index =
     identityIndex >= 0
       ? identityIndex
       : Math.min(Math.max(0, state.selectedIndex), context.visibleCount - 1);
-  return { index, questId: visibleQuestIds[index] };
+  return { index, questId: visibleQuestIds[index], questKey: visibleQuestKeys[index] };
+}
+
+function selectionFields(
+  context: QuestLogInteractionContext,
+  selectedIndex: number,
+): {
+  readonly selectedQuestId: number | undefined;
+  readonly selectedQuestKey?: string | undefined;
+} {
+  return {
+    selectedQuestId: context.visibleQuestIds?.[selectedIndex],
+    ...(context.visibleQuestKeys === undefined
+      ? {}
+      : { selectedQuestKey: context.visibleQuestKeys[selectedIndex] }),
+  };
 }
 
 function fallbackAreaKeys(areaCount: number): readonly string[] {
@@ -158,7 +190,7 @@ function tabState(
     areaKey: areaKeys[areaIndex] ?? state.areaKey,
     detailScrollOffset: 0,
     selectedIndex: 0,
-    selectedQuestId: context.visibleQuestIds?.[0],
+    ...selectionFields(context, 0),
   };
 }
 
@@ -169,13 +201,21 @@ function isEvidenceKey(key: QuestLogKey): boolean {
 function evidenceResult(
   state: QuestLogInteractionState,
   questId: number | undefined,
+  repository: string | undefined,
 ): QuestLogInteractionResult {
   return questId === undefined
     ? {
         intent: { type: "notice", message: "Select a quest before opening evidence" },
         state,
       }
-    : { intent: { id: questId, type: "open-evidence" }, state };
+    : {
+        intent: {
+          id: questId,
+          type: "open-evidence",
+          ...(repository === undefined ? {} : { repository }),
+        },
+        state,
+      };
 }
 
 function prResult(
@@ -205,7 +245,7 @@ function moveSelectionState(
     ...state,
     detailScrollOffset: 0,
     selectedIndex,
-    selectedQuestId: context.visibleQuestIds?.[selectedIndex],
+    ...selectionFields(context, selectedIndex),
   };
 }
 
@@ -223,51 +263,49 @@ function detailScrollState(
       };
 }
 
-export function reduceReadOnlyInteraction(
+function navigationResult(
   state: QuestLogInteractionState,
   key: QuestLogKey,
   context: QuestLogInteractionContext,
-): QuestLogInteractionResult {
-  const normalized = normalizeState(state, context);
-
+): QuestLogInteractionResult | undefined {
   if (isKey(key, "q")) {
-    return { intent: { type: "quit" }, state: normalized };
+    return { intent: { type: "quit" }, state };
   }
-  const scrolled = detailScrollState(normalized, key, context);
+  const scrolled = detailScrollState(state, key, context);
   if (scrolled !== undefined) {
-    return {
-      intent: { type: "none" },
-      state: scrolled,
-    };
+    return { intent: { type: "none" }, state: scrolled };
   }
   if (isKey(key, "up") || isKey(key, "k")) {
-    return {
-      intent: { type: "none" },
-      state: moveSelectionState(normalized, -1, context),
-    };
+    return { intent: { type: "none" }, state: moveSelectionState(state, -1, context) };
   }
   if (isKey(key, "down") || isKey(key, "j")) {
-    return {
-      intent: { type: "none" },
-      state: moveSelectionState(normalized, 1, context),
-    };
+    return { intent: { type: "none" }, state: moveSelectionState(state, 1, context) };
   }
   if (isKey(key, "tab")) {
-    return { intent: { type: "none" }, state: tabState(normalized, key, context) };
+    return { intent: { type: "none" }, state: tabState(state, key, context) };
   }
+  return undefined;
+}
+
+function viewResult(
+  state: QuestLogInteractionState,
+  key: QuestLogKey,
+  context: QuestLogInteractionContext,
+): QuestLogInteractionResult | undefined {
   if (isKey(key, "t")) {
-    return { intent: { type: "cycle-theme" }, state: normalized };
+    return { intent: { type: "cycle-theme" }, state };
   }
   if (isKey(key, "r")) {
     return {
       intent: { type: "cycle-scope" },
       state: {
-        ...normalized,
+        ...state,
         areaIndex: 0,
         areaKey: "all",
         detailScrollOffset: 0,
         selectedIndex: 0,
         selectedQuestId: undefined,
+        ...(context.visibleQuestKeys === undefined ? {} : { selectedQuestKey: undefined }),
       },
     };
   }
@@ -275,11 +313,11 @@ export function reduceReadOnlyInteraction(
     return {
       intent: { type: "toggle-done" },
       state: {
-        ...normalized,
+        ...state,
         detailScrollOffset: 0,
         selectedIndex: 0,
-        selectedQuestId: context.visibleQuestIds?.[0],
-        showDone: !normalized.showDone,
+        ...selectionFields(context, 0),
+        showDone: !state.showDone,
       },
     };
   }
@@ -287,16 +325,28 @@ export function reduceReadOnlyInteraction(
     return {
       intent: { type: "toggle-sort" },
       state: {
-        ...normalized,
-        sortMode: normalized.sortMode === "plan" ? "flat" : "plan",
+        ...state,
+        sortMode: state.sortMode === "plan" ? "flat" : "plan",
       },
     };
   }
   if (isEvidenceKey(key)) {
-    return evidenceResult(normalized, context.questId);
+    return evidenceResult(state, context.questId, context.repository);
   }
   if (isKey(key, "p")) {
-    return prResult(normalized, context.questId, context.pr);
+    return prResult(state, context.questId, context.pr);
   }
-  return { intent: { type: "none" }, state: normalized };
+  return undefined;
+}
+
+export function reduceReadOnlyInteraction(
+  state: QuestLogInteractionState,
+  key: QuestLogKey,
+  context: QuestLogInteractionContext,
+): QuestLogInteractionResult {
+  const normalized = normalizeState(state, context);
+  return (
+    navigationResult(normalized, key, context) ??
+    viewResult(normalized, key, context) ?? { intent: { type: "none" }, state: normalized }
+  );
 }
