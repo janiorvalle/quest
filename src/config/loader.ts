@@ -137,7 +137,10 @@ function unknownConfigWarning(unknown: UnknownConfigPath, normalized: Config): s
   const consequence =
     unknown.kind === "section" ? "no settings from it were applied" : "no value was applied";
   const backend = backendAtConfigPath(normalized, unknown.path);
-  const routingConsequence = backend === undefined ? "" : `; backend remains "${backend}"`;
+  const routingConsequence =
+    backend === undefined
+      ? ""
+      : `; store.backend remains "${backend}"; set store.backend explicitly if you intended a different backend`;
   return `ignored unknown config ${unknown.kind} "${unknown.path}"; ${consequence}${routingConsequence}; upgrade the Quest binary before relying on this setting`;
 }
 

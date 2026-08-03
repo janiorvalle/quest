@@ -41,6 +41,10 @@ top-level sections. It writes one warning per ignored item to stderr, so
 `--format json` stdout remains valid. The warning names the setting and tells
 you to upgrade the Quest binary before relying on it.
 
+For an unknown key under `[store]`, the warning also names the effective
+`store.backend`; a typo cannot change routing, and the explicit backend key is
+the remedy.
+
 This is intentionally tolerant in the new binary. A pre-0.15 binary rejects a
 config that opts into a newer key such as `[store] lease_ttl_minutes` with a
 clear config error. That compatibility cost is opt-in and self-inflicted: only

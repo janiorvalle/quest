@@ -25,6 +25,8 @@ const dispatchConfigSchema = objectInputSchema.pipe(
 );
 
 export const storeConfigSchema = objectInputSchema.pipe(
+  // Unknown settings are intentionally stripped for forward compatibility. The loader warns
+  // with the effective backend so a typo cannot silently change repository routing.
   z.object({
     backend: z.enum(["sqlite", "convex"]).default("sqlite"),
     deployment: nonEmptyTextSchema.optional(),

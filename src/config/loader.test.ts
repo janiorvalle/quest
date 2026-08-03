@@ -149,7 +149,7 @@ describe("config loading", () => {
 
     expect(config.store).toEqual({ backend: "sqlite", lease_ttl_minutes: 60 });
     expect(warnings).toEqual([
-      'ignored unknown config key "store.future_option"; no value was applied; backend remains "sqlite"; upgrade the Quest binary before relying on this setting',
+      'ignored unknown config key "store.future_option"; no value was applied; store.backend remains "sqlite"; set store.backend explicitly if you intended a different backend; upgrade the Quest binary before relying on this setting',
     ]);
   });
 
@@ -164,7 +164,7 @@ describe("config loading", () => {
 
     expect(config.store.backend).toBe("sqlite");
     expect(warnings).toEqual([
-      'ignored unknown config key "store.backnd"; no value was applied; backend remains "sqlite"; upgrade the Quest binary before relying on this setting',
+      'ignored unknown config key "store.backnd"; no value was applied; store.backend remains "sqlite"; set store.backend explicitly if you intended a different backend; upgrade the Quest binary before relying on this setting',
     ]);
   });
 
