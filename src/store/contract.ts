@@ -160,6 +160,43 @@ async function verifyClaimRace(factory: QuestStoreFactory): Promise<void> {
     );
     expect(conflicts[0]?.result.quest).toEqual(stored);
     await requireEventState(store, quest.id, "accepted", ["add", "accept"]);
+
+    const openBug = await store.addQuest(bugInput("open bug claim"));
+    const openBugAcceptance = await store.acceptQuest({
+      id: openBug.id,
+      owner: resolveActor(actor),
+    });
+    requireContract(
+      openBugAcceptance.outcome === "accepted" &&
+        openBugAcceptance.quest.status === "accepted" &&
+        openBugAcceptance.quest.assignee === resolveActor(actor),
+      "an open bug must be directly claimable",
+    );
+    await requireEventState(store, openBug.id, "accepted", ["add", "accept"]);
+    const abandonedOpenBug = await store.transition(openBug.id, {
+      action: "abandon",
+      actor: resolveActor(actor),
+    });
+    requireContract(
+      abandonedOpenBug.status === "open" && abandonedOpenBug.verdict === null,
+      "abandoning an untriaged bug must return it to open",
+    );
+    await store.acceptQuest({ id: openBug.id, owner: resolveActor(actor) });
+    await store.transition(openBug.id, {
+      action: "turnin",
+      actor: resolveActor(actor),
+      pr: "open-bug",
+      session_guild: null,
+    });
+    const reopenedOpenBug = await store.transition(openBug.id, {
+      action: "reopen",
+      actor: resolveActor(actor),
+      notes: "retest the untriaged bug",
+    });
+    requireContract(
+      reopenedOpenBug.status === "open" && reopenedOpenBug.verdict === null,
+      "reopening an untriaged bug must preserve its open dispatch state",
+    );
   });
 }
 
@@ -308,6 +345,12 @@ async function verifyBackfilledAdds(factory: QuestStoreFactory): Promise<void> {
     expect(await store.exportAll()).toEqual(beforeRejections);
     const next = await store.addQuest(taskInput("after invalid backfill"));
     requireContract(next.id === valid.id + 1, "invalid backfills must not consume display IDs");
+    const directlyClaimed = await store.addQuest({
+      ...bugInput("directly claimed bug backfill"),
+      assignee: actor,
+      status: "accepted",
+    });
+    await requireEventState(store, directlyClaimed.id, "accepted", ["add"]);
   });
 }
 

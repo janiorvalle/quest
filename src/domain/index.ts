@@ -10,8 +10,10 @@ export {
 export {
   canApplyVerdict,
   initialStatusForKind,
+  isDispatchableQuest,
   isLegalStatusTransition,
   isValidBackfill,
+  statusAfterClaimRelease,
   statusForRetestVerdict,
   statusForVerdict,
 } from "./lifecycle";

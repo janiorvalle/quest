@@ -202,9 +202,10 @@ up what the human needs to decide instead.
 
 An accepted quest carries a 30-minute `lease_expires_at` in the `accept` JSON
 data. Assignee writes renew the lease; use `quest --format json touch <id>` for
-long-running work. Expiry is passive: reads return the quest to `ready`, so
-re-accept before continuing. If another owner reclaims it, stop and use the
-new owner's handoff instead of writing to the quest.
+long-running work. Expiry is passive: reads return the quest to its dispatch
+state (`open` for an untriaged bug, otherwise `ready`), so re-accept before
+continuing. If another owner reclaims it, stop and use the new owner's handoff
+instead of writing to the quest.
 
 ## Intake
 
@@ -290,9 +291,9 @@ update <id> [--title title] [--area area] [--priority 1|2|3] [--guild guild]
 
 `cancel` moves any non-terminal quest to `dropped`; bugs receive `wont-do`,
 while tasks keep a null verdict and record the reason in notes. `reopen` is a
-forward correction: `complete` returns to `ready`, dropped bugs return to
-`open`, and dropped tasks return to `ready`; notes are required and the count
-increments.
+forward correction: `complete` returns to `ready` (or an untriaged bug to
+`open`), dropped bugs return to `open`, and dropped tasks return to `ready`;
+notes are required and the count increments.
 
 Verdicts are `actionable`, `not-reproduced`, `works-as-intended`, `invalid`,
 `external`, `wont-do`, or `duplicate-of:<id>`. Use `--retest` only with

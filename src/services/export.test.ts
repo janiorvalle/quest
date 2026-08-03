@@ -155,6 +155,28 @@ describe("logical backup export", () => {
     expect(parseQuestBackupExport(JSON.stringify(previous))).toEqual(current);
   });
 
+  test("normalizes v5 logical backups after the open bug dispatch schema bump", () => {
+    const current = fixtureDump();
+    const currentWithFederatedEvent = {
+      ...current,
+      events: [
+        ...current.events,
+        {
+          id: 99,
+          quest_id: 5,
+          at: timestamp,
+          actor: "fixture",
+          action: "update" as const,
+          detail: { federated: true },
+          repo: "beta",
+        },
+      ],
+    };
+    const previous = { ...currentWithFederatedEvent, schema_version: 5 };
+
+    expect(parseQuestBackupExport(JSON.stringify(previous))).toEqual(currentWithFederatedEvent);
+  });
+
   test("rejects a logical backup tagged with an unsupported schema version", () => {
     const serialized = JSON.stringify({
       ...fixtureDump(),

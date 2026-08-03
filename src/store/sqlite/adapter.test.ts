@@ -965,6 +965,17 @@ describe("SqliteStore", () => {
         "touch",
         "accept",
       ]);
+
+      now = "2026-07-31T03:00:00Z";
+      const openBug = await store.addQuest(bugInput("expired untriaged bug"));
+      await store.acceptQuest({ id: openBug.id, owner: "ryan" });
+      now = "2026-07-31T03:31:00Z";
+      expect(await store.getQuest(openBug.id)).toMatchObject({
+        assignee: null,
+        lease_expires_at: null,
+        status: "open",
+        verdict: null,
+      });
     } finally {
       store.close();
       await removeDirectory(directory);

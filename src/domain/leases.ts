@@ -1,4 +1,5 @@
 import type { Quest } from "../schema";
+import { statusAfterClaimRelease } from "./lifecycle";
 
 export const LEASE_TTL_MS = 30 * 60 * 1_000;
 
@@ -18,6 +19,6 @@ export function materializeExpiredLease(quest: Quest, now: string): Quest {
     ...quest,
     assignee: null,
     lease_expires_at: null,
-    status: "ready",
+    status: statusAfterClaimRelease(quest),
   };
 }

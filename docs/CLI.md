@@ -243,7 +243,8 @@ quest cancel <id> --reason <text> Cancel any non-terminal quest; bugs become
 
 quest reopen <id> --notes <text>  Forward-correct a failed or terminal quest;
                                   dropped bugs return to open, dropped tasks and
-                                  completed quests return to ready (count++).
+                                  completed quests return to ready (or an
+                                  untriaged bug to open; count++).
 
 quest update <id>                 Generic field edits (--title --area --priority
                                   --description/--desc --guild <g>|--clear-guild
@@ -298,14 +299,14 @@ The plan reads one consistent store snapshot in the selected scope. Its JSON
 ```
 
 `computed_state` is `in_flight` for an accepted quest with a live lease,
-`dispatchable` for ready work whose requirements are complete or dropped, and
-`blocked` otherwise. `blockers` are direct incomplete requirements;
+`dispatchable` for open bugs and ready work whose requirements are complete or
+dropped, and `blocked` otherwise. `blockers` are direct incomplete requirements;
 `blocker_paths` preserve every path from the quest to a root blocker.
 `shared_files` clusters are hard overlap signals. `same_area` clusters only
 apply when both quests have no predicted files and are labeled as heuristics.
 `next` warns about a selected soft same-area conflict but never refuses it.
-Completed, dropped, open, turned-in, and expired accepted quests are not
-dispatch entries.
+Completed, dropped, turned-in, and expired accepted quests are not dispatch
+entries.
 
 ### Viewing
 
@@ -459,8 +460,8 @@ identity error is returned.
    never retry the same claim.
 5. The `accept` JSON data includes `lease_expires_at`; long-running work should
    call `quest touch <id>` before that timestamp. Expiry is passive: a read
-   returns the quest to `ready`, and an old assignee is told to stop when another
-   owner reclaims it.
+   returns the quest to its dispatch state (`open` for an untriaged bug, otherwise
+   `ready`), and an old assignee is told to stop when another owner reclaims it.
 6. Idempotency: re-running a mutation with identical args is safe; `add` dedups.
 
 Human-facing views are intentionally not stored in quest. Agents can compose

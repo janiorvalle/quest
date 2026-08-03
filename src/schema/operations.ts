@@ -6,9 +6,9 @@ import { nonEmptyTextSchema } from "./primitives";
 
 const displayIdSchema = z.int().positive();
 
-// Lifecycle input fields are part of the Convex wire contract; deploy the matching backend
-// before a client that sends session attribution fields can write to it.
-export const STORE_SCHEMA_VERSION = 5;
+// Dispatching open bugs is part of the Convex wire contract; deploy the matching backend
+// before a client that can claim them writes to it.
+export const STORE_SCHEMA_VERSION = 6;
 
 const sessionGuildSchema = nonEmptyTextSchema.nullable().optional();
 const sessionAttributionFields = {

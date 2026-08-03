@@ -14,20 +14,24 @@ export function initialStatusForKind(kind: QuestKind): QuestStatus {
 export function isLegalStatusTransition(from: QuestStatus, to: QuestStatus): boolean {
   switch (from) {
     case "open":
-      return to === "ready" || to === "dropped";
+      return to === "ready" || to === "accepted" || to === "dropped";
     case "ready":
       return to === "accepted" || to === "dropped";
     case "accepted":
       return to === "open" || to === "ready" || to === "turned_in" || to === "dropped";
     case "turned_in":
-      return to === "ready" || to === "complete" || to === "dropped";
+      return to === "open" || to === "ready" || to === "complete" || to === "dropped";
     case "complete":
-      return to === "ready";
+      return to === "open" || to === "ready";
     case "dropped":
       return to === "open" || to === "ready";
     default:
       return assertNever(from);
   }
+}
+
+export function isDispatchableQuest(value: Pick<Quest, "kind" | "status">): boolean {
+  return value.status === "ready" || (value.kind === "bug" && value.status === "open");
 }
 
 export function canApplyVerdict(kind: QuestKind, status: QuestStatus): boolean {
@@ -55,6 +59,10 @@ export function statusForRetestVerdict(verdict: Verdict): QuestStatus {
   return verdict === "not-reproduced" ? "open" : statusForVerdict(verdict);
 }
 
+export function statusAfterClaimRelease(value: Pick<Quest, "kind" | "verdict">): QuestStatus {
+  return value.kind === "bug" && value.verdict !== "actionable" ? "open" : "ready";
+}
+
 export function isValidBackfill(value: Pick<Quest, "kind" | "status" | "verdict">): boolean {
   if (value.kind === "task") {
     return value.verdict === null && value.status !== "open";
@@ -64,10 +72,15 @@ export function isValidBackfill(value: Pick<Quest, "kind" | "status" | "verdict"
     case "open":
       return value.verdict === null || value.verdict === "not-reproduced";
     case "ready":
+      return value.verdict === "actionable";
     case "accepted":
     case "turned_in":
     case "complete":
-      return value.verdict === "actionable";
+      return (
+        value.verdict === null ||
+        value.verdict === "actionable" ||
+        value.verdict === "not-reproduced"
+      );
     case "dropped":
       return value.verdict !== null && value.verdict !== "actionable";
     default:

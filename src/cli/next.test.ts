@@ -10,7 +10,7 @@ import {
   EXIT_SUCCESS,
   EXIT_USAGE_ERROR,
 } from "../output";
-import type { Config, NewQuest, QuestReport, QuestStatus } from "../schema";
+import type { Config, NewQuest, QuestKind, QuestReport, QuestStatus } from "../schema";
 import { getNextQuest } from "../services";
 import type { QuestStore } from "../store";
 import { LocalBlobStore, SqliteStore } from "../store";
@@ -37,6 +37,7 @@ interface NextCliHarness {
     title: string,
     options?: {
       assignee?: string | null;
+      kind?: QuestKind;
       predictedFiles?: readonly string[];
       priority?: number;
       reopenCount?: number;
@@ -61,6 +62,7 @@ function questInput(
   options: {
     assignee?: string | null;
     predictedFiles?: readonly string[];
+    kind?: QuestKind;
     priority?: number;
     reopenCount?: number;
     repo?: string;
@@ -71,7 +73,7 @@ function questInput(
   return {
     repo: options.repo ?? "quest",
     area: "cli",
-    kind: "task",
+    kind: options.kind ?? "task",
     title,
     description: "",
     opened_by: identity,
@@ -183,6 +185,35 @@ async function createHarness(
 }
 
 describe("next CLI behavior", () => {
+  test("claims an open bug selected by next", async () => {
+    const harness = await createHarness();
+    try {
+      const openBug = await harness.addQuest("Open bug", {
+        kind: "bug",
+        priority: 1,
+        status: "open",
+      });
+      await harness.addQuest("Ready task", { priority: 2 });
+
+      const result = await harness.runJson(["next", "--claim"]);
+
+      expect(result.code).toBe(EXIT_SUCCESS);
+      expect(result.report).toMatchObject({
+        data: {
+          claimed: true,
+          quest: { id: openBug, status: "accepted" },
+        },
+      });
+      expect(await harness.store.getQuest(openBug)).toMatchObject({
+        assignee: identity,
+        id: openBug,
+        status: "accepted",
+      });
+    } finally {
+      await harness.stop();
+    }
+  });
+
   test("reaches overlap warnings through add and update predicted-files flags", async () => {
     const harness = await createHarness();
     try {

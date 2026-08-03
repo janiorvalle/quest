@@ -5,6 +5,7 @@ import type { QuestDump } from "../schema";
 import {
   chainSchema,
   eventBaseSchema,
+  eventSchema,
   evidenceSchema,
   questDumpSchema,
   questSchema,
@@ -49,6 +50,14 @@ const preSessionAttributionQuestDumpSchema = z.strictObject({
   evidence: z.array(evidenceSchema),
   chains: z.array(chainSchema),
   events: z.array(eventBaseSchema),
+});
+
+const preOpenBugDispatchQuestDumpSchema = z.strictObject({
+  schema_version: z.literal(5),
+  quests: z.array(questSchema),
+  evidence: z.array(evidenceSchema),
+  chains: z.array(chainSchema),
+  events: z.array(eventSchema),
 });
 
 const preLeaseQuestDumpSchema = z.strictObject({
@@ -107,6 +116,14 @@ export function parseQuestBackupExport(serialized: string): QuestDump {
   const current = questDumpSchema.safeParse(value);
   if (current.success) {
     return current.data;
+  }
+
+  const preOpenBugDispatch = preOpenBugDispatchQuestDumpSchema.safeParse(value);
+  if (preOpenBugDispatch.success) {
+    return questDumpSchema.parse({
+      ...preOpenBugDispatch.data,
+      schema_version: STORE_SCHEMA_VERSION,
+    });
   }
 
   const preSessionAttribution = preSessionAttributionQuestDumpSchema.safeParse(value);

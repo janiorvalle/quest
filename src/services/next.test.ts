@@ -123,6 +123,47 @@ describe("next selection policy", () => {
     ).toEqual(["quest 1 predicted_files overlap with in-flight quest 2: src/cli/program.ts"]);
   });
 
+  test("selects open bugs and includes them in lane conflict clustering", () => {
+    const quests = [
+      quest(1, "In flight", {
+        assignee: "worker",
+        lease_expires_at: "2026-08-02T17:00:00Z",
+        predicted_files: ["src/shared.ts"],
+        status: "accepted",
+      }),
+      quest(2, "Open bug", {
+        kind: "bug",
+        predicted_files: ["src/shared.ts"],
+        priority: 1,
+        status: "open",
+      }),
+    ];
+
+    const result = selectNextQuest(
+      backlog(quests),
+      { repo: "quest" },
+      undefined,
+      null,
+      undefined,
+      now,
+    );
+
+    expect(result.quest?.id).toBe(2);
+    expect(result.laneConflicts).toEqual([
+      {
+        area: null,
+        files: ["src/shared.ts"],
+        heuristic: false,
+        inFlightQuestId: 1,
+        kind: "shared_files",
+        questId: 2,
+      },
+    ]);
+    expect(result.warnings).toEqual([
+      "quest 2 predicted_files overlap with in-flight quest 1: src/shared.ts",
+    ]);
+  });
+
   test("skips hard lane conflicts when a conflict-free quest is available", () => {
     const quests = [
       quest(1, "In flight", {

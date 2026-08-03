@@ -1,4 +1,5 @@
 import type { Chain, Quest } from "../schema";
+import { isDispatchableQuest } from "./lifecycle";
 
 export const planComputedStateValues = ["dispatchable", "blocked", "in_flight"] as const;
 export type PlanComputedState = (typeof planComputedStateValues)[number];
@@ -263,7 +264,7 @@ export function computeQuestPlan(input: QuestPlanInput): QuestPlan {
   const rootPathCache = new Map<number, readonly PlanBlockerPath[]>();
   const planQuests = input.quests.flatMap((quest): PlanQuest[] => {
     const inFlight = isLiveInFlight(quest, now);
-    if (!inFlight && quest.status !== "ready") {
+    if (!inFlight && !isDispatchableQuest(quest)) {
       return [];
     }
     const details = blockerDetails(quest, requiresByQuest, questsById, rootPathCache);
