@@ -4,6 +4,7 @@ export interface QuestLogInteractionState {
   readonly areaIndex: number;
   readonly areaKey: string;
   readonly detailScrollOffset: number;
+  readonly lens: QuestLogLens;
   readonly selectedIndex: number;
   readonly selectedQuestId: number | undefined;
   readonly selectedQuestKey?: string | undefined;
@@ -11,6 +12,7 @@ export interface QuestLogInteractionState {
   readonly sortMode: QuestLogSortMode;
 }
 
+export type QuestLogLens = "dev" | "signoff";
 export type QuestLogSortMode = "flat" | "plan";
 
 export interface QuestLogKey {
@@ -41,6 +43,7 @@ export type QuestLogIntent =
   | { readonly type: "open-evidence"; readonly id: number; readonly repository?: string }
   | { readonly type: "open-pr"; readonly url: string }
   | { readonly type: "quit" }
+  | { readonly type: "toggle-lens"; readonly lens: QuestLogLens }
   | { readonly type: "toggle-sort" }
   | { readonly type: "toggle-done" };
 
@@ -53,6 +56,7 @@ export const INITIAL_QUEST_LOG_INTERACTION: QuestLogInteractionState = {
   areaIndex: 0,
   areaKey: "all",
   detailScrollOffset: 0,
+  lens: "dev",
   selectedIndex: 0,
   selectedQuestId: undefined,
   showDone: false,
@@ -105,6 +109,7 @@ function normalizeState(
     detailScrollOffset: selectionChanged
       ? 0
       : Math.min(Math.max(0, state.detailScrollOffset), detailScrollLimit(context)),
+    lens: state.lens,
     selectedIndex: selection.index,
     selectedQuestId: selection.questId,
     ...(context.visibleQuestKeys === undefined ? {} : { selectedQuestKey: selection.questKey }),
@@ -191,6 +196,19 @@ function tabState(
     detailScrollOffset: 0,
     selectedIndex: 0,
     ...selectionFields(context, 0),
+  };
+}
+
+function lensState(state: QuestLogInteractionState, lens: QuestLogLens): QuestLogInteractionState {
+  return {
+    ...state,
+    areaIndex: 0,
+    areaKey: "all",
+    detailScrollOffset: 0,
+    lens,
+    selectedIndex: 0,
+    selectedQuestId: undefined,
+    selectedQuestKey: undefined,
   };
 }
 
@@ -282,6 +300,9 @@ function navigationResult(
     return { intent: { type: "none" }, state: moveSelectionState(state, 1, context) };
   }
   if (isKey(key, "tab")) {
+    if (state.lens === "signoff") {
+      return { intent: { type: "none" }, state };
+    }
     return { intent: { type: "none" }, state: tabState(state, key, context) };
   }
   return undefined;
@@ -292,6 +313,13 @@ function viewResult(
   key: QuestLogKey,
   context: QuestLogInteractionContext,
 ): QuestLogInteractionResult | undefined {
+  if (isKey(key, "g")) {
+    const lens = state.lens === "dev" ? "signoff" : "dev";
+    return {
+      intent: { lens, type: "toggle-lens" },
+      state: lensState(state, lens),
+    };
+  }
   if (isKey(key, "t")) {
     return { intent: { type: "cycle-theme" }, state };
   }
@@ -309,7 +337,7 @@ function viewResult(
       },
     };
   }
-  if (isKey(key, "d")) {
+  if (state.lens === "dev" && isKey(key, "d")) {
     return {
       intent: { type: "toggle-done" },
       state: {
@@ -321,7 +349,7 @@ function viewResult(
       },
     };
   }
-  if (isKey(key, "o")) {
+  if (state.lens === "dev" && isKey(key, "o")) {
     return {
       intent: { type: "toggle-sort" },
       state: {

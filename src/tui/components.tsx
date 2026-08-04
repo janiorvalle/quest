@@ -7,6 +7,9 @@ import type {
   QuestLogEvidenceEntry,
   QuestLogItem,
   QuestLogSessionAttribution,
+  QuestLogSignedHistoryEntry,
+  QuestLogSignoffGroup,
+  QuestLogSignoffLens,
 } from "../services/quest-log-model";
 import { DENSE_THEME, type QuestTheme, questPriorityInk, questStatusText } from "./theme";
 import { useQuestTheme } from "./theme-context";
@@ -18,6 +21,11 @@ export interface HeaderCounts {
   readonly ready: number;
   readonly review: number;
   readonly total: number;
+}
+
+export interface SignoffHeaderCounts {
+  readonly awaiting: number;
+  readonly signed: number;
 }
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -136,21 +144,37 @@ function headerContext(theme: QuestTheme, label: string, value: string) {
   );
 }
 
+function optionalHeaderContext(
+  theme: QuestTheme,
+  label: string,
+  value: string | undefined,
+  width: number,
+  visible: boolean,
+) {
+  return !visible || value === undefined ? null : headerContext(theme, label, fit(value, width));
+}
+
 export function AppHeader({
   branch,
   counts,
   identity,
+  lens = "dev",
   repo,
+  signoffCounts,
   width,
 }: {
   readonly branch: string | undefined;
   readonly counts: HeaderCounts;
   readonly identity: string | undefined;
+  readonly lens?: "dev" | "signoff";
   readonly repo: string;
+  readonly signoffCounts?: SignoffHeaderCounts;
   readonly width: number;
 }) {
   const theme = useQuestTheme();
   const compact = width < 110;
+  const signoff = signoffCounts ?? { awaiting: 0, signed: 0 };
+  const showSignoffContext = lens !== "signoff" || width >= 110;
   return (
     <box
       style={{
@@ -168,15 +192,22 @@ export function AppHeader({
         <span fg={theme.palette.accent}>
           <strong>{theme.labels.appTitle}</strong>
         </span>
+        {lens === "signoff" ? headerContext(theme, "lens", "sign-off") : null}
         {headerContext(theme, "repo", fit(repo, compact ? 18 : 28))}
-        {branch === undefined
-          ? null
-          : headerContext(theme, "branch", fit(branch, compact ? 18 : 28))}
-        {identity === undefined
-          ? null
-          : headerContext(theme, "identity", fit(identity, compact ? 18 : 28))}
+        {optionalHeaderContext(theme, "branch", branch, compact ? 18 : 28, showSignoffContext)}
+        {optionalHeaderContext(theme, "identity", identity, compact ? 18 : 28, showSignoffContext)}
       </text>
-      <Counts compact={compact} counts={counts} />
+      {lens === "signoff" ? (
+        <text>
+          <span fg={theme.palette.textPrimary}>
+            <strong>{signoff.awaiting}</strong>
+          </span>
+          <span fg={theme.palette.textMuted}> awaiting</span>
+          <span fg={theme.palette.textDim}>{` · ${signoff.signed} signed`}</span>
+        </text>
+      ) : (
+        <Counts compact={compact} counts={counts} />
+      )}
     </box>
   );
 }
@@ -242,6 +273,35 @@ export function TabsRow({
       <box style={{ flexShrink: 0, paddingLeft: 1 }}>
         <text fg={theme.palette.textDim}>{fit(hint, Math.max(1, width - 2))}</text>
       </box>
+    </box>
+  );
+}
+
+export function SignoffSubheader({
+  scope,
+  width,
+}: {
+  readonly scope: string;
+  readonly width: number;
+}) {
+  const theme = useQuestTheme();
+  return (
+    <box
+      style={{
+        alignItems: "center",
+        flexDirection: "row",
+        height: 1,
+        justifyContent: "space-between",
+        overflow: "hidden",
+        paddingLeft: 1,
+        paddingRight: 1,
+        width: "100%",
+      }}
+    >
+      <text fg={theme.palette.sectionLabel}>
+        <strong>COMPLETED ONLY · TEST SESSIONS</strong>
+      </text>
+      <text fg={theme.palette.textDim}>{fit(`scope: ${scope}`, Math.max(1, width - 2))}</text>
     </box>
   );
 }
@@ -387,7 +447,7 @@ function blockedStatusCell(
   );
 }
 
-function rowColors(theme: QuestTheme, item: QuestLogItem, selected: boolean) {
+function rowColors(theme: QuestTheme, item: QuestLogItem, selected: boolean, dimmed = false) {
   if (selected) {
     return {
       muted: theme.palette.selectionInk,
@@ -396,6 +456,13 @@ function rowColors(theme: QuestTheme, item: QuestLogItem, selected: boolean) {
     };
   }
   if (item.computedState === "blocked") {
+    return {
+      muted: theme.palette.textDim,
+      primary: theme.palette.textDim,
+      status: theme.palette.textDim,
+    };
+  }
+  if (dimmed) {
     return {
       muted: theme.palette.textDim,
       primary: theme.palette.textDim,
@@ -493,9 +560,10 @@ function rowText(
   showAssignee: boolean,
   selected: boolean,
   laneMarker: QuestLogLaneMarker | null,
+  dimmed = false,
 ) {
   const status = theme.status[item.status];
-  const colors = rowColors(theme, item, selected);
+  const colors = rowColors(theme, item, selected, dimmed);
   const markerText = laneText(theme, laneMarker);
   const visibleMarkerText =
     markerText === "" || titleWidth <= 2 ? "" : fit(markerText, titleWidth - 2);
@@ -642,6 +710,274 @@ export function QuestListPane({
       <box style={{ flexGrow: 1 }} />
       <text fg={theme.palette.textDim}>
         {`↑↓ move · ${items.length} of ${totalCount} shown${hiddenDoneCount === 0 ? "" : ` · ${hiddenDoneCount} done hidden (d)`}  ${theme.glyphs.scrollbarTrack.repeat(scrollPosition)}${theme.glyphs.scrollbarFull.repeat(scrollExtent)}${theme.glyphs.scrollbarTrack.repeat(Math.max(0, 12 - scrollPosition - scrollExtent))}`}
+      </text>
+    </box>
+  );
+}
+
+export type SignoffListEntry =
+  | { readonly key: string; readonly kind: "group"; readonly text: string }
+  | {
+      readonly item: QuestLogItem;
+      readonly key: string;
+      readonly kind: "item";
+      readonly selectedIndex: number;
+    }
+  | { readonly key: string; readonly kind: "signed-header"; readonly text: string }
+  | {
+      readonly history: QuestLogSignedHistoryEntry;
+      readonly key: string;
+      readonly kind: "signed";
+      readonly selectedIndex: number;
+    };
+
+export function signoffGroupHeader(group: QuestLogSignoffGroup): string {
+  const label =
+    group.group >= 1 && group.group <= 26
+      ? String.fromCharCode(64 + group.group)
+      : String(group.group);
+  return `GROUP ${label} · ${group.repo} · ${group.label} · test as one`;
+}
+
+export function signoffListEntries(lens: QuestLogSignoffLens): readonly SignoffListEntry[] {
+  const entries: SignoffListEntry[] = [];
+  let selectedIndex = 0;
+  for (const group of lens.groups) {
+    entries.push({
+      key: `group:${group.repo}:${group.group}`,
+      kind: "group",
+      text: signoffGroupHeader(group),
+    });
+    for (const item of group.items) {
+      entries.push({ key: `item:${item.repo}:${item.id}`, item, kind: "item", selectedIndex });
+      selectedIndex += 1;
+    }
+  }
+  if (lens.signed.length > 0) {
+    entries.push({
+      key: "signed-header",
+      kind: "signed-header",
+      text: `SIGNED HISTORY · ${lens.signedCount}`,
+    });
+    for (const history of lens.signed) {
+      entries.push({
+        history,
+        key: `signed:${history.item.repo}:${history.item.id}`,
+        kind: "signed",
+        selectedIndex,
+      });
+      selectedIndex += 1;
+    }
+  }
+  return entries;
+}
+
+function signoffHistorySuffix(
+  theme: QuestTheme,
+  history: QuestLogSignedHistoryEntry,
+  width: number,
+): string {
+  const date = history.signedAt.length >= 10 ? history.signedAt.slice(0, 10) : history.signedAt;
+  const marker = `${theme.glyphs.chainComplete}${theme.glyphs.chainComplete}`;
+  const full = `${marker} ${history.signer} ${date}`;
+  if (width <= 0) {
+    return "";
+  }
+  if (stringWidth(full) <= width) {
+    return full;
+  }
+  if (width <= stringWidth(date)) {
+    return fit(date, width);
+  }
+  const datePart = fit(date, Math.min(stringWidth(date), width - 1));
+  const prefixWidth = Math.max(0, width - stringWidth(datePart) - 1);
+  const prefix = fit(`${marker} ${history.signer}`, prefixWidth);
+  return prefix === "" ? datePart : `${prefix} ${datePart}`;
+}
+
+interface SignoffListRowOptions {
+  readonly paneWidth: number;
+  readonly selectedIndex: number;
+  readonly showAssignee: boolean;
+  readonly showKind: boolean;
+  readonly statusWidth: number;
+  readonly theme: QuestTheme;
+  readonly titleWidth: number;
+}
+
+function signoffHeaderRow(
+  entry: Extract<SignoffListEntry, { kind: "group" | "signed-header" }>,
+  options: SignoffListRowOptions,
+) {
+  return (
+    <box
+      key={entry.key}
+      style={{
+        backgroundColor: options.theme.palette.background,
+        height: 1,
+        overflow: "hidden",
+        width: "100%",
+      }}
+    >
+      <text fg={options.theme.palette.sectionLabel}>
+        <strong>
+          {fit(`${options.theme.glyphs.chainComplete} ${entry.text}`, options.paneWidth)}
+        </strong>
+      </text>
+    </box>
+  );
+}
+
+function signoffQuestRow(
+  entry: Extract<SignoffListEntry, { kind: "item" | "signed" }>,
+  actualIndex: number,
+  options: SignoffListRowOptions,
+) {
+  const selected = entry.selectedIndex === options.selectedIndex;
+  const dimmed = entry.kind === "signed";
+  const item = entry.kind === "item" ? entry.item : entry.history.item;
+  const repository = fit(item.repo, Math.max(1, options.titleWidth - 1));
+  const repositorySeparator = repository === "" ? 0 : 1;
+  const suffix =
+    entry.kind === "signed"
+      ? (() => {
+          const historyWidth = Math.max(
+            0,
+            options.titleWidth - stringWidth(repository) - repositorySeparator - 1,
+          );
+          const history = signoffHistorySuffix(options.theme, entry.history, historyWidth);
+          return history === "" ? repository : `${history} · ${repository}`;
+        })()
+      : repository;
+  const suffixSeparatorWidth = suffix === "" ? 0 : 1;
+  const rowTitleWidth = Math.max(
+    1,
+    options.titleWidth - stringWidth(suffix) - suffixSeparatorWidth,
+  );
+  const row = rowText(
+    options.theme,
+    item,
+    rowTitleWidth,
+    options.statusWidth,
+    options.showKind,
+    options.showAssignee,
+    selected,
+    null,
+    dimmed,
+  );
+  return (
+    <box
+      key={entry.key}
+      style={{
+        backgroundColor: selected
+          ? options.theme.palette.selection
+          : actualIndex % 2 === 1
+            ? options.theme.palette.stripe
+            : options.theme.palette.background,
+        height: 1,
+        overflow: "hidden",
+        width: "100%",
+      }}
+    >
+      <text>
+        {selected ? <strong>{row}</strong> : row}
+        {suffix === "" ? null : (
+          <span fg={selected ? options.theme.palette.selectionInk : options.theme.palette.textDim}>
+            {` ${suffix}`}
+          </span>
+        )}
+      </text>
+    </box>
+  );
+}
+
+function signoffListRow(
+  entry: SignoffListEntry,
+  actualIndex: number,
+  options: SignoffListRowOptions,
+) {
+  return entry.kind === "group" || entry.kind === "signed-header"
+    ? signoffHeaderRow(entry, options)
+    : signoffQuestRow(entry, actualIndex, options);
+}
+
+export function SignoffListPane({
+  height,
+  items,
+  lens,
+  loading,
+  paneWidth,
+  selectedIndex,
+  terminalWidth,
+}: {
+  readonly height: number;
+  readonly items: readonly QuestLogItem[];
+  readonly lens: QuestLogSignoffLens;
+  readonly loading: boolean;
+  readonly paneWidth: number;
+  readonly selectedIndex: number;
+  readonly terminalWidth: number;
+}) {
+  const theme = useQuestTheme();
+  const showAssignee = terminalWidth >= 150;
+  const showKind = terminalWidth >= 130;
+  const statusWidth = items.reduce(
+    (width, item) =>
+      Math.max(
+        width,
+        stringWidth(blockedStatusText(theme, item) ?? questStatusText(theme.status[item.status])),
+      ),
+    13,
+  );
+  const titleWidth = Math.max(
+    8,
+    paneWidth - 5 - 1 - statusWidth - 1 - (showKind ? 8 : 0) - 4 - 1 - (showAssignee ? 17 : 0),
+  );
+  const entries = signoffListEntries(lens);
+  const selectedEntry = entries.find(
+    (entry) =>
+      (entry.kind === "item" || entry.kind === "signed") && entry.selectedIndex === selectedIndex,
+  );
+  const selectedEntryIndex = selectedEntry === undefined ? 0 : entries.indexOf(selectedEntry);
+  const rowCapacity = Math.max(1, height - 3);
+  const start = Math.max(
+    0,
+    Math.min(selectedEntryIndex - rowCapacity + 1, Math.max(0, entries.length - rowCapacity)),
+  );
+  const visible = entries.slice(start, start + rowCapacity);
+  const scrollPosition = entries.length === 0 ? 0 : Math.round((start / entries.length) * 12);
+  const scrollExtent =
+    entries.length === 0 ? 12 : Math.max(1, Math.round((visible.length / entries.length) * 12));
+  return (
+    <box style={{ flexDirection: "column", height: "100%", overflow: "hidden", width: "100%" }}>
+      <text fg={theme.palette.sectionLabel}>
+        <strong>{listHeader(showKind, showAssignee, statusWidth)}</strong>
+      </text>
+      <text fg={theme.palette.borderIdle}>
+        {theme.glyphs.ruleHorizontal.repeat(Math.max(1, paneWidth))}
+      </text>
+      {visible.length === 0 ? (
+        <text fg={theme.palette.textMuted}>
+          {loading
+            ? "loading sign-off lens…"
+            : (lens.error ?? lens.emptyMessage ?? "No unsigned completed quests.")}
+        </text>
+      ) : (
+        visible.map((entry, index) =>
+          signoffListRow(entry, start + index, {
+            paneWidth,
+            selectedIndex,
+            showAssignee,
+            showKind,
+            statusWidth,
+            theme,
+            titleWidth,
+          }),
+        )
+      )}
+      <box style={{ flexGrow: 1 }} />
+      <text fg={theme.palette.textDim}>
+        {`↑↓ move · ${lens.awaitingCount} awaiting · ${lens.signedCount} signed  ${theme.glyphs.scrollbarTrack.repeat(scrollPosition)}${theme.glyphs.scrollbarFull.repeat(scrollExtent)}${theme.glyphs.scrollbarTrack.repeat(Math.max(0, 12 - scrollPosition - scrollExtent))}`}
       </text>
     </box>
   );
@@ -1772,24 +2108,52 @@ export function StatusRow({
 }
 
 export function FooterKeymap({
+  lens = "dev",
   planAvailable = false,
   sortMode = "plan",
+  width = 120,
 }: {
+  readonly lens?: "dev" | "signoff";
   readonly planAvailable?: boolean;
   readonly sortMode?: "flat" | "plan";
+  readonly width?: number;
 } = {}) {
   const theme = useQuestTheme();
-  const actions = [
-    ["tab", "areas"],
-    ["r", "repo"],
-    ...(planAvailable ? [["o", sortMode === "plan" ? "flat" : "plan"] as const] : []),
-    ["d", "done"],
-    ["j/k", "move"],
-    ["J/K", "detail"],
-    ["E", "evidence"],
-    ["p", "pr"],
-    ["t", "theme"],
-  ] as const;
+  const actions =
+    lens === "signoff"
+      ? width < 100
+        ? ([
+            ["g", "lens"],
+            ["r", "repo"],
+            ["", "reject: quest --repo <repo> reopen <id>"],
+            ["j/k", ""],
+            ["J/K", ""],
+            ["E", ""],
+            ["p", ""],
+            ["t", ""],
+          ] as const)
+        : ([
+            ["g", "dev lens"],
+            ["r", "repo"],
+            ["", "reject/reopen: quest --repo <repo> reopen <id> --notes"],
+            ["j/k", "move"],
+            ["J/K", "detail"],
+            ["E", "evidence"],
+            ["p", "pr"],
+            ["t", "theme"],
+          ] as const)
+      : ([
+          ["g", "sign-off"],
+          ["tab", "areas"],
+          ["r", "repo"],
+          ...(planAvailable ? [["o", sortMode === "plan" ? "flat" : "plan"] as const] : []),
+          ["d", "done"],
+          ["j/k", "move"],
+          ["J/K", "detail"],
+          ["E", "evidence"],
+          ["p", "pr"],
+          ["t", "theme"],
+        ] as const);
   return (
     <box
       style={{
@@ -1804,11 +2168,15 @@ export function FooterKeymap({
     >
       <text>
         {actions.map(([key, label]) => (
-          <span key={key}>
-            <span fg={theme.palette.hint}>
-              <strong>{key}</strong>
+          <span key={`${key}:${label}`}>
+            {key === "" ? null : (
+              <span fg={theme.palette.hint}>
+                <strong>{key}</strong>
+              </span>
+            )}
+            <span fg={theme.palette.textMuted}>
+              {label === "" ? "  " : `${key === "" ? "" : " "}${label}  `}
             </span>
-            <span fg={theme.palette.textMuted}>{` ${label}  `}</span>
           </span>
         ))}
       </text>

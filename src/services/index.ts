@@ -107,13 +107,18 @@ export {
   showQuestDetail,
 } from "./query";
 export {
+  buildQuestLogSignoffLens,
   createQuestLogRuntime,
+  EMPTY_QUEST_LOG_SIGNOFF,
   EMPTY_QUEST_LOG_SNAPSHOT,
   type QuestLogDetail,
   type QuestLogItem,
   type QuestLogPlan,
   type QuestLogRuntime,
   type QuestLogRuntimeOptions,
+  type QuestLogSignedHistoryEntry,
+  type QuestLogSignoffGroup,
+  type QuestLogSignoffLens,
   type QuestLogSnapshot,
 } from "./quest-log-model";
 export {

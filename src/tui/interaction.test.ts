@@ -46,6 +46,30 @@ describe("read-only quest log keymap", () => {
     expect(reduce(INITIAL_QUEST_LOG_INTERACTION, "tab", "\t").intent).toEqual({ type: "none" });
   });
 
+  test("g round-trips the display-only sign-off lens and removes dev-only controls", () => {
+    const signoff = reduce(INITIAL_QUEST_LOG_INTERACTION, "g");
+    expect(signoff).toEqual({
+      intent: { lens: "signoff", type: "toggle-lens" },
+      state: {
+        ...INITIAL_QUEST_LOG_INTERACTION,
+        areaIndex: 0,
+        areaKey: "all",
+        detailScrollOffset: 0,
+        lens: "signoff",
+        selectedIndex: 0,
+        selectedQuestId: undefined,
+        selectedQuestKey: undefined,
+      },
+    });
+    expect(reduce(signoff.state, "g")).toMatchObject({
+      intent: { lens: "dev", type: "toggle-lens" },
+      state: { lens: "dev" },
+    });
+    expect(reduce(signoff.state, "d").intent).toEqual({ type: "none" });
+    expect(reduce(signoff.state, "o").intent).toEqual({ type: "none" });
+    expect(reduce(signoff.state, "tab").intent).toEqual({ type: "none" });
+  });
+
   test("exposes only the read-only actions", () => {
     expect(reduce(INITIAL_QUEST_LOG_INTERACTION, "d")).toEqual({
       intent: { type: "toggle-done" },
@@ -53,6 +77,7 @@ describe("read-only quest log keymap", () => {
         areaIndex: 0,
         areaKey: "all",
         detailScrollOffset: 0,
+        lens: "dev",
         selectedIndex: 0,
         selectedQuestId: undefined,
         showDone: true,
