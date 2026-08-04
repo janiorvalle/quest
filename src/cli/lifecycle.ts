@@ -117,6 +117,7 @@ function createPullRequestMergeChecker(workingDirectory: string): PullRequestMer
 }
 
 const turnInJsonInputSchema = z.strictObject({
+  actual_files: z.array(z.string().trim().min(1)).optional(),
   evidence: z.array(z.string().trim().min(1)).optional(),
   pr: nonEmptyOptionSchema.optional(),
   summary: nonEmptyOptionSchema.optional(),
@@ -217,6 +218,7 @@ interface VerdictCliRequest {
 }
 
 interface TurnInCliRequest {
+  readonly actualFiles: readonly string[];
   readonly command: "turnin";
   readonly evidence: readonly string[];
   readonly id: number;
@@ -537,6 +539,7 @@ export function registerLifecycleCommands(
     .description("submit a quest for verification")
     .argument("<id>")
     .option("--as <owner>")
+    .option("--actual-files <path...>", "record files changed by the fix")
     .option("--pr <number-or-url>")
     .option("--summary <text>", "record what changed and how it was verified")
     .option("--evidence <path...>", "attach fix evidence", appendOption, [])
@@ -545,12 +548,13 @@ export function registerLifecycleCommands(
       const jsonSource = requireJsonSource(this.getOptionValue("json"));
       if (
         jsonSource !== undefined &&
-        ["as", "pr", "summary", "evidence"].some((name) => hasCliOption(this, name))
+        ["as", "actualFiles", "pr", "summary", "evidence"].some((name) => hasCliOption(this, name))
       ) {
         throw new LifecycleCliUsageError("turnin --json - cannot be combined with turnin flags");
       }
       capture.set({
         command: "turnin",
+        actualFiles: stringList(this, "actualFiles"),
         evidence: stringList(this, "evidence"),
         id: idArgument(id),
         jsonSource,
@@ -862,6 +866,7 @@ async function resolveJsonTurnInRequest(
     return request;
   }
   return {
+    actualFiles: input.actual_files ?? [],
     command: "turnin",
     evidence: input.evidence ?? [],
     id: request.id,
@@ -1244,6 +1249,7 @@ async function executeTurnIn(
     {
       action: "turnin",
       actor: mutationActor,
+      ...(request.actualFiles.length === 0 ? {} : { actual_files: [...request.actualFiles] }),
       pr: request.pr ?? null,
       ...sessionAttribution,
       session_guild: sessionGuild,

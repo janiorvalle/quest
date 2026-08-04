@@ -18,9 +18,10 @@ work actually performed.
    claiming existing work, immediately record or replace them with
    `update <id> --predicted-files` before editing those files.
 4. Attach evidence when turning work in. For new code turnins, include `--pr`,
-   `--summary`, and one or more existing `--evidence` files containing real test
-   output, screenshots, or another produced artifact. The summary is the
-   handoff narrative: what changed and how it was verified.
+   `--summary`, `--actual-files <changed-path>...`, and one or more existing
+   `--evidence` files containing real test output, screenshots, or another
+   produced artifact. The summary is the handoff narrative: what changed and
+   how it was verified.
 5. Implementers turn quests in; only a verifying party completes them. For
    code quests, read the quest's recorded `pr` value and, before `complete`,
     run `gh pr view <number-or-url> --json state --jq .state` for that exact
@@ -165,6 +166,7 @@ the implementer's change is ready:
 quest --format json turnin <id> \
   --pr <number-or-url> \
   --summary "what changed and how it was verified" \
+  --actual-files <changed-path>... \
   --evidence <existing-path>...
 ```
 
@@ -270,7 +272,9 @@ printf '%s' '{"description":"Mission: Update the problem.\n\nTHE WORK:\n- Name t
 
 The JSON object uses the same mutation fields and validation as the flags;
 `add` uses `title`, `description`, and `predicted_files`, `update` uses the
-corresponding update fields, and `turnin` uses `pr`, `summary`, and `evidence`.
+corresponding update fields, and `turnin` uses `pr`, `summary`, `actual_files`,
+and `evidence`. `actual_files` records the files changed by the current fix and
+feeds the read-only QA session grouping.
 The CLI keeps `summary` optional for older clients and stored event replays;
 new agent turnins should always provide it, even when it is brief. Do not
 combine `--json -` with flags.
@@ -278,7 +282,7 @@ combine `--json -` with flags.
 For a multiline turnin handoff, pipe one JSON object:
 
 ```bash
-printf '%s' '{"pr":"1234","summary":"Changed the parser. Verified with bun test.","evidence":["test-output.txt"]}' |
+printf '%s' '{"pr":"1234","summary":"Changed the parser. Verified with bun test.","actual_files":["src/parser.ts"],"evidence":["test-output.txt"]}' |
   quest --format json turnin <id> --json -
 ```
 next [--claim] [--brief]
@@ -287,8 +291,10 @@ touch <id>
 abandon <id>
 verdict <id> <verdict> [--notes text] [--retest]
 turnin <id> [--pr number-or-url] [--summary text] [--evidence path...]
+    [--actual-files path...]
 complete <id> [--evidence path...]
 signoff <id>... [--notes text] [--evidence path...]
+qa
 cancel <id> --reason text
 reopen <id> --notes text
 update <id> [--title title] [--area area] [--priority 1|2|3] [--guild guild]
@@ -308,6 +314,11 @@ evidence stage. A quest is signed only when it is complete and has a sign-off
 after its latest completion; sign-off does not add a status. Use the stable
 `SIGNOFF_NOT_COMPLETE` error to wait for review, merge, and completion. Repeating
 the same sign-off is safe and appends another ledger attestation.
+
+`qa` is read-only. It groups completed unsigned quests into test sessions, using
+chain connectivity first, then shared predicted or current `actual_files`, then
+area. Read every session's reason, run its copyable sign-off command, and use
+`quest --repo <repo> reopen <id> --notes "<what failed>"` when a session finds a problem.
 
 Verdicts are `actionable`, `not-reproduced`, `works-as-intended`, `invalid`,
 `external`, `wont-do`, or `duplicate-of:<id>`. Use `--retest` only with

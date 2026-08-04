@@ -95,6 +95,7 @@ export {
   strictPriorityThenAgePolicy,
 } from "./next";
 export { getQuestPlan, getQuestPlanSnapshot, type QuestPlanSnapshot } from "./plan";
+export { getQaQueue } from "./qa";
 export {
   type ChainQuestReference,
   type ListQuestQuery,

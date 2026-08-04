@@ -205,13 +205,25 @@ describe("lifecycle CLI behavior", () => {
       await harness.runJson(["add", "Turnin summary"]);
       await harness.runJson(["accept", "1"]);
 
-      const turnedIn = await harness.runJson(["turnin", "1", "--pr", "42", "--summary", summary]);
+      const turnedIn = await harness.runJson([
+        "turnin",
+        "1",
+        "--pr",
+        "42",
+        "--summary",
+        summary,
+        "--actual-files",
+        "src/shared.ts",
+        "src/actual.ts",
+        "src/shared.ts",
+      ]);
       expect(reportData(turnedIn.report)).toMatchObject({
         changed: true,
         quest: { pr: "42", status: "turned_in" },
       });
       expect((await harness.store.events(1)).at(-1)?.detail).toMatchObject({
         action: "turnin",
+        actual_files: ["src/actual.ts", "src/shared.ts"],
         pr: "42",
         summary,
       });
@@ -224,7 +236,17 @@ describe("lifecycle CLI behavior", () => {
         "— Implemented the fix\n  Verified it with the fast test suite",
       );
 
-      const replay = await harness.runJson(["turnin", "1", "--pr", "42", "--summary", summary]);
+      const replay = await harness.runJson([
+        "turnin",
+        "1",
+        "--pr",
+        "42",
+        "--summary",
+        summary,
+        "--actual-files",
+        "src/shared.ts",
+        "src/actual.ts",
+      ]);
       expect(reportData(replay.report)).toMatchObject({ changed: false });
     } finally {
       await harness.stop();

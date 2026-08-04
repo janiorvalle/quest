@@ -246,8 +246,9 @@ quest verdict <id> <verdict>      Record triage verdict (bugs only; DATA-MODEL.m
 quest turnin <id>                 Change submitted (merged/in review), awaiting
     --pr <num|url>                 verification ("yellow").
     --summary <text>               Record what changed and how it was verified.
+    --actual-files <path>...       Record files actually changed; feeds `quest qa`.
     --evidence <path>...
-    --json -                       Read `pr`, `summary`, and `evidence` from one JSON object on stdin.
+    --json -                       Read `pr`, `summary`, `actual_files`, and `evidence` from one JSON object on stdin.
 
 quest complete <id>               Verification passed; done ("green"). If the append-only
                                   history contains a PR, that PR must be merged.
@@ -258,6 +259,23 @@ quest signoff <id>...             Record QA attestation for one or more complete
     --evidence <path>...           Attach evidence at the "signoff" stage.
 ```
 
+For a JSON turn-in, include the files changed by the current fix:
+
+```sh
+printf '%s' '{"pr":"42","summary":"Parser fix; verified with bun test.","actual_files":["src/parser.ts"],"evidence":["fast-tests.txt"]}' |
+  quest --format json turnin <id> --json -
+```
+
+```
+quest qa                           Group completed unsigned quests into read-only QA sessions.
+                                  Chained work wins over shared predicted/actual files;
+                                  area is the fallback. Each row includes the reason,
+                                  a copyable sign-off command, and the queue summary.
+                                  On Windows it prints explicit PowerShell and cmd.exe
+                                  variants so the copied command matches the shell.
+                                  Found a problem? `quest --repo <repo> reopen <id> --notes "<what failed>"`.
+```
+
 Sign-off is derived state, not a new quest status: a quest is signed when it is
 `complete` and its latest `signoff` event occurs after its latest `complete` event.
 Reopening and completing the quest again requires a new attestation. A sign-off
@@ -266,10 +284,11 @@ The command validates every ID before writing any of them. A non-complete quest
 returns `SIGNOFF_NOT_COMPLETE` and explains that review, merge, and completion must
 happen first.
 
-The sign-off event bumps the logical store wire version to 8. Version 7 logical
-backups are normalized on import; a v0.15.0 reader rejects a dump containing a
-sign-off event instead of silently dropping the attestation, so older binaries
-must be upgraded before reading the new wire format.
+The sign-off event set the logical store wire version to 8; recording actual
+changed files for QA raises it to 9. Versions 7 and 8 logical backups are
+normalized on import; a v0.15.0 reader rejects a dump containing a sign-off event
+instead of silently dropping the attestation, so older binaries must be upgraded
+before reading the new wire format.
 
 Completion reads the latest turn-in event carrying a PR, not the mutable quest
 `pr` field. When `gh` can verify the PR, only `MERGED` passes; an open or closed
@@ -355,6 +374,16 @@ apply when both quests have no predicted files and are labeled as heuristics.
 `next` warns about a selected soft same-area conflict but never refuses it.
 Completed, dropped, turned-in, and expired accepted quests are not dispatch
 entries.
+
+### QA sign-off queue
+
+`quest qa` is a read-only plan for testing completed work. It includes only
+completed quests whose latest completion has not been followed by a sign-off.
+The grouping order is deliberate: connected chain work forms one session first,
+then shared predicted or recorded actual files, then same-area work. The output
+states the reason for every group and prints the exact `quest signoff` command
+needed to attest all IDs in that session. A queue with no unsigned work says
+`Nothing awaiting sign-off.` and still prints the rejection path.
 
 ### Viewing
 
@@ -500,10 +529,10 @@ identity error is returned.
 1. Always `--format json`; always surface `warnings` to the user.
 2. `quest next --claim` before starting work; never edit files for an
    unaccepted quest.
-3. New `quest turnin` calls use `--pr`, `--summary`, and evidence when the fix
-   merges — evidence paths are files the agent already produced (screenshots,
-   test output). The summary remains optional for older clients and event
-   replays.
+3. New `quest turnin` calls use `--pr`, `--summary`, `--actual-files`, and
+   evidence when the fix merges — evidence paths are files the agent already
+   produced (screenshots, test output). The summary remains optional for older
+   clients and event replays.
 4. Claim conflicts (exit 1) are normal flow: report and take the next quest —
    never retry the same claim.
 5. The `accept` JSON data includes `lease_expires_at`; long-running work should

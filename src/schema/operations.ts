@@ -6,9 +6,9 @@ import { nonEmptyTextSchema } from "./primitives";
 
 const displayIdSchema = z.int().positive();
 
-// Lease TTLs are part of the Convex wire contract; deploy the matching backend before
-// a client with configurable leases writes to it.
-export const STORE_SCHEMA_VERSION = 8;
+// Turn-in file signals are part of the Convex wire contract; deploy the matching backend before
+// a client that records actual changed files writes to it.
+export const STORE_SCHEMA_VERSION = 9;
 export const MAX_LEASE_TTL_MINUTES = 100_000_000;
 const leaseTtlMinutesSchema = z.int().positive().max(MAX_LEASE_TTL_MINUTES);
 
@@ -17,6 +17,9 @@ const sessionAttributionFields = {
   session_model: nonEmptyTextSchema.optional(),
   session_effort: nonEmptyTextSchema.optional(),
 };
+const actualFilesSchema = z
+  .array(nonEmptyTextSchema)
+  .transform((files) => [...new Set(files)].sort());
 
 export const storeCompatibilityResultSchema = z.discriminatedUnion("outcome", [
   z.strictObject({
@@ -176,6 +179,7 @@ export const questTransitionSchema = z.union([
   z.strictObject({
     action: z.literal("turnin"),
     actor: nonEmptyTextSchema,
+    actual_files: actualFilesSchema.optional(),
     lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     ...sessionAttributionFields,
     session_guild: sessionGuildSchema,

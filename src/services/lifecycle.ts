@@ -28,6 +28,7 @@ const evidenceEventDetailSchema = z.object({
 });
 
 const turnInEventDetailSchema = z.object({
+  actual_files: z.array(z.string().trim().min(1)).optional(),
   pr: z.string().trim().min(1).nullable().optional(),
   session_effort: z.string().optional(),
   session_guild: z.string().nullable().optional(),

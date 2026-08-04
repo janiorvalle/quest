@@ -74,6 +74,14 @@ export {
   createCliPrompter,
 } from "./prompt";
 export {
+  type ExecuteQaCliOptions,
+  executeQaCli,
+  isQaCliRequest,
+  type QaCliRequest,
+  qaDataSchema,
+  registerQaCommand,
+} from "./qa";
+export {
   type ExecuteQueryCliOptions,
   executeQueryCli,
   isQueryCliRequest,

@@ -93,6 +93,7 @@ import {
 } from "./migrate";
 import { executePlanCli, isPlanCliRequest, type PlanCliRequest, registerPlanCommand } from "./plan";
 import type { CliPrompter } from "./prompt";
+import { executeQaCli, isQaCliRequest, type QaCliRequest, registerQaCommand } from "./qa";
 import {
   executeQueryCli,
   isQueryCliRequest,
@@ -135,6 +136,7 @@ export type QuestCliRequest =
   | MembersCliRequest
   | QueryCliRequest
   | PlanCliRequest
+  | QaCliRequest
   | SkillCliRequest
   | UpgradeCliRequest
   | MigrateCliRequest;
@@ -397,6 +399,23 @@ function executePlanRequest(
   });
 }
 
+function executeQaRequest(
+  context: CliRequestExecutionContext,
+  request: QuestCliRequest,
+): Promise<ExitCode> {
+  if (!isQaCliRequest(request)) {
+    throw new Error(`QA dispatcher received ${request.command}`);
+  }
+  return executeQaCli({
+    clock: context.ports.clock,
+    format: context.flags.format,
+    output: context.dependencies.output,
+    ports: requireOperationalPorts(context.ports),
+    request,
+    scope: context.resolved.scope,
+  });
+}
+
 function executeChainRequest(
   context: CliRequestExecutionContext,
   request: QuestCliRequest,
@@ -498,6 +517,7 @@ const CLI_REQUEST_DISPATCH = {
   events: executeQueryRequest,
   brief: executeQueryRequest,
   plan: executePlanRequest,
+  qa: executeQaRequest,
   export: executeExportRequest,
   "backup-run": executeBackupRequest,
   "backup-verify": executeBackupRequest,
@@ -1120,6 +1140,7 @@ export function createQuestCommand(
   registerCompletionCommand(program, capture);
   registerQueryCommands(program, capture);
   registerPlanCommand(program, capture);
+  registerQaCommand(program, capture);
   registerExportCommand(program, capture);
   registerBackupCommands(program, capture);
   registerMembersCommands(program, capture);
