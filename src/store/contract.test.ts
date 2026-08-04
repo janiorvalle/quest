@@ -33,6 +33,8 @@ describe("QuestStore contract suite", () => {
     expect(failures.map((failure) => failure.scenario)).toEqual([
       "claim races have exactly one winner",
       "illegal transitions change neither state nor events",
+      "sign-off requires completion and appends repeat attestations",
+      "sign-off batches commit attestations and evidence atomically",
       "chain invariants are enforced inside the write boundary",
       "backfilled adds enforce kind and verdict validity",
       "events and state changes commit together",
@@ -117,6 +119,10 @@ const nonconformingFactory: QuestStoreFactory = async (): Promise<QuestStoreHarn
       return findQuest(id);
     },
 
+    async signoffBatch(input): ReturnType<QuestStore["signoffBatch"]> {
+      return { quests: input.ids.map(findQuest), evidence: [] };
+    },
+
     async addChainLink(input): ReturnType<QuestStore["addChainLink"]> {
       chains.push(input.link);
       return { outcome: "added", link: input.link };
@@ -152,6 +158,10 @@ const nonconformingFactory: QuestStoreFactory = async (): Promise<QuestStoreHarn
 
     async getQuest(id: number): Promise<Quest | null> {
       return quests.find((quest) => quest.id === id) ?? null;
+    },
+
+    async readQuestDetail(id): ReturnType<QuestStore["readQuestDetail"]> {
+      return Promise.reject(new Error(`detail unavailable for quest ${id}`));
     },
 
     async stats(): Promise<QuestStats> {

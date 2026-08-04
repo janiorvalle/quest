@@ -136,38 +136,59 @@ function useQuestDetail(runtime: QuestLogRuntime, current: QuestLogItem | undefi
   const [detail, setDetail] = useState<Awaited<ReturnType<QuestLogRuntime["loadDetail"]>> | null>(
     null,
   );
+  const [detailStale, setDetailStale] = useState(false);
   const detailKey =
     current === undefined ? "" : `${current.repo}\u0000${current.id}\u0000${current.updatedAt}`;
 
   useEffect(() => {
     if (detailKey === "") {
       setDetail(null);
+      setDetailStale(false);
       return;
     }
     setDetail(null);
+    setDetailStale(false);
     const separator = detailKey.indexOf("\u0000");
     const secondSeparator = detailKey.indexOf("\u0000", separator + 1);
     const repository = detailKey.slice(0, separator);
     const id = Number(detailKey.slice(separator + 1, secondSeparator));
     let cancelled = false;
-    runtime.loadDetail(id, repository).then(
-      (value) => {
-        if (!cancelled) {
-          setDetail(value);
-        }
-      },
-      () => {
-        if (!cancelled) {
-          setDetail(null);
-        }
-      },
-    );
+    let inFlight = false;
+    let hasLoaded = false;
+    const refresh = (): void => {
+      if (cancelled || inFlight) {
+        return;
+      }
+      inFlight = true;
+      runtime
+        .loadDetail(id, repository)
+        .then(
+          (value) => {
+            if (!cancelled) {
+              hasLoaded = true;
+              setDetailStale(false);
+              setDetail(value);
+            }
+          },
+          () => {
+            if (!cancelled && hasLoaded) {
+              setDetailStale(true);
+            }
+          },
+        )
+        .finally(() => {
+          inFlight = false;
+        });
+    };
+    refresh();
+    const refreshTimer = setInterval(refresh, Math.max(1_000, runtime.pollIntervalMs));
     return () => {
       cancelled = true;
+      clearInterval(refreshTimer);
     };
-  }, [detailKey, runtime]);
+  }, [detailKey, runtime, runtime.pollIntervalMs]);
 
-  return detail;
+  return { detail, detailStale };
 }
 
 function ReadOnlyLayout({
@@ -360,7 +381,8 @@ export function QuestLogApp({
   const current = selectedQuest(visibleItems, activeSelectedIndex);
   const currentPr = current?.pr;
   const currentQuestId = current?.id;
-  const detail = useQuestDetail(runtime, current);
+  const detailState = useQuestDetail(runtime, current);
+  const detail = detailState.detail;
   const geometry = mainPaneGeometry(dimensions.width, dimensions.height);
   const detailMetrics = useMemo(
     () =>
@@ -527,7 +549,10 @@ export function QuestLogApp({
         identity={identity}
         activeAreaIndex={activeAreaIndex}
         activeSelectedIndex={activeSelectedIndex}
-        notice={snapshot.error ?? notice}
+        notice={
+          snapshot.error ??
+          (detailState.detailStale ? "Detail refresh failed; showing stale data" : notice)
+        }
         policyItems={policyItems}
         planAvailable={planAvailable}
         runtime={runtime}

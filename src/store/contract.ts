@@ -53,6 +53,11 @@ const identityActor: ActorResolver = (requestedActor) => requestedActor;
 const scenarios = [
   { name: "claim races have exactly one winner", run: verifyClaimRace },
   { name: "illegal transitions change neither state nor events", run: verifyIllegalTransition },
+  { name: "sign-off requires completion and appends repeat attestations", run: verifySignoff },
+  {
+    name: "sign-off batches commit attestations and evidence atomically",
+    run: verifySignoffBatchAtomicity,
+  },
   { name: "chain invariants are enforced inside the write boundary", run: verifyChainInvariants },
   { name: "backfilled adds enforce kind and verdict validity", run: verifyBackfilledAdds },
   { name: "events and state changes commit together", run: verifyEventStateAtomicity },
@@ -212,6 +217,168 @@ async function verifyIllegalTransition(factory: QuestStoreFactory): Promise<void
     );
     expect(await store.getQuest(quest.id)).toEqual(questBefore);
     expect(await store.events(quest.id)).toEqual(eventsBefore);
+  });
+}
+
+async function verifySignoff(factory: QuestStoreFactory): Promise<void> {
+  await withStore(factory, async (store, resolveActor) => {
+    const quest = await store.addQuest(taskInput("sign-off"));
+    let rejection: unknown;
+    try {
+      await store.transition(quest.id, {
+        action: "signoff",
+        actor: resolveActor("qa/reviewer"),
+        notes: null,
+        session_guild: null,
+      });
+    } catch (error: unknown) {
+      rejection = error;
+    }
+    requireContract(
+      rejection instanceof Error &&
+        rejection.message.includes(
+          `[SIGNOFF_NOT_COMPLETE] quest ${quest.id} is ready; sign-off applies only after review, merge, and completion`,
+        ),
+      "sign-off on a non-complete quest must reject with its stable next-step message",
+    );
+    await requireRejection(
+      store.addEvidence({
+        quest_id: quest.id,
+        sha256: "e".repeat(64),
+        filename: "premature-signoff.txt",
+        kind: "doc",
+        stage: "signoff",
+        added_by: resolveActor("qa/reviewer"),
+      }),
+      "sign-off evidence must reject before the quest is complete",
+    );
+    expect(await store.events(quest.id)).toHaveLength(1);
+
+    const owner = resolveActor(actor);
+    await store.acceptQuest({ id: quest.id, owner });
+    await store.transition(quest.id, {
+      action: "turnin",
+      actor: owner,
+      pr: null,
+      session_guild: null,
+    });
+    await store.transition(quest.id, {
+      action: "complete",
+      actor: owner,
+      session_guild: null,
+    });
+
+    const first = await store.transition(quest.id, {
+      action: "signoff",
+      actor: resolveActor("qa/reviewer"),
+      notes: "first pass",
+      session_guild: null,
+    });
+    requireContract(first.status === "complete", "sign-off must leave the quest complete");
+    const second = await store.transition(quest.id, {
+      action: "signoff",
+      actor: resolveActor("qa/reviewer"),
+      notes: "repeat pass",
+      session_guild: null,
+    });
+    requireContract(second.status === "complete", "repeat sign-off must leave the quest complete");
+    const signoffEvidence = await store.addEvidence({
+      quest_id: quest.id,
+      sha256: "d".repeat(64),
+      filename: "signoff.txt",
+      kind: "doc",
+      stage: "signoff",
+      added_by: resolveActor("qa/reviewer"),
+    });
+    expect(signoffEvidence).toMatchObject({
+      added_by: resolveActor("qa/reviewer"),
+      stage: "signoff",
+    });
+    const signoffs = (await store.events(quest.id)).filter((event) => event.action === "signoff");
+    requireContract(signoffs.length === 2, "repeat sign-off must append another event");
+    expect(signoffs.map(({ actor }) => actor)).toEqual([
+      resolveActor("qa/reviewer"),
+      resolveActor("qa/reviewer"),
+    ]);
+    expect(signoffs.map((event) => event.detail)).toEqual([
+      expect.objectContaining({ action: "signoff", notes: "first pass" }),
+      expect.objectContaining({ action: "signoff", notes: "repeat pass" }),
+    ]);
+  });
+}
+
+async function verifySignoffBatchAtomicity(factory: QuestStoreFactory): Promise<void> {
+  await withHarness(factory, async (harness) => {
+    const { store } = harness;
+    const resolveActor = harness.resolveActor ?? identityActor;
+    const owner = resolveActor(actor);
+    const reviewer = resolveActor("qa/reviewer");
+    const completedQuests: Quest[] = [];
+
+    for (const title of ["batch sign-off one", "batch sign-off two"]) {
+      const quest = await store.addQuest(taskInput(title));
+      await store.acceptQuest({ id: quest.id, owner });
+      await store.transition(quest.id, {
+        action: "turnin",
+        actor: owner,
+        pr: null,
+        session_guild: null,
+      });
+      completedQuests.push(
+        await store.transition(quest.id, {
+          action: "complete",
+          actor: owner,
+          session_guild: null,
+        }),
+      );
+    }
+
+    const input = {
+      ids: completedQuests.map(({ id }) => id),
+      transition: {
+        action: "signoff" as const,
+        actor: reviewer,
+        notes: "batch contract pass",
+        session_guild: null,
+      },
+      evidence: completedQuests.map(({ id }, index) => ({
+        quest_id: id,
+        sha256: String(index + 1).repeat(64),
+        filename: `batch-${index + 1}.txt`,
+        kind: "doc" as const,
+        stage: "signoff" as const,
+        added_by: reviewer,
+        session_guild: null,
+      })),
+    };
+    const before = snapshotDump(await store.exportAll());
+    await harness.failNextEventAppend();
+    await requireRejection(
+      store.signoffBatch(input),
+      "an injected batch sign-off event failure must roll back every quest and evidence row",
+    );
+    expect(await store.exportAll()).toEqual(before);
+
+    const result = await store.signoffBatch(input);
+    requireContract(
+      result.quests.map(({ id }) => id).join(",") === input.ids.join(","),
+      "a successful sign-off batch must return every requested quest",
+    );
+    requireContract(
+      result.evidence.length === input.evidence.length,
+      "batch evidence must be returned",
+    );
+    for (const quest of completedQuests) {
+      const signoffs = (await store.events(quest.id)).filter((event) => event.action === "signoff");
+      requireContract(
+        signoffs.length === 1,
+        "a successful batch must append one sign-off per quest",
+      );
+      requireContract(
+        (await store.getQuest(quest.id))?.status === "complete",
+        "a successful batch must leave each quest complete",
+      );
+    }
   });
 }
 

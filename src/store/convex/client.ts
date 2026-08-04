@@ -31,9 +31,16 @@ import type {
   QuestStats,
   QuestTransition,
   Sha256,
+  SignoffBatchInput,
+  SignoffBatchResult,
   TouchQuestInput,
 } from "../../schema";
-import type { AcceptQuestAndExportResult, Clock, FederatedReadSnapshot } from "../port";
+import type {
+  AcceptQuestAndExportResult,
+  Clock,
+  FederatedReadSnapshot,
+  QuestDetailSnapshot,
+} from "../port";
 
 type TestableMutation<T> = {
   readonly input: T;
@@ -86,6 +93,15 @@ export const convexApi = {
     },
     Quest
   >("quest:transition"),
+  signoffBatch: makeFunctionReference<
+    "mutation",
+    {
+      readonly auth_token?: string;
+      readonly input: SignoffBatchInput;
+      readonly test_failure?: boolean;
+    },
+    SignoffBatchResult
+  >("quest:signoffBatch"),
   addChainLink: makeFunctionReference<
     "mutation",
     AuthenticatedMutation<ChainMutation>,
@@ -109,6 +125,11 @@ export const convexApi = {
     { readonly auth_token?: string; readonly id: number; readonly lease_cutoff: string },
     Quest | null
   >("quest:getQuest"),
+  questDetail: makeFunctionReference<
+    "query",
+    { readonly auth_token?: string; readonly id: number },
+    QuestDetailSnapshot
+  >("quest:questDetail"),
   stats: makeFunctionReference<
     "query",
     { readonly auth_token?: string; readonly scope: QuestScope; readonly lease_cutoff: string },

@@ -52,6 +52,7 @@ const evidenceFields = {
     v.literal("investigation"),
     v.literal("fix"),
     v.literal("verify"),
+    v.literal("signoff"),
   ),
   added_by: v.string(),
   created_at: v.string(),
@@ -93,6 +94,7 @@ const eventFields = {
     v.literal("update"),
     v.literal("chain"),
     v.literal("touch"),
+    v.literal("signoff"),
   ),
   detail: v.any(),
 };
@@ -103,7 +105,9 @@ export default defineSchema({
     .index("by_repo", ["repo"])
     .index("by_status", ["status"]),
   evidence: defineTable(evidenceFields).index("by_quest_id", ["quest_id"]),
-  chains: defineTable(chainFields).index("by_quest_id", ["quest_id"]),
+  chains: defineTable(chainFields)
+    .index("by_quest_id", ["quest_id"])
+    .index("by_target_id", ["target_id"]),
   members: defineTable(memberFields).index("by_name", ["name"]).index("by_status", ["status"]),
   events: defineTable(eventFields).index("by_quest_id", ["quest_id"]),
   blobs: defineTable({

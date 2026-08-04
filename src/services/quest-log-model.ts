@@ -8,7 +8,7 @@ import {
 } from "../schema";
 import { type Clock, FederatedReadError, type QuestStore, type WatchSubscription } from "../store";
 import { getQuestPlanSnapshot, type QuestPlanSnapshot } from "./plan";
-import { showQuestDetail } from "./query";
+import { showQuestDetailFromSnapshot } from "./query";
 
 export type QuestLogScope = "all" | "current";
 
@@ -745,11 +745,9 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
         : (options.store.forRepository?.(repository) ?? options.store);
     const selectedScope: QuestScope =
       repository === undefined ? { repo: null } : { repo: repository };
-    const [detail, events] = await Promise.all([
-      showQuestDetail(store, selectedScope, id),
-      store.events(id),
-    ]);
-    const orderedEvents = [...events].sort((left, right) => right.id - left.id);
+    const snapshot = await store.readQuestDetail(id);
+    const detail = showQuestDetailFromSnapshot(snapshot, selectedScope, id);
+    const orderedEvents = [...snapshot.events].sort((left, right) => right.id - left.id);
     return {
       duplicateOf: detail.chain_position.duplicate_of.map(toChainRef),
       events: orderedEvents.map((event) => ({

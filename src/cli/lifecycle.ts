@@ -34,6 +34,7 @@ import {
   addLifecycleQuest,
   getNextQuest,
   LifecycleCommandError,
+  type LifecycleSignoffBatchResult,
   type LifecycleTransitionOptions,
   type NextLaneConflict,
   type NextQuestResult,
@@ -41,6 +42,7 @@ import {
   type PullRequestMergeState,
   type QuestBrief,
   type SessionAttribution,
+  signoffLifecycleQuests,
   touchLifecycleQuest,
   transitionLifecycleQuest,
 } from "../services";
@@ -131,6 +133,13 @@ const mutationDataSchema = z.strictObject({
   changed: z.boolean(),
   evidence: z.array(evidenceSchema),
   quest: questSchema,
+});
+
+const signoffItemDataSchema = mutationDataSchema.extend({ warnings: z.array(z.string()) });
+const signoffDataSchema = z.strictObject({
+  changed: z.boolean(),
+  evidence: z.array(evidenceSchema),
+  quests: z.array(signoffItemDataSchema),
 });
 
 const acceptMutationDataSchema = mutationDataSchema.extend({
@@ -254,6 +263,13 @@ interface UpdateCliRequest {
   readonly title?: string | undefined;
 }
 
+interface SignoffCliRequest {
+  readonly command: "signoff";
+  readonly evidence: readonly string[];
+  readonly ids: readonly number[];
+  readonly notes?: string | undefined;
+}
+
 export type LifecycleCliRequest =
   | AddCliRequest
   | NextCliRequest
@@ -265,7 +281,8 @@ export type LifecycleCliRequest =
   | CompleteCliRequest
   | CancelCliRequest
   | ReopenCliRequest
-  | UpdateCliRequest;
+  | UpdateCliRequest
+  | SignoffCliRequest;
 
 export interface LifecycleRequestCapture {
   set(request: LifecycleCliRequest): void;
@@ -639,6 +656,21 @@ export function registerLifecycleCommands(
         title: optionalString(this, "title"),
       });
     });
+
+  program
+    .command("signoff")
+    .description("record QA sign-off on completed quests")
+    .argument("<ids...>")
+    .option("--notes <text>", "record the QA notes")
+    .option("--evidence <path...>", "attach sign-off evidence", appendOption, [])
+    .action(function (this: Command, ids: readonly string[]) {
+      capture.set({
+        command: "signoff",
+        evidence: stringList(this, "evidence"),
+        ids: ids.map(idArgument),
+        notes: optionalText(this, "notes"),
+      });
+    });
 }
 
 function requireIdentity(identity: string | undefined): string {
@@ -929,7 +961,7 @@ async function writeMutationResult(
 function attachmentRequest(
   actor: string,
   paths: readonly string[],
-  stage: "report" | "investigation" | "fix" | "verify",
+  stage: "report" | "investigation" | "fix" | "verify" | "signoff",
   workingDirectory: string,
   sessionGuild: string | null,
 ) {
@@ -1229,6 +1261,70 @@ async function executeTurnIn(
   return writeMutationResult(options, request.command, result, `quest ${request.id} turned in`);
 }
 
+async function writeSignoffResult(
+  options: ExecuteLifecycleCliOptions,
+  result: LifecycleSignoffBatchResult,
+): Promise<ExitCode> {
+  const warnings = [...options.identityWarnings, ...result.warnings];
+  if (options.format === "json") {
+    const report = buildQuestReport(signoffDataSchema, {
+      command: "signoff",
+      generated_at: await options.ports.clock.now(),
+      filters: { repo: options.scope.repo },
+      warnings,
+      data: {
+        changed: result.changed,
+        evidence: [...result.evidence],
+        quests: result.quests.map((quest) => ({
+          changed: quest.changed,
+          evidence: [...quest.evidence],
+          quest: quest.quest,
+          warnings: [...quest.warnings],
+        })),
+      },
+    });
+    options.output.write(formatQuestReport(report));
+    return EXIT_SUCCESS;
+  }
+
+  writeWarnings(options.output, warnings);
+  for (const quest of result.quests) {
+    options.output.write(`quest ${quest.quest.id} signed off\n`);
+  }
+  return EXIT_SUCCESS;
+}
+
+async function executeSignoff(
+  options: ExecuteLifecycleCliOptions,
+  sessionAttribution: SessionAttribution,
+): Promise<ExitCode> {
+  if (options.request.command !== "signoff") {
+    throw new Error("executeSignoff received a non-signoff request");
+  }
+  const actor = requireIdentity(options.identity);
+  const sessionGuild = options.config.guild ?? null;
+  const result = await signoffLifecycleQuests(
+    options.ports,
+    options.scope,
+    options.request.ids,
+    {
+      action: "signoff",
+      actor,
+      ...sessionAttribution,
+      session_guild: sessionGuild,
+      notes: options.request.notes ?? null,
+    },
+    attachmentRequest(
+      actor,
+      options.request.evidence,
+      "signoff",
+      options.workingDirectory,
+      sessionGuild,
+    ),
+  );
+  return writeSignoffResult(options, result);
+}
+
 export async function executeLifecycleCli(options: ExecuteLifecycleCliOptions): Promise<ExitCode> {
   const { request } = options;
   if (request.command === "add") {
@@ -1333,6 +1429,9 @@ export async function executeLifecycleCli(options: ExecuteLifecycleCliOptions): 
     }
     case "turnin": {
       return executeTurnIn(options, sessionAttribution);
+    }
+    case "signoff": {
+      return executeSignoff(options, sessionAttribution);
     }
     case "complete": {
       const result = await transitionLifecycleQuest(
@@ -1451,6 +1550,7 @@ export function isLifecycleCliRequest(
     case "cancel":
     case "reopen":
     case "update":
+    case "signoff":
       return true;
     default:
       return false;

@@ -17,6 +17,7 @@ import {
   isValidBackfill,
   leaseExpiry,
   materializeExpiredLease,
+  signoffNotCompleteMessage,
   statusAfterClaimRelease,
   statusForRetestVerdict,
   statusForVerdict,
@@ -36,6 +37,7 @@ import {
   eventSchema,
   evidenceSchema,
   type LaneConflictReference,
+  type NewEvidence,
   newEvidenceSchema,
   newQuestSchema,
   type Quest,
@@ -50,7 +52,11 @@ import {
   questScopeSchema,
   questStatsSchema,
   questTransitionSchema,
+  type SignoffBatchInput,
+  type SignoffBatchResult,
   STORE_SCHEMA_VERSION,
+  signoffBatchInputSchema,
+  signoffBatchResultSchema,
   stableSerialize,
   touchQuestInputSchema,
 } from "../src/schema";
@@ -198,6 +204,14 @@ async function readEvidence(ctx: QueryContext): Promise<Evidence[]> {
   return documents.map(parseEvidenceDocument).sort((left, right) => left.id - right.id);
 }
 
+async function readQuestEvidence(ctx: QueryContext, questId: number): Promise<Evidence[]> {
+  const documents = await ctx.db
+    .query("evidence")
+    .withIndex("by_quest_id", (query) => query.eq("quest_id", questId))
+    .collect();
+  return documents.map(parseEvidenceDocument).sort((left, right) => left.id - right.id);
+}
+
 async function readChains(ctx: QueryContext): Promise<Chain[]> {
   const documents = await ctx.db.query("chains").collect();
   return documents
@@ -221,6 +235,31 @@ async function readQuestEvents(ctx: QueryContext, questId: number): Promise<Even
     .withIndex("by_quest_id", (query) => query.eq("quest_id", questId))
     .collect();
   return documents.map(parseEventDocument).sort((left, right) => left.id - right.id);
+}
+
+async function readQuestChains(ctx: QueryContext, questId: number): Promise<Chain[]> {
+  const [outgoing, incoming] = await Promise.all([
+    ctx.db
+      .query("chains")
+      .withIndex("by_quest_id", (query) => query.eq("quest_id", questId))
+      .collect(),
+    ctx.db
+      .query("chains")
+      .withIndex("by_target_id", (query) => query.eq("target_id", questId))
+      .collect(),
+  ]);
+  const unique = new Map(
+    [...outgoing, ...incoming].map((document) => {
+      const chain = parseChainDocument(document);
+      return [`${chain.quest_id}:${chain.target_id}:${chain.type}`, chain] as const;
+    }),
+  );
+  return [...unique.values()].sort(
+    (left, right) =>
+      left.quest_id - right.quest_id ||
+      left.target_id - right.target_id ||
+      left.type.localeCompare(right.type),
+  );
 }
 
 function findQuestInSnapshot(quests: readonly Quest[], id: number): Quest | undefined {
@@ -445,6 +484,11 @@ function applyTransition(current: Quest, transition: QuestTransition, timestamp:
         lease_expires_at: null,
         updated_at: timestamp,
       });
+    case "signoff":
+      if (current.status !== "complete") {
+        throw new Error(signoffNotCompleteMessage(current.id, current.status));
+      }
+      return current;
     case "cancel":
       return applyCancel(current, transition, timestamp);
     case "reopen":
@@ -1368,9 +1412,13 @@ export const transition = mutationGeneric({
     await requireRepositoryNotFenced(ctx, current.repo);
     const timestamp = now();
     const events = await readQuestEvents(ctx, current.id);
-    requireLeaseOwner(current, events, transitionInput.actor, timestamp);
+    if (transitionInput.action !== "signoff") {
+      requireLeaseOwner(current, events, transitionInput.actor, timestamp);
+    }
     const updated = applyTransition(current, transitionInput, timestamp);
-    await ctx.db.replace(record._id, updated);
+    if (transitionInput.action !== "signoff") {
+      await ctx.db.replace(record._id, updated);
+    }
 
     if (transitionInput.action === "verdict" && transitionInput.duplicate_of !== null) {
       const duplicateTarget = await requireQuestRecord(ctx, transitionInput.duplicate_of);
@@ -1391,6 +1439,211 @@ export const transition = mutationGeneric({
       args.test_failure,
     );
     return updated;
+  },
+});
+
+type SignoffTransition = Extract<QuestTransition, { action: "signoff" }>;
+
+type PreparedSignoffBatch = {
+  readonly evidenceByQuest: Map<number, NewEvidence[]>;
+  readonly ids: readonly number[];
+  readonly questsById: Map<number, Quest>;
+  readonly transition: SignoffTransition;
+};
+
+async function loadSignoffBatchQuests(
+  ctx: MutationContext,
+  ids: readonly number[],
+  transition: SignoffTransition,
+): Promise<Map<number, Quest>> {
+  const records = await Promise.all(ids.map((id) => requireQuestRecord(ctx, id)));
+  const questsById = new Map(
+    records.map((record) => {
+      const quest = parseQuestDocument(record);
+      return [quest.id, quest] as const;
+    }),
+  );
+  for (const quest of questsById.values()) {
+    await requireRepositoryNotFenced(ctx, quest.repo);
+    applyTransition(quest, transition, now());
+  }
+  return questsById;
+}
+
+function groupSignoffEvidence(
+  input: SignoffBatchInput,
+  actor: string,
+  questsById: ReadonlyMap<number, Quest>,
+): Map<number, NewEvidence[]> {
+  const evidenceByQuest = new Map<number, NewEvidence[]>();
+  for (const parsedEvidence of input.evidence) {
+    if (parsedEvidence.stage !== "signoff") {
+      throw new Error("sign-off batches accept only signoff-stage evidence");
+    }
+    const evidence = newEvidenceSchema.parse({ ...parsedEvidence, added_by: actor });
+    const quest = questsById.get(evidence.quest_id);
+    if (quest === undefined) {
+      throw new Error(
+        `sign-off evidence references quest ${evidence.quest_id} outside the requested batch`,
+      );
+    }
+    if (quest.status !== "complete") {
+      throw new Error(signoffNotCompleteMessage(quest.id, quest.status));
+    }
+    const entries = evidenceByQuest.get(evidence.quest_id) ?? [];
+    entries.push(evidence);
+    evidenceByQuest.set(evidence.quest_id, entries);
+  }
+  return evidenceByQuest;
+}
+
+function existingSignoffEvidence(
+  candidates: readonly Evidence[],
+  input: NewEvidence,
+): Evidence | undefined {
+  return candidates.find(
+    (candidate) =>
+      candidate.quest_id === input.quest_id &&
+      candidate.sha256 === input.sha256 &&
+      candidate.filename === input.filename &&
+      candidate.kind === input.kind &&
+      candidate.stage === input.stage &&
+      candidate.added_by === input.added_by,
+  );
+}
+
+async function persistSignoffEvidence(
+  ctx: MutationContext,
+  questId: number,
+  input: NewEvidence,
+  existingEvidence: Evidence[],
+  timestamp: string,
+  testFailure: boolean | undefined,
+): Promise<Evidence> {
+  const existing = existingSignoffEvidence(existingEvidence, input);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const evidenceId = await nextDocumentId(ctx, "evidence", "evidence");
+  const created = evidenceSchema.parse({
+    id: evidenceId,
+    quest_id: input.quest_id,
+    sha256: input.sha256,
+    filename: input.filename,
+    kind: input.kind,
+    stage: input.stage,
+    added_by: input.added_by,
+    created_at: timestamp,
+  });
+  await ctx.db.insert("evidence", created);
+  const { lease_ttl_minutes: _leaseTtlMinutes, ...persistedInput } = input;
+  await appendEvent(
+    ctx,
+    questId,
+    timestamp,
+    input.added_by,
+    "update",
+    {
+      evidence_id: evidenceId,
+      ...persistedInput,
+      session_guild: input.session_guild ?? null,
+    },
+    testFailure,
+  );
+  existingEvidence.push(created);
+  return created;
+}
+
+async function persistSignoffQuest(
+  ctx: MutationContext,
+  quest: Quest,
+  transition: SignoffTransition,
+  evidenceInputs: readonly NewEvidence[],
+  existingEvidence: Evidence[],
+  timestamp: string,
+  testFailure: boolean | undefined,
+): Promise<Evidence[]> {
+  const { lease_ttl_minutes: _leaseTtlMinutes, ...persistedTransition } = transition;
+  await appendEvent(
+    ctx,
+    quest.id,
+    timestamp,
+    transition.actor,
+    "signoff",
+    { ...persistedTransition, session_guild: transition.session_guild ?? null },
+    testFailure,
+  );
+  const evidence: Evidence[] = [];
+  for (const input of evidenceInputs) {
+    evidence.push(
+      await persistSignoffEvidence(ctx, quest.id, input, existingEvidence, timestamp, testFailure),
+    );
+  }
+  return evidence;
+}
+
+async function prepareSignoffBatch(
+  ctx: MutationContext,
+  input: SignoffBatchInput,
+  actor: string,
+): Promise<PreparedSignoffBatch> {
+  const ids = [...new Set(input.ids)];
+  const transition = questTransitionSchema.parse({ ...input.transition, actor });
+  if (transition.action !== "signoff") {
+    throw new Error("sign-off batch transition must use the signoff action");
+  }
+  const questsById = await loadSignoffBatchQuests(ctx, ids, transition);
+  return {
+    evidenceByQuest: groupSignoffEvidence(input, actor, questsById),
+    ids,
+    questsById,
+    transition,
+  };
+}
+
+async function persistSignoffBatch(
+  ctx: MutationContext,
+  prepared: PreparedSignoffBatch,
+  testFailure: boolean | undefined,
+): Promise<SignoffBatchResult> {
+  const timestamp = now();
+  const existingEvidenceByQuest = new Map<number, Evidence[]>();
+  for (const [id, inputs] of prepared.evidenceByQuest) {
+    if (inputs.length > 0) {
+      existingEvidenceByQuest.set(id, await readQuestEvidence(ctx, id));
+    }
+  }
+  const evidence: Evidence[] = [];
+  const quests: Quest[] = [];
+  for (const id of prepared.ids) {
+    const quest = prepared.questsById.get(id);
+    if (quest === undefined) {
+      throw new Error(`quest ${id} does not exist`);
+    }
+    evidence.push(
+      ...(await persistSignoffQuest(
+        ctx,
+        quest,
+        prepared.transition,
+        prepared.evidenceByQuest.get(id) ?? [],
+        existingEvidenceByQuest.get(id) ?? [],
+        timestamp,
+        testFailure,
+      )),
+    );
+    quests.push(quest);
+  }
+  return signoffBatchResultSchema.parse({ quests, evidence });
+}
+
+export const signoffBatch = mutationGeneric({
+  args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
+  handler: async (ctx, args) => {
+    await requireNoRestoreLease(ctx);
+    const actor = await requireMemberActor(ctx, args.auth_token);
+    const parsed = signoffBatchInputSchema.parse(args.input);
+    const prepared = await prepareSignoffBatch(ctx, parsed, actor);
+    return persistSignoffBatch(ctx, prepared, args.test_failure);
   },
 });
 
@@ -1501,7 +1754,12 @@ export const addEvidence = mutationGeneric({
     await requireRepositoryNotFenced(ctx, current.repo);
     const timestamp = now();
     const events = await readQuestEvents(ctx, current.id);
-    requireLeaseOwner(current, events, input.added_by, timestamp);
+    if (input.stage === "signoff" && current.status !== "complete") {
+      throw new Error(signoffNotCompleteMessage(current.id, current.status));
+    }
+    if (input.stage !== "signoff") {
+      requireLeaseOwner(current, events, input.added_by, timestamp);
+    }
     if (current.status === "accepted") {
       await ctx.db.replace(record._id, renewLease(current, timestamp, input.lease_ttl_minutes));
     }
@@ -1579,6 +1837,39 @@ export const getQuest = queryGeneric({
     return record === null
       ? null
       : materializeExpiredLease(parseQuestDocument(record), parseLeaseCutoff(args.lease_cutoff));
+  },
+});
+
+export const questDetail = queryGeneric({
+  args: { auth_token: v.optional(v.string()), id: v.number() },
+  handler: async (ctx, args) => {
+    await requireMemberQueryActor(ctx, args.auth_token);
+    const id = questSchema.shape.id.parse(args.id);
+    const quest = materializeExpiredLease(
+      parseQuestDocument(await requireQuestRecord(ctx, id)),
+      now(),
+    );
+    const [evidence, events, chains] = await Promise.all([
+      readQuestEvidence(ctx, id),
+      readQuestEvents(ctx, id),
+      readQuestChains(ctx, id),
+    ]);
+    const relatedIds = [
+      ...new Set(
+        chains
+          .flatMap((link) => [link.quest_id, link.target_id])
+          .filter((relatedId) => relatedId !== id),
+      ),
+    ];
+    const relatedQuests = await Promise.all(
+      relatedIds.map(async (relatedId) =>
+        materializeExpiredLease(
+          parseQuestDocument(await requireQuestRecord(ctx, relatedId)),
+          now(),
+        ),
+      ),
+    );
+    return { chains, events, evidence, quest, related_quests: relatedQuests };
   },
 });
 

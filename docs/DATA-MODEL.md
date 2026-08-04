@@ -51,7 +51,7 @@ Adding a field requires removing one.**
 | `sha256` | text | Content hash; file stored at `<state dir>/evidence/<sha256>` (platform dirs in TECH-STACK.md) — dedup free |
 | `filename` | text | Original name for display |
 | `kind` | text | `screenshot` \| `doc` \| `log` \| `other` |
-| `stage` | text | What it evidences: `report` \| `investigation` \| `fix` \| `verify` |
+| `stage` | text | What it evidences: `report` \| `investigation` \| `fix` \| `verify` \| `signoff` |
 | `added_by` | text | |
 | `created_at` | timestamp | |
 
@@ -75,7 +75,7 @@ Unique on (`quest_id`,`target_id`,`type`). Cycle detection on insert
 | `repo` | text nullable | Federated read provenance; absent in a single-backend event |
 | `at` | timestamp | |
 | `actor` | text | Identity performing the action |
-| `action` | text | `add` \| `accept` \| `touch` \| `abandon` \| `verdict` \| `turnin` \| `complete` \| `cancel` \| `reopen` \| `update` \| `chain` |
+| `action` | text | `add` \| `accept` \| `touch` \| `abandon` \| `verdict` \| `turnin` \| `complete` \| `cancel` \| `reopen` \| `update` \| `chain` \| `signoff` |
 | `detail` | json | Field deltas |
 
 The audit trail; also the feed for any future mirror (Jira or otherwise).
@@ -84,6 +84,11 @@ by repository, quest, time range (inclusive), actor, action, or area.
 Federated event results add the source `repo` so backend-local event IDs remain
 interpretable after a cross-repository merge. A backend-local event cursor is
 therefore only valid with a single-repository scope.
+
+Sign-off is derived state: a quest is signed only while it is `complete` and its
+latest `signoff` event follows its latest `complete` event. Reopening invalidates
+the previous attestation when the quest is completed again; no status or field is
+stored for the derived value.
 
 ## Lifecycle (status enum)
 

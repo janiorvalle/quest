@@ -184,6 +184,13 @@ describe("logical backup export", () => {
     expect(parseQuestBackupExport(JSON.stringify(previous))).toEqual(current);
   });
 
+  test("normalizes v7 logical backups after the sign-off wire schema bump", () => {
+    const current = fixtureDump();
+    const previous = { ...current, schema_version: 7 };
+
+    expect(parseQuestBackupExport(JSON.stringify(previous))).toEqual(current);
+  });
+
   test("rejects a logical backup tagged with an unsupported schema version", () => {
     const serialized = JSON.stringify({
       ...fixtureDump(),

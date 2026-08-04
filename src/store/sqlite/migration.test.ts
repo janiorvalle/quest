@@ -16,6 +16,7 @@ import {
   SQLITE_MIGRATION_SCHEMA_DEFINITIONS,
   SQLITE_PRE_GLOBAL_GUARD_MIGRATION_SCHEMA_DEFINITIONS,
   SQLITE_SCHEMA_VERSION,
+  SQLITE_TRIGGER_DEFINITIONS,
 } from "./ddl";
 import { migrateSqliteStore } from "./migration";
 import { readSqliteSchemaVersion } from "./schema-version";
@@ -71,11 +72,29 @@ const NO_LEASE_QUESTS_TABLE_SQL = `CREATE TABLE quests (
     updated_at TEXT NOT NULL
   ) STRICT`;
 
+const PRE_SIGNOFF_CORE_SCHEMA_DEFINITIONS = SQLITE_CORE_SCHEMA_DEFINITIONS.map((definition) => ({
+  ...definition,
+  sql: definition.type === "table" ? definition.sql.replaceAll(", 'signoff'", "") : definition.sql,
+}));
+
+function preSignoffTableSql(name: "evidence" | "events", tableName: string): string {
+  const definition = PRE_SIGNOFF_CORE_SCHEMA_DEFINITIONS.find(
+    (candidate) => candidate.type === "table" && candidate.name === name,
+  );
+  if (definition === undefined) {
+    throw new Error(`missing ${name} table fixture`);
+  }
+  const createIfMissing = `CREATE TABLE IF NOT EXISTS ${name}`;
+  return definition.sql.includes(createIfMissing)
+    ? definition.sql.replace(createIfMissing, `CREATE TABLE ${tableName}`)
+    : definition.sql.replace(`CREATE TABLE ${name}`, `CREATE TABLE ${tableName}`);
+}
+
 async function createLegacyStore(databasePath: string): Promise<void> {
   const database = new Database(databasePath, { create: true, readwrite: true, strict: true });
   try {
     database.run(LEGACY_QUESTS_TABLE_SQL);
-    for (const definition of SQLITE_CORE_SCHEMA_DEFINITIONS) {
+    for (const definition of PRE_SIGNOFF_CORE_SCHEMA_DEFINITIONS) {
       if (
         definition.target !== "events" &&
         !(definition.type === "table" && definition.target === "quests")
@@ -84,7 +103,7 @@ async function createLegacyStore(databasePath: string): Promise<void> {
       }
     }
     database.run(PRE_CANCEL_EVENTS_TABLE_SQL);
-    for (const definition of SQLITE_CORE_SCHEMA_DEFINITIONS) {
+    for (const definition of PRE_SIGNOFF_CORE_SCHEMA_DEFINITIONS) {
       if (definition.target === "events" && definition.type !== "table") {
         database.run(definition.sql);
       }
@@ -193,6 +212,18 @@ async function createPreCancelStore(databasePath: string): Promise<void> {
       )) {
         database.run(definition.sql);
       }
+      database.run("DROP INDEX IF EXISTS evidence_quest_id");
+      database.run(preSignoffTableSql("evidence", "evidence_v2"));
+      database.run("INSERT INTO evidence_v2 SELECT * FROM evidence ORDER BY id");
+      database.run("DROP TABLE evidence");
+      database.run(preSignoffTableSql("evidence", "evidence"));
+      database.run("INSERT INTO evidence SELECT * FROM evidence_v2 ORDER BY id");
+      database.run("DROP TABLE evidence_v2");
+      for (const definition of PRE_SIGNOFF_CORE_SCHEMA_DEFINITIONS.filter(
+        ({ target, type }) => target === "evidence" && type === "index",
+      )) {
+        database.run(definition.sql);
+      }
       for (const { name } of SQLITE_CORE_SCHEMA_DEFINITIONS.filter(
         ({ target, type }) => target === "events" && type === "trigger",
       )) {
@@ -235,7 +266,72 @@ async function createPreCancelStore(databasePath: string): Promise<void> {
   }
 }
 
-describe("SQLite migrations to v6", () => {
+async function createPreSignoffStore(databasePath: string): Promise<void> {
+  const current = new SqliteStore(databasePath);
+  current.close();
+
+  const database = new Database(databasePath, { readwrite: true, strict: true });
+  try {
+    for (const { name } of SQLITE_TRIGGER_DEFINITIONS) {
+      database.run(`DROP TRIGGER IF EXISTS ${name}`);
+    }
+    for (const definition of SQLITE_CORE_SCHEMA_DEFINITIONS.filter(
+      ({ target, type }) => (target === "evidence" || target === "events") && type === "index",
+    )) {
+      database.run(`DROP INDEX IF EXISTS ${definition.name}`);
+    }
+
+    for (const tableName of ["evidence", "events"] as const) {
+      const definition = SQLITE_CORE_SCHEMA_DEFINITIONS.find(
+        ({ name, type }) => name === tableName && type === "table",
+      );
+      if (definition === undefined) {
+        throw new Error(`missing ${tableName} table fixture`);
+      }
+      const stagingName = `${tableName}_v6`;
+      database.run(
+        definition.sql
+          .replaceAll(", 'signoff'", "")
+          .replace(`CREATE TABLE IF NOT EXISTS ${tableName}`, `CREATE TABLE ${stagingName}`),
+      );
+      database.run(
+        `INSERT INTO ${stagingName} SELECT * FROM ${tableName} ORDER BY ${tableName === "events" ? "id" : "id"}`,
+      );
+      database.run(`DROP TABLE ${tableName}`);
+      database.run(
+        definition.sql
+          .replaceAll(", 'signoff'", "")
+          .replace(`CREATE TABLE IF NOT EXISTS ${tableName}`, `CREATE TABLE ${tableName}`),
+      );
+      database.run(`INSERT INTO ${tableName} SELECT * FROM ${stagingName} ORDER BY id`);
+      database.run(`DROP TABLE ${stagingName}`);
+    }
+
+    for (const definition of SQLITE_CORE_SCHEMA_DEFINITIONS.filter(
+      ({ target, type }) =>
+        (target === "evidence" || target === "events") && type !== "table" && type !== "index",
+    )) {
+      database.run(definition.sql);
+    }
+    for (const definition of SQLITE_CORE_SCHEMA_DEFINITIONS.filter(
+      ({ target, type }) => (target === "evidence" || target === "events") && type === "index",
+    )) {
+      database.run(definition.sql);
+    }
+    for (const definition of SQLITE_MIGRATION_SCHEMA_DEFINITIONS) {
+      database.run(definition.sql);
+    }
+    for (const tableName of ["evidence", "events"] as const) {
+      database.run("DELETE FROM sqlite_sequence WHERE name = ?", [tableName]);
+      database.run("INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)", [tableName, 100]);
+    }
+    database.run("PRAGMA user_version = 6");
+  } finally {
+    database.close();
+  }
+}
+
+describe("SQLite migrations to v7", () => {
   test("backs up and migrates a live v1 store through the compatibility probe", async () => {
     const root = await mkdtemp(join(tmpdir(), "quest-sqlite-migration-"));
     const databasePath = join(root, "state", "quest.db");
@@ -415,9 +511,7 @@ describe("SQLite migrations to v6", () => {
     const backupRoot = join(root, "backups");
 
     try {
-      const current = new SqliteStore(databasePath);
-      current.close();
-
+      await createPreSignoffStore(databasePath);
       const preFence = new Database(databasePath, { readwrite: true, strict: true });
       try {
         for (const definition of [...SQLITE_MIGRATION_SCHEMA_DEFINITIONS].reverse()) {
@@ -452,9 +546,7 @@ describe("SQLite migrations to v6", () => {
     const backupRoot = join(root, "backups");
 
     try {
-      const current = new SqliteStore(databasePath);
-      current.close();
-
+      await createPreSignoffStore(databasePath);
       const preGlobalGuard = new Database(databasePath, { readwrite: true, strict: true });
       try {
         for (const definition of SQLITE_MIGRATION_SCHEMA_DEFINITIONS) {
@@ -494,6 +586,118 @@ describe("SQLite migrations to v6", () => {
       } finally {
         staleWriter.close();
         migrated.close();
+      }
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("adds sign-off enum values when migrating a physical v6 store", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-sqlite-migration-v6-signoff-"));
+    const databasePath = join(root, "quest.db");
+    const backupRoot = join(root, "backups");
+
+    try {
+      await createPreSignoffStore(databasePath);
+      expect(readSqliteSchemaVersion(databasePath)).toBe(6);
+
+      await migrateSqliteStore({ backupRoot, databasePath });
+
+      expect(readSqliteSchemaVersion(databasePath)).toBe(SQLITE_SCHEMA_VERSION);
+      const migrated = new SqliteStore(databasePath);
+      try {
+        const quest = await migrated.addQuest({
+          repo: "quest",
+          area: "qa",
+          kind: "task",
+          title: "Migrated sign-off",
+          description: "",
+          opened_by: "migration-test",
+          guild: null,
+          assignee: "migration-test",
+          status: "complete",
+          verdict: null,
+          verdict_notes: null,
+          priority: 2,
+          pr: null,
+          predicted_files: [],
+          reopen_count: 0,
+          lease_expires_at: null,
+          backfill: true,
+        });
+        await migrated.transition(quest.id, {
+          action: "signoff",
+          actor: "qa/reviewer",
+          notes: "migration passed",
+          session_guild: null,
+        });
+        const evidence = await migrated.addEvidence({
+          quest_id: quest.id,
+          sha256: "c".repeat(64),
+          filename: "migration-qa.txt",
+          kind: "doc",
+          stage: "signoff",
+          added_by: "qa/reviewer",
+        });
+        expect(evidence.stage).toBe("signoff");
+        expect(evidence.id).toBeGreaterThan(100);
+        expect((await migrated.events(quest.id)).at(-1)).toMatchObject({
+          action: "update",
+          id: expect.any(Number),
+        });
+        expect((await migrated.events(quest.id)).at(-1)?.id).toBeGreaterThan(100);
+      } finally {
+        migrated.close();
+      }
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("restores a physical v6 snapshot through sign-off migration", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-sqlite-migration-restore-v6-"));
+    const sourcePath = join(root, "source.db");
+    const destinationPath = join(root, "restored", "quest.db");
+
+    try {
+      await createPreSignoffStore(sourcePath);
+      const restore = await new SqliteBackupDatabase(destinationPath).restoreSnapshot(
+        sourcePath,
+        "v6-signoff-physical-backup",
+      );
+      await restore.commit();
+
+      expect(readSqliteSchemaVersion(destinationPath)).toBe(SQLITE_SCHEMA_VERSION);
+      const restored = new SqliteStore(destinationPath);
+      try {
+        const quest = await restored.addQuest({
+          repo: "quest",
+          area: "qa",
+          kind: "task",
+          title: "Restored sign-off",
+          description: "",
+          opened_by: "migration-test",
+          guild: null,
+          assignee: "migration-test",
+          status: "complete",
+          verdict: null,
+          verdict_notes: null,
+          priority: 2,
+          pr: null,
+          predicted_files: [],
+          reopen_count: 0,
+          lease_expires_at: null,
+          backfill: true,
+        });
+        await restored.transition(quest.id, {
+          action: "signoff",
+          actor: "qa/reviewer",
+          notes: "physical restore passed",
+          session_guild: null,
+        });
+        expect((await restored.events(quest.id)).at(-1)).toMatchObject({ action: "signoff" });
+      } finally {
+        restored.close();
       }
     } finally {
       await rm(root, { force: true, recursive: true });

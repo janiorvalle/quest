@@ -891,6 +891,10 @@ export interface DetailEvidenceRow {
   readonly text: string | null;
 }
 
+function isCompleteEvidenceStage(stage: string): boolean {
+  return stage === "fix" || stage === "verify" || stage === "signoff";
+}
+
 function detailEvidenceRows(
   detail: QuestLogDetail | null,
   width: number,
@@ -921,7 +925,7 @@ function detailEvidenceRows(
     ];
   }
   return detail.evidence.flatMap((entry) => {
-    const complete = entry.stage === "fix" || entry.stage === "verify";
+    const complete = isCompleteEvidenceStage(entry.stage);
     const glyph = complete ? theme.glyphs.evidenceComplete : theme.glyphs.evidencePending;
     const prefix = `${glyph} `;
     const lines = wrapText(
@@ -1399,7 +1403,7 @@ function DetailEvidenceRowView({
   if (evidence === null) {
     return null;
   }
-  const complete = evidence.stage === "fix" || evidence.stage === "verify";
+  const complete = isCompleteEvidenceStage(evidence.stage);
   const glyph = complete ? theme.glyphs.evidenceComplete : theme.glyphs.evidencePending;
   const prefix = `${glyph} `;
   return (

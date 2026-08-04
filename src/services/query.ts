@@ -10,7 +10,7 @@ import type {
   QuestStatus,
 } from "../schema";
 import { questStatsSchema, questStatusSchema, verdictSchema } from "../schema";
-import type { QuestStore } from "../store";
+import type { QuestDetailSnapshot, QuestStore } from "../store";
 
 export interface ListQuestQuery {
   readonly area?: string | undefined;
@@ -100,6 +100,49 @@ function referencesFor(
   return references.sort((left, right) => left.id - right.id);
 }
 
+function buildQuestDetail(
+  quest: Quest,
+  evidence: readonly Evidence[],
+  chains: readonly Chain[],
+  relatedQuests: readonly Quest[],
+): QuestDetail {
+  const questsById = new Map(
+    [quest, ...relatedQuests].map((candidate) => [candidate.id, candidate]),
+  );
+  return {
+    quest,
+    evidence: [...evidence]
+      .filter((item) => item.quest_id === quest.id)
+      .sort((left, right) => left.id - right.id),
+    chain_position: {
+      requires: referencesFor(
+        chains,
+        questsById,
+        (chain) => chain.quest_id === quest.id && chain.type === "requires",
+        (chain) => chain.target_id,
+      ),
+      required_by: referencesFor(
+        chains,
+        questsById,
+        (chain) => chain.target_id === quest.id && chain.type === "requires",
+        (chain) => chain.quest_id,
+      ),
+      duplicate_of: referencesFor(
+        chains,
+        questsById,
+        (chain) => chain.quest_id === quest.id && chain.type === "duplicate-of",
+        (chain) => chain.target_id,
+      ),
+      duplicates: referencesFor(
+        chains,
+        questsById,
+        (chain) => chain.target_id === quest.id && chain.type === "duplicate-of",
+        (chain) => chain.quest_id,
+      ),
+    },
+  };
+}
+
 export function showQuestDetailFromDump(
   dump: QuestDump,
   scope: QuestScope,
@@ -117,40 +160,28 @@ export function showQuestDetailFromDump(
       `quest ${id} exists in multiple backends; display IDs are per-store; rerun with --repo <name> to select one backend`,
     );
   }
-
-  const questsById = new Map(dump.quests.map((candidate) => [candidate.id, candidate]));
-  return {
+  return buildQuestDetail(
     quest,
-    evidence: dump.evidence
-      .filter((item) => item.quest_id === quest.id)
-      .sort((left, right) => left.id - right.id),
-    chain_position: {
-      requires: referencesFor(
-        dump.chains,
-        questsById,
-        (chain) => chain.quest_id === quest.id && chain.type === "requires",
-        (chain) => chain.target_id,
-      ),
-      required_by: referencesFor(
-        dump.chains,
-        questsById,
-        (chain) => chain.target_id === quest.id && chain.type === "requires",
-        (chain) => chain.quest_id,
-      ),
-      duplicate_of: referencesFor(
-        dump.chains,
-        questsById,
-        (chain) => chain.quest_id === quest.id && chain.type === "duplicate-of",
-        (chain) => chain.target_id,
-      ),
-      duplicates: referencesFor(
-        dump.chains,
-        questsById,
-        (chain) => chain.target_id === quest.id && chain.type === "duplicate-of",
-        (chain) => chain.quest_id,
-      ),
-    },
-  };
+    dump.evidence,
+    dump.chains,
+    dump.quests.filter((candidate) => candidate.id !== quest.id),
+  );
+}
+
+export function showQuestDetailFromSnapshot(
+  snapshot: QuestDetailSnapshot,
+  scope: QuestScope,
+  id: number,
+): QuestDetail {
+  if (snapshot.quest.id !== id || (scope.repo !== null && snapshot.quest.repo !== scope.repo)) {
+    throw new QueryCommandError(`quest ${id} does not exist in the selected scope`);
+  }
+  return buildQuestDetail(
+    snapshot.quest,
+    snapshot.evidence,
+    snapshot.chains,
+    snapshot.related_quests,
+  );
 }
 
 export async function showQuestDetail(

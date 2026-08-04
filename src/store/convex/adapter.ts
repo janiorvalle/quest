@@ -26,6 +26,9 @@ import {
   questSchema,
   questScopeSchema,
   questTransitionSchema,
+  type SignoffBatchInput,
+  type SignoffBatchResult,
+  signoffBatchInputSchema,
   stableSerialize,
   type TouchQuestInput,
   touchQuestInputSchema,
@@ -33,6 +36,7 @@ import {
 import type {
   FederatedReadSnapshot,
   AcceptQuestAndExportResult as PortAcceptQuestAndExportResult,
+  QuestDetailSnapshot,
   QuestStore,
   QuestWatchListener,
   StoreMigrationSession,
@@ -183,6 +187,16 @@ export class ConvexStore implements QuestStore {
     );
   }
 
+  async signoffBatch(input: SignoffBatchInput): Promise<SignoffBatchResult> {
+    const parsed = signoffBatchInputSchema.parse(input);
+    const testFailure = this.#consumeEventFailure();
+    return this.#clients.http.mutation(convexApi.signoffBatch, {
+      ...authTokenInput(this.#clients),
+      input: parsed,
+      ...(testFailure ? { test_failure: true } : {}),
+    });
+  }
+
   async addChainLink(input: ChainMutation): Promise<ChainResult> {
     const parsed = chainMutationSchema.parse(input);
     return this.#clients.http.mutation(
@@ -266,6 +280,14 @@ export class ConvexStore implements QuestStore {
       ...authTokenInput(this.#clients),
       id: parsed,
       lease_cutoff: leaseCutoff,
+    });
+  }
+
+  async readQuestDetail(id: number): Promise<QuestDetailSnapshot> {
+    const parsed = questSchema.shape.id.parse(id);
+    return this.#clients.http.query(convexApi.questDetail, {
+      ...authTokenInput(this.#clients),
+      id: parsed,
     });
   }
 
