@@ -4,8 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { NewQuest, QuestFilter, QuestScope } from "../schema";
-import { createSqliteStore, FederatedReadError, type QuestWatchListener } from "../store";
 import {
+  createSqliteStore,
+  FederatedQuestStore,
+  FederatedReadError,
+  type FederatedStoreSource,
+  LocalBlobStore,
+  type QuestWatchListener,
+  type SqliteStore,
+} from "../store";
+import {
+  buildQuestLogSignoffLens,
   createQuestLogRuntime,
   type QuestLogSnapshot,
   summarizeEventDetail,
@@ -48,6 +57,151 @@ function latest(snapshots: readonly QuestLogSnapshot[]): QuestLogSnapshot {
 }
 
 describe("read-only quest log runtime", () => {
+  test("builds the sign-off lens from shared QA sessions and signed history", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-log-signoff-"));
+    const store = createSqliteStore(join(directory, "quest.db"), {
+      now: () => "2026-08-02T16:00:00Z",
+    });
+    const completed = async (title: string, area: string, predictedFiles: readonly string[] = []) =>
+      store.addQuest({
+        ...questInput("quest", title),
+        area,
+        backfill: true,
+        predicted_files: [...predictedFiles],
+        status: "complete",
+      });
+
+    try {
+      const chainOne = await completed("Chain one", "store");
+      const chainTwo = await completed("Chain two", "tui");
+      const chainThree = await completed("Chain three", "store");
+      await completed("Shared one", "cli", ["src/shared.ts"]);
+      await completed("Shared two", "docs", ["src/shared.ts"]);
+      await completed("Standalone", "docs");
+      const signed = await completed("Signed history", "docs");
+      await store.addChainLink({
+        actor: "fixture",
+        link: { quest_id: chainTwo.id, target_id: chainOne.id, type: "requires" },
+      });
+      await store.addChainLink({
+        actor: "fixture",
+        link: { quest_id: chainThree.id, target_id: chainTwo.id, type: "duplicate-of" },
+      });
+      await store.transition(signed.id, {
+        action: "signoff",
+        actor: "qa/reviewer",
+        notes: "checked",
+        session_guild: null,
+      });
+
+      const lens = buildQuestLogSignoffLens(await store.exportAll(), "quest");
+
+      expect(lens.awaitingCount).toBe(6);
+      expect(lens.groups.map((group) => group.label)).toEqual([
+        "chained 1-2-3",
+        "shared files: src/shared.ts",
+        "same area: docs",
+      ]);
+      expect(
+        lens.groups.flatMap((group) => group.items).every((item) => item.status === "complete"),
+      ).toBe(true);
+      expect(lens.signed).toMatchObject([
+        {
+          item: { title: "Signed history" },
+          signer: "qa/reviewer",
+          signedAt: "2026-08-02T16:00:00Z",
+        },
+      ]);
+      expect(lens.signedCount).toBe(1);
+      expect(lens.emptyMessage).toBeNull();
+    } finally {
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("loads all-repository sign-off data through scoped federated exports", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-log-federated-signoff-"));
+    const alphaStore = createSqliteStore(join(directory, "alpha.db"), {
+      now: () => "2026-08-02T16:00:00Z",
+    });
+    const betaStore = createSqliteStore(join(directory, "beta.db"), {
+      now: () => "2026-08-02T16:01:00Z",
+    });
+    const source = (repository: string, store: SqliteStore): FederatedStoreSource => ({
+      blobStore: new LocalBlobStore(join(directory, `${repository}-evidence`)),
+      includeRepository: (candidate) => candidate === repository,
+      questStore: store,
+    });
+    const snapshots: QuestLogSnapshot[] = [];
+    const runtime = createQuestLogRuntime({
+      initialScope: { repo: null },
+      store: new FederatedQuestStore([source("alpha", alphaStore), source("beta", betaStore)]),
+    });
+
+    try {
+      await alphaStore.addQuest({
+        ...questInput("alpha", "Alpha complete"),
+        backfill: true,
+        status: "complete",
+      });
+      await betaStore.addQuest({
+        ...questInput("beta", "Beta complete"),
+        backfill: true,
+        status: "complete",
+      });
+      runtime.subscribe((snapshot) => snapshots.push(snapshot));
+      await runtime.start();
+      await waitFor(() => latest(snapshots).signoff.awaitingCount === 2);
+      expect(latest(snapshots).signoff.groups.map((group) => group.repo)).toEqual([
+        "alpha",
+        "beta",
+      ]);
+    } finally {
+      await runtime.stop();
+      alphaStore.close();
+      betaStore.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("refreshes the sign-off lens after an event-only sign-off", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-log-signoff-refresh-"));
+    const store = createSqliteStore(join(directory, "quest.db"), {
+      now: () => "2026-08-02T16:00:00Z",
+    });
+    const completed = await store.addQuest({
+      ...questInput("quest", "Refresh me"),
+      backfill: true,
+      status: "complete",
+    });
+    const snapshots: QuestLogSnapshot[] = [];
+    const runtime = createQuestLogRuntime({
+      initialScope: { repo: "quest" },
+      pollIntervalMs: 1_000,
+      store,
+    });
+
+    try {
+      runtime.subscribe((snapshot) => snapshots.push(snapshot));
+      await runtime.start();
+      await waitFor(() => latest(snapshots).signoff.awaitingCount === 1);
+      runtime.setSignoffActive(true);
+      await store.transition(completed.id, {
+        action: "signoff",
+        actor: "qa/reviewer",
+        notes: "checked",
+        session_guild: null,
+      });
+      await waitFor(() => latest(snapshots).signoff.signedCount === 1);
+      expect(latest(snapshots).signoff.awaitingCount).toBe(0);
+    } finally {
+      await runtime.stop();
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
   test("maps the live watch stream to the selected repository", async () => {
     const directory = await mkdtemp(join(tmpdir(), "quest-log-model-"));
     const store = createSqliteStore(join(directory, "quest.db"));

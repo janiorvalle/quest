@@ -1,7 +1,13 @@
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { QuestLogItem, QuestLogRuntime, QuestLogSnapshot } from "../services/quest-log-model";
+import {
+  EMPTY_QUEST_LOG_SIGNOFF,
+  type QuestLogItem,
+  type QuestLogRuntime,
+  type QuestLogSignoffLens,
+  type QuestLogSnapshot,
+} from "../services/quest-log-model";
 import {
   AppHeader,
   type AreaTab,
@@ -13,6 +19,8 @@ import {
   type HeaderCounts,
   HorizontalRule,
   QuestListPane,
+  SignoffListPane,
+  SignoffSubheader,
   StatusRow,
   TabsRow,
 } from "./components";
@@ -20,6 +28,8 @@ import { openEvidenceWithNotice } from "./evidence";
 import {
   INITIAL_QUEST_LOG_INTERACTION,
   type QuestLogInteractionState,
+  type QuestLogKey,
+  type QuestLogLens,
   type QuestLogSortMode,
   reduceReadOnlyInteraction,
 } from "./interaction";
@@ -199,12 +209,16 @@ function ReadOnlyLayout({
   detailScrollOffset,
   hiddenDoneCount,
   identity,
+  lens,
   activeAreaIndex,
   activeSelectedIndex,
   notice,
   policyItems,
   planAvailable,
   runtime,
+  signoff,
+  signoffItems,
+  signoffSelectedIndex,
   sortMode,
   snapshot,
   visibleItems,
@@ -218,12 +232,16 @@ function ReadOnlyLayout({
   readonly detailScrollOffset: number;
   readonly hiddenDoneCount: number;
   readonly identity: string | undefined;
+  readonly lens: QuestLogLens;
   readonly activeAreaIndex: number;
   readonly activeSelectedIndex: number;
   readonly notice: string;
   readonly policyItems: readonly QuestLogItem[];
   readonly planAvailable: boolean;
   readonly runtime: QuestLogRuntime;
+  readonly signoff: QuestLogSignoffLens;
+  readonly signoffItems: readonly QuestLogItem[];
+  readonly signoffSelectedIndex: number;
   readonly sortMode: QuestLogSortMode;
   readonly snapshot: QuestLogSnapshot;
   readonly visibleItems: readonly QuestLogItem[];
@@ -246,9 +264,21 @@ function ReadOnlyLayout({
         width: "100%",
       }}
     >
-      <AppHeader branch={branch} counts={counts} identity={identity} repo={scope} width={width} />
+      <AppHeader
+        branch={branch}
+        counts={counts}
+        identity={identity}
+        lens={lens}
+        repo={scope}
+        signoffCounts={{ awaiting: signoff.awaitingCount, signed: signoff.signedCount }}
+        width={width}
+      />
       <HorizontalRule width={width} />
-      <TabsRow activeIndex={activeAreaIndex} scope={scope} tabs={tabs} width={width} />
+      {lens === "signoff" ? (
+        <SignoffSubheader scope={scope} width={width} />
+      ) : (
+        <TabsRow activeIndex={activeAreaIndex} scope={scope} tabs={tabs} width={width} />
+      )}
       <HorizontalRule width={width} />
       <box
         style={{
@@ -259,17 +289,29 @@ function ReadOnlyLayout({
         }}
       >
         <box style={{ flexShrink: 0, height: geometry.listHeight, width: geometry.listWidth }}>
-          <QuestListPane
-            height={geometry.narrow ? listHeight : mainHeight}
-            hiddenDoneCount={hiddenDoneCount}
-            items={visibleItems}
-            laneClusters={snapshot.plan?.laneClusters ?? []}
-            loading={snapshot.loading}
-            paneWidth={geometry.listWidth}
-            selectedIndex={activeSelectedIndex}
-            terminalWidth={width}
-            totalCount={policyItems.length}
-          />
+          {lens === "signoff" ? (
+            <SignoffListPane
+              height={geometry.narrow ? listHeight : mainHeight}
+              items={signoffItems}
+              lens={signoff}
+              loading={snapshot.loading}
+              paneWidth={geometry.listWidth}
+              selectedIndex={signoffSelectedIndex}
+              terminalWidth={width}
+            />
+          ) : (
+            <QuestListPane
+              height={geometry.narrow ? listHeight : mainHeight}
+              hiddenDoneCount={hiddenDoneCount}
+              items={visibleItems}
+              laneClusters={snapshot.plan?.laneClusters ?? []}
+              loading={snapshot.loading}
+              paneWidth={geometry.listWidth}
+              selectedIndex={activeSelectedIndex}
+              terminalWidth={width}
+              totalCount={policyItems.length}
+            />
+          )}
         </box>
         {geometry.narrow ? (
           <HorizontalRule width={width} />
@@ -284,7 +326,7 @@ function ReadOnlyLayout({
           <DetailPane
             detail={detail}
             item={current}
-            laneClusters={snapshot.plan?.laneClusters ?? []}
+            laneClusters={lens === "dev" ? (snapshot.plan?.laneClusters ?? []) : []}
             paneWidth={geometry.detailWidth}
             rows={geometry.detailRows}
             scrollOffset={detailScrollOffset}
@@ -293,7 +335,7 @@ function ReadOnlyLayout({
       </box>
       <HorizontalRule width={width} />
       <StatusRow notice={notice} pollIntervalMs={runtime.pollIntervalMs} width={width} />
-      <FooterKeymap planAvailable={planAvailable} sortMode={sortMode} />
+      <FooterKeymap lens={lens} planAvailable={planAvailable} sortMode={sortMode} width={width} />
     </box>
   );
 }
@@ -308,6 +350,45 @@ function savedThemeNotice(theme: QuestTheme): string {
 
 function unsavedThemeNotice(theme: QuestTheme, reason: string): string {
   return `Theme: ${theme.name} (not saved: ${reason})`;
+}
+
+function keyboardInteractionResult(
+  active: QuestLogInteractionState,
+  key: QuestLogKey,
+  snapshot: QuestLogSnapshot,
+  signoffItems: readonly QuestLogItem[],
+  areas: readonly (string | null | undefined)[],
+  areaKeys: readonly string[],
+  detailContentRows: number,
+  detailViewportRows: number,
+): ReturnType<typeof reduceReadOnlyInteraction> {
+  const keyboardAreaKeys = active.lens === "signoff" ? ["all"] : areaKeys;
+  const keyboardAreas = active.lens === "signoff" ? [undefined] : areas;
+  const keyboardAreaIndex = Math.max(0, keyboardAreaKeys.indexOf(active.areaKey));
+  const activeArea = keyboardAreas[keyboardAreaIndex];
+  const activeOrderedItems =
+    active.lens === "signoff"
+      ? signoffItems
+      : active.sortMode === "plan" && snapshot.plan !== null
+        ? snapshot.plan.items
+        : snapshot.items;
+  const activeItems =
+    active.lens === "signoff"
+      ? activeOrderedItems
+      : itemsForArea(visibleQuestLogItems(activeOrderedItems, active.showDone), activeArea);
+  const activeQuest = selectedQuest(activeItems, selectedIndexForQuest(activeItems, active));
+  return reduceReadOnlyInteraction(active, key, {
+    areaCount: keyboardAreaKeys.length,
+    areaKeys: keyboardAreaKeys,
+    detailContentRows,
+    detailViewportRows,
+    ...(activeQuest === undefined ? {} : { pr: activeQuest.pr }),
+    questId: activeQuest?.id,
+    ...(activeQuest === undefined ? {} : { repository: activeQuest.repo }),
+    visibleCount: activeItems.length,
+    visibleQuestIds: activeItems.map((item) => item.id),
+    visibleQuestKeys: activeItems.map(questIdentity),
+  });
 }
 
 export function QuestLogApp({
@@ -333,6 +414,7 @@ export function QuestLogApp({
     items: [],
     loading: true,
     plan: null,
+    signoff: EMPTY_QUEST_LOG_SIGNOFF,
     scope: "all",
   });
   const [interaction, setInteraction] = useState(INITIAL_QUEST_LOG_INTERACTION);
@@ -369,16 +451,31 @@ export function QuestLogApp({
   const hiddenDoneCount = orderedItems.length - policyItems.length;
   const areas = useMemo(() => [undefined, ...areaTabs(policyItems)], [policyItems]);
   const areaKeys = useMemo(() => areas.map(areaTabKey), [areas]);
-  const activeAreaIndex = Math.max(0, areaKeys.indexOf(interaction.areaKey));
+  const signoffItems = useMemo(
+    () => [
+      ...snapshot.signoff.groups.flatMap((group) => group.items),
+      ...snapshot.signoff.signed.map((history) => history.item),
+    ],
+    [snapshot.signoff],
+  );
+  const lens = interaction.lens;
+  useEffect(() => {
+    runtime.setSignoffActive(lens === "signoff");
+    return () => runtime.setSignoffActive(false);
+  }, [lens, runtime]);
+  const activeAreaKeys = useMemo(() => (lens === "signoff" ? ["all"] : areaKeys), [areaKeys, lens]);
+  const activeAreaIndex =
+    lens === "signoff" ? 0 : Math.max(0, areaKeys.indexOf(interaction.areaKey));
   const activeArea = areas[activeAreaIndex];
   const visibleItems = useMemo(
     () => itemsForArea(policyItems, activeArea),
     [activeArea, policyItems],
   );
-  const visibleQuestIds = useMemo(() => visibleItems.map((item) => item.id), [visibleItems]);
-  const visibleQuestKeys = useMemo(() => visibleItems.map(questIdentity), [visibleItems]);
-  const activeSelectedIndex = selectedIndexForQuest(visibleItems, interaction);
-  const current = selectedQuest(visibleItems, activeSelectedIndex);
+  const activeItems = lens === "signoff" ? signoffItems : visibleItems;
+  const activeQuestIds = useMemo(() => activeItems.map((item) => item.id), [activeItems]);
+  const activeQuestKeys = useMemo(() => activeItems.map(questIdentity), [activeItems]);
+  const activeSelectedIndex = selectedIndexForQuest(activeItems, interaction);
+  const current = selectedQuest(activeItems, activeSelectedIndex);
   const currentPr = current?.pr;
   const currentQuestId = current?.id;
   const detailState = useQuestDetail(runtime, current);
@@ -400,13 +497,14 @@ export function QuestLogApp({
             geometry.detailWidth,
             geometry.detailRows,
             theme,
-            snapshot.plan?.laneClusters ?? [],
+            lens === "dev" ? (snapshot.plan?.laneClusters ?? []) : [],
           ),
     [
       current,
       detail,
       geometry.detailRows,
       geometry.detailWidth,
+      lens,
       snapshot.plan?.laneClusters,
       theme,
     ],
@@ -418,15 +516,15 @@ export function QuestLogApp({
       interactionRef.current,
       { name: "", raw: "", sequence: "", shift: false },
       {
-        areaCount: areas.length,
-        areaKeys,
+        areaCount: activeAreaKeys.length,
+        areaKeys: activeAreaKeys,
         detailContentRows: detailMetrics.contentRows,
         detailViewportRows: detailMetrics.viewportRows,
         ...(currentPr === undefined ? {} : { pr: currentPr }),
         questId: currentQuestId,
-        visibleCount: visibleItems.length,
-        visibleQuestIds,
-        visibleQuestKeys,
+        visibleCount: activeItems.length,
+        visibleQuestIds: activeQuestIds,
+        visibleQuestKeys: activeQuestKeys,
       },
     );
     if (
@@ -441,8 +539,10 @@ export function QuestLogApp({
       setInteraction((state) => ({ ...state, ...next.state }));
     }
   }, [
-    areas.length,
-    areaKeys,
+    activeAreaKeys,
+    activeItems.length,
+    activeQuestIds,
+    activeQuestKeys,
     currentPr,
     currentQuestId,
     detailMetrics.contentRows,
@@ -453,37 +553,18 @@ export function QuestLogApp({
     interaction.selectedIndex,
     interaction.selectedQuestId,
     interaction.selectedQuestKey,
-    visibleItems.length,
-    visibleQuestIds,
-    visibleQuestKeys,
   ]);
 
   useKeyboard((key) => {
-    const active = interactionRef.current;
-    const activeAreaIndex = Math.max(0, areaKeys.indexOf(active.areaKey));
-    const activeArea = areas[activeAreaIndex];
-    const activeOrderedItems =
-      active.sortMode === "plan" && snapshot.plan !== null ? snapshot.plan.items : snapshot.items;
-    const activeItems = itemsForArea(
-      visibleQuestLogItems(activeOrderedItems, active.showDone),
-      activeArea,
-    );
-    const activeQuest = selectedQuest(activeItems, selectedIndexForQuest(activeItems, active));
-    const result = reduceReadOnlyInteraction(
-      active,
+    const result = keyboardInteractionResult(
+      interactionRef.current,
       { name: key.name, raw: key.raw, sequence: key.sequence, shift: key.shift },
-      {
-        areaCount: areas.length,
-        areaKeys,
-        detailContentRows: detailMetrics.contentRows,
-        detailViewportRows: detailMetrics.viewportRows,
-        ...(activeQuest === undefined ? {} : { pr: activeQuest.pr }),
-        questId: activeQuest?.id,
-        ...(activeQuest === undefined ? {} : { repository: activeQuest.repo }),
-        visibleCount: activeItems.length,
-        visibleQuestIds: activeItems.map((item) => item.id),
-        visibleQuestKeys: activeItems.map(questIdentity),
-      },
+      snapshot,
+      signoffItems,
+      areas,
+      areaKeys,
+      detailMetrics.contentRows,
+      detailMetrics.viewportRows,
     );
     interactionRef.current = result.state;
     setInteraction(result.state);
@@ -510,6 +591,9 @@ export function QuestLogApp({
         requestThemeSave(next);
         return;
       }
+      case "toggle-lens":
+        setNotice(result.intent.lens === "signoff" ? "Sign-off lens" : "Dev lens");
+        return;
       case "notice":
         setNotice(result.intent.message);
         return;
@@ -547,15 +631,20 @@ export function QuestLogApp({
         hiddenDoneCount={hiddenDoneCount}
         height={dimensions.height}
         identity={identity}
+        lens={lens}
         activeAreaIndex={activeAreaIndex}
         activeSelectedIndex={activeSelectedIndex}
         notice={
           snapshot.error ??
+          (lens === "signoff" ? snapshot.signoff.error : null) ??
           (detailState.detailStale ? "Detail refresh failed; showing stale data" : notice)
         }
         policyItems={policyItems}
         planAvailable={planAvailable}
         runtime={runtime}
+        signoff={snapshot.signoff}
+        signoffItems={signoffItems}
+        signoffSelectedIndex={activeSelectedIndex}
         sortMode={sortMode}
         snapshot={snapshot}
         visibleItems={visibleItems}

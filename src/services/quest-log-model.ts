@@ -1,8 +1,15 @@
+import {
+  computeQaQueueFromDump,
+  isQuestSigned,
+  type QaGroupingReason,
+  type QaSession,
+} from "../domain";
 import type { PlanComputedState, PlanLaneCluster, PlanQuest } from "../domain/plan";
 import {
   type Event,
   eventRepository,
   type Quest,
+  type QuestDump,
   type QuestScope,
   type QuestStatus,
 } from "../schema";
@@ -41,12 +48,39 @@ export interface QuestLogPlan {
   readonly laneClusters: readonly PlanLaneCluster[];
 }
 
+export interface QuestLogSignoffGroup {
+  readonly group: number;
+  readonly ids: readonly number[];
+  readonly items: readonly QuestLogItem[];
+  readonly label: string;
+  readonly oldestAt: string;
+  readonly reason: QaGroupingReason;
+  readonly repo: string;
+  readonly why: string;
+}
+
+export interface QuestLogSignedHistoryEntry {
+  readonly item: QuestLogItem;
+  readonly signedAt: string;
+  readonly signer: string;
+}
+
+export interface QuestLogSignoffLens {
+  readonly awaitingCount: number;
+  readonly error: string | null;
+  readonly emptyMessage: string | null;
+  readonly groups: readonly QuestLogSignoffGroup[];
+  readonly signed: readonly QuestLogSignedHistoryEntry[];
+  readonly signedCount: number;
+}
+
 export interface QuestLogSnapshot {
   readonly currentRepo: string | null;
   readonly error: string | null;
   readonly items: readonly QuestLogItem[];
   readonly loading: boolean;
   readonly plan: QuestLogPlan | null;
+  readonly signoff: QuestLogSignoffLens;
   readonly scope: QuestLogScope;
 }
 
@@ -100,6 +134,7 @@ export interface QuestLogRuntime {
   readonly loadDetail: (id: number, repository?: string) => Promise<QuestLogDetail>;
   readonly openEvidence: (id: number, repository?: string) => Promise<string>;
   readonly openPr: (url: string) => Promise<string>;
+  readonly setSignoffActive: (active: boolean) => void;
   readonly start: () => Promise<void>;
   readonly stop: () => Promise<void>;
   readonly subscribe: (listener: (snapshot: QuestLogSnapshot) => void) => () => void;
@@ -114,12 +149,28 @@ export interface QuestLogRuntimeOptions {
   readonly store: QuestStore;
 }
 
+interface SignoffLensRefreshRequest {
+  readonly generation: number;
+  readonly repo: string | null;
+  readonly scope: QuestLogScope;
+}
+
+export const EMPTY_QUEST_LOG_SIGNOFF: QuestLogSignoffLens = {
+  awaitingCount: 0,
+  error: null,
+  emptyMessage: null,
+  groups: [],
+  signed: [],
+  signedCount: 0,
+};
+
 export const EMPTY_QUEST_LOG_SNAPSHOT: QuestLogSnapshot = {
   currentRepo: null,
   error: null,
   items: [],
   loading: true,
   plan: null,
+  signoff: EMPTY_QUEST_LOG_SIGNOFF,
   scope: "all",
 };
 
@@ -261,6 +312,128 @@ function mergedPrQuestIdsFromEvents(
   );
 }
 
+function eventsForQuest(quest: Quest, events: readonly Event[]): readonly Event[] {
+  return events
+    .filter(
+      (event) =>
+        event.quest_id === quest.id &&
+        (eventRepository(event) === undefined || eventRepository(event) === quest.repo),
+    )
+    .sort((left, right) => left.id - right.id);
+}
+
+function latestSignoffEvent(quest: Quest, events: readonly Event[]): Event | undefined {
+  const questEvents = eventsForQuest(quest, events);
+  if (!isQuestSigned(quest, questEvents)) {
+    return undefined;
+  }
+  let latestCompletion = -1;
+  questEvents.forEach((event, index) => {
+    if (event.action === "complete") {
+      latestCompletion = index;
+    }
+  });
+  return questEvents.slice(latestCompletion + 1).findLast((event) => event.action === "signoff");
+}
+
+function signoffSessionLabel(session: QaSession): string {
+  return session.reason === "chain" ? `chained ${session.ids.join("-")}` : session.why;
+}
+
+function compareSignedHistory(
+  left: QuestLogSignedHistoryEntry,
+  right: QuestLogSignedHistoryEntry,
+): number {
+  return (
+    Date.parse(right.signedAt) - Date.parse(left.signedAt) ||
+    left.item.id - right.item.id ||
+    left.item.repo.localeCompare(right.item.repo)
+  );
+}
+
+function signoffLensReadError(error: unknown): string {
+  return error instanceof FederatedReadError
+    ? error.message
+    : "Sign-off lens unavailable; retry when the backend is reachable";
+}
+
+function signoffLensAfterReadError(
+  error: unknown,
+  previous: QuestLogSignoffLens = EMPTY_QUEST_LOG_SIGNOFF,
+): QuestLogSignoffLens {
+  return { ...previous, error: signoffLensReadError(error) };
+}
+
+function mergeQuestLogSignoffLenses(lenses: readonly QuestLogSignoffLens[]): QuestLogSignoffLens {
+  const groups = lenses
+    .flatMap((lens) => lens.groups)
+    .sort(
+      (left, right) =>
+        Date.parse(left.oldestAt) - Date.parse(right.oldestAt) ||
+        (left.ids[0] ?? 0) - (right.ids[0] ?? 0) ||
+        left.repo.localeCompare(right.repo),
+    )
+    .map((group, index) => ({ ...group, group: index + 1 }));
+  const signed = lenses.flatMap((lens) => lens.signed).sort(compareSignedHistory);
+  return {
+    awaitingCount: lenses.reduce((total, lens) => total + lens.awaitingCount, 0),
+    error: null,
+    emptyMessage:
+      groups.length === 0 && signed.length === 0 ? "No completed quests in sign-off lens." : null,
+    groups,
+    signed,
+    signedCount: signed.length,
+  };
+}
+
+function scopedQuest(quest: Quest, repository: string | null | undefined): boolean {
+  return repository === undefined || repository === null || quest.repo === repository;
+}
+
+export function buildQuestLogSignoffLens(
+  dump: QuestDump,
+  repository: string | null | undefined = undefined,
+): QuestLogSignoffLens {
+  const mergedPrQuestIds = mergedPrQuestIdsFromEvents(dump.events);
+  const visibleQuests = dump.quests.filter((quest) => scopedQuest(quest, repository));
+  const itemsByKey = new Map(
+    visibleQuests.map((quest) => [
+      questIdentity(quest.repo, quest.id),
+      toQuestLogItem(quest, new Set(), mergedPrQuestIds),
+    ]),
+  );
+  const queue = computeQaQueueFromDump(dump, repository ?? undefined);
+  const groups = queue.sessions.map((session) => ({
+    group: session.group,
+    ids: session.ids,
+    items: session.ids.flatMap((id) => itemsByKey.get(questIdentity(session.repo, id)) ?? []),
+    label: signoffSessionLabel(session),
+    oldestAt: session.oldest_at,
+    reason: session.reason,
+    repo: session.repo,
+    why: session.why,
+  }));
+  const signed = visibleQuests
+    .filter((quest) => quest.status === "complete")
+    .flatMap((quest) => {
+      const event = latestSignoffEvent(quest, dump.events);
+      const item = itemsByKey.get(questIdentity(quest.repo, quest.id));
+      return event === undefined || item === undefined
+        ? []
+        : [{ item, signedAt: event.at, signer: event.actor }];
+    })
+    .sort(compareSignedHistory);
+  return {
+    awaitingCount: queue.summary.quests,
+    error: null,
+    emptyMessage:
+      groups.length === 0 && signed.length === 0 ? "No completed quests in sign-off lens." : null,
+    groups,
+    signed,
+    signedCount: signed.length,
+  };
+}
+
 function nonEmptyEventText(value: unknown): string | undefined {
   if (typeof value !== "string" || value.trim() === "") {
     return undefined;
@@ -338,11 +511,14 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
   let blockedIds: ReadonlySet<string> = new Set();
   let mergedPrQuestIds: ReadonlySet<string> = new Set();
   let planSnapshot: QuestPlanSnapshot | null = null;
+  let signoffLens: QuestLogSignoffLens = EMPTY_QUEST_LOG_SIGNOFF;
   let planRevision = 0;
   let loading = true;
   let generation = 0;
   let generationSequence = 0;
   let mergedPrRefreshRevision = 0;
+  let signoffRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  let signoffLensActive = false;
   let subscriptions: readonly WatchSubscription[] = [];
   let scopeTransitions: Promise<void> = Promise.resolve();
   const pendingActions = new Set<Promise<void>>();
@@ -374,6 +550,37 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
       targetScope === "current" && targetRepo !== null ? targetRepo : undefined,
     );
 
+  const loadScopedSignoffLens = async (
+    repository: string | undefined,
+  ): Promise<QuestLogSignoffLens> => {
+    const store =
+      repository === undefined
+        ? options.store
+        : (options.store.forRepository?.(repository) ?? options.store);
+    return buildQuestLogSignoffLens(await store.exportAll(), repository);
+  };
+
+  const loadSignoffLens = async (
+    targetScope: QuestLogScope,
+    targetRepo: string | null,
+  ): Promise<QuestLogSignoffLens> => {
+    if (targetScope === "current" && targetRepo !== null) {
+      return loadScopedSignoffLens(targetRepo);
+    }
+    if (options.store.forRepository === undefined) {
+      return loadScopedSignoffLens(undefined);
+    }
+    const repositories = (await options.store.stats({ repo: null })).repos.map(
+      (repository) => repository.repo,
+    );
+    if (repositories.length === 0) {
+      return loadScopedSignoffLens(undefined);
+    }
+    return mergeQuestLogSignoffLenses(
+      await Promise.all(repositories.map((repository) => loadScopedSignoffLens(repository))),
+    );
+  };
+
   const enqueueScopeTransition = <Result>(operation: () => Promise<Result>): Promise<Result> => {
     const transition = scopeTransitions.then(operation);
     scopeTransitions = transition.then(
@@ -398,6 +605,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
       items,
       loading,
       plan: planSnapshot === null ? null : planForItems(planSnapshot, items),
+      signoff: signoffLens,
       scope,
     };
   };
@@ -433,6 +641,8 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     readonly repo: string | null;
   } | null = null;
   let planRefreshRunning = false;
+  let pendingSignoffLensRefresh: SignoffLensRefreshRequest | null = null;
+  let signoffLensRefreshRunning = false;
   let scopeSetupGeneration: number | null = null;
 
   const clearPlanAfterRefreshFailure = (requestGeneration: number): void => {
@@ -512,6 +722,95 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     });
   };
 
+  const applySignoffLensRefresh = async (request: SignoffLensRefreshRequest): Promise<void> => {
+    const isCurrentRequest = (): boolean =>
+      request.generation === generation && scopeSetupGeneration === null;
+    if (!isCurrentRequest()) {
+      return;
+    }
+    try {
+      const nextSignoffLens = await loadSignoffLens(request.scope, request.repo);
+      if (!isCurrentRequest()) {
+        return;
+      }
+      signoffLens = nextSignoffLens;
+    } catch (readError: unknown) {
+      if (!isCurrentRequest()) {
+        return;
+      }
+      signoffLens = signoffLensAfterReadError(readError, signoffLens);
+    }
+    if (isCurrentRequest()) {
+      emit();
+    }
+  };
+
+  const requestSignoffLensRefresh = (
+    activeGeneration: number,
+    targetScope: QuestLogScope,
+    targetRepo: string | null,
+  ): void => {
+    pendingSignoffLensRefresh = {
+      generation: activeGeneration,
+      repo: targetRepo,
+      scope: targetScope,
+    };
+    if (signoffLensRefreshRunning) {
+      return;
+    }
+    signoffLensRefreshRunning = true;
+    const action = (async () => {
+      while (pendingSignoffLensRefresh !== null) {
+        const request = pendingSignoffLensRefresh;
+        pendingSignoffLensRefresh = null;
+        await applySignoffLensRefresh(request);
+      }
+      signoffLensRefreshRunning = false;
+    })();
+    const completion = action.then(
+      () => undefined,
+      () => undefined,
+    );
+    pendingActions.add(completion);
+    void completion.then(() => {
+      pendingActions.delete(completion);
+    });
+  };
+
+  const startSignoffRefreshTimer = (): void => {
+    if (signoffRefreshTimer !== null) {
+      return;
+    }
+    signoffRefreshTimer = setInterval(
+      () => {
+        if (!signoffLensActive || scopeSetupGeneration !== null) {
+          return;
+        }
+        requestSignoffLensRefresh(generation, scope, currentRepo);
+      },
+      Math.max(1_000, options.pollIntervalMs ?? 250),
+    );
+    signoffRefreshTimer.unref?.();
+  };
+
+  const stopSignoffRefreshTimer = (): void => {
+    if (signoffRefreshTimer === null) {
+      return;
+    }
+    clearInterval(signoffRefreshTimer);
+    signoffRefreshTimer = null;
+  };
+
+  const setSignoffActive = (active: boolean): void => {
+    signoffLensActive = active;
+    if (!active) {
+      stopSignoffRefreshTimer();
+      return;
+    }
+    startSignoffRefreshTimer();
+    requestSignoffLensRefresh(generation, scope, currentRepo);
+  };
+
   const unsubscribeCurrent = async (): Promise<void> => {
     const current = new Set([...subscriptions, ...retiredSubscriptions]);
     subscriptions = [];
@@ -535,6 +834,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     let nextQuests: readonly Quest[] = [];
     let nextBlockedIds: ReadonlySet<string> = new Set();
     let nextMergedPrQuestIds: ReadonlySet<string> = new Set();
+    let nextSignoffLens: QuestLogSignoffLens = EMPTY_QUEST_LOG_SIGNOFF;
     let nextLoading = true;
     let nextError: string | null = null;
     const nextReadErrors: Array<string | null> = [null, null];
@@ -546,12 +846,16 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
       nextReadErrors.find((message) => message !== null) ?? null;
     const nextSubscriptions: WatchSubscription[] = [];
     const planRevisionBeforeSetup = planRevision;
-    const [loadedPlanSnapshot, loadedMergedPrQuestIds] = await Promise.all([
+    const [loadedPlanSnapshot, loadedMergedPrQuestIds, loadedSignoffLens] = await Promise.all([
       loadPlan(targetScope, targetRepo).catch(() => null),
       loadMergedPrQuestIds(targetScope, targetRepo).catch(() => new Set<string>()),
+      loadSignoffLens(targetScope, targetRepo).catch((readError: unknown) =>
+        signoffLensAfterReadError(readError),
+      ),
     ]);
     const nextPlanSnapshot = loadedPlanSnapshot;
     nextMergedPrQuestIds = loadedMergedPrQuestIds;
+    nextSignoffLens = loadedSignoffLens;
     try {
       nextSubscriptions.push(
         await options.store.watch(filter, (watchedQuests, readError) => {
@@ -577,6 +881,9 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
           emit();
           requestPlanRefresh(activeGeneration, targetScope, targetRepo);
           requestMergedPrQuestIdsRefresh(activeGeneration, targetScope, targetRepo);
+          if (signoffLensActive) {
+            requestSignoffLensRefresh(activeGeneration, targetScope, targetRepo);
+          }
         }),
       );
       nextSubscriptions.push(
@@ -602,6 +909,9 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
           blockedIds = nextBlockedIds;
           emit();
           requestPlanRefresh(activeGeneration, targetScope, targetRepo);
+          if (signoffLensActive) {
+            requestSignoffLensRefresh(activeGeneration, targetScope, targetRepo);
+          }
         }),
       );
     } catch (error) {
@@ -619,6 +929,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     quests = nextQuests;
     blockedIds = nextBlockedIds;
     mergedPrQuestIds = nextMergedPrQuestIds;
+    signoffLens = nextSignoffLens;
     if (planRevision === planRevisionBeforeSetup) {
       planSnapshot = nextPlanSnapshot;
     }
@@ -627,6 +938,10 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     emit();
     requestPlanRefresh(activeGeneration, targetScope, targetRepo);
     requestMergedPrQuestIdsRefresh(activeGeneration, targetScope, targetRepo);
+    requestSignoffLensRefresh(activeGeneration, targetScope, targetRepo);
+    if (signoffLensActive) {
+      startSignoffRefreshTimer();
+    }
     await disposeSubscriptions(previousSubscriptions);
   };
 
@@ -635,6 +950,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     targetRepo: string | null,
     readError: FederatedReadError,
   ): Promise<void> => {
+    stopSignoffRefreshTimer();
     await unsubscribeCurrent();
     generation = ++generationSequence;
     currentRepo = targetRepo;
@@ -644,6 +960,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     blockedIds = new Set();
     mergedPrQuestIds = new Set();
     planSnapshot = null;
+    signoffLens = EMPTY_QUEST_LOG_SIGNOFF;
     loading = false;
     emit();
   };
@@ -813,8 +1130,11 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     loadDetail,
     openEvidence,
     openPr,
+    setSignoffActive,
     start,
     stop: async () => {
+      signoffLensActive = false;
+      stopSignoffRefreshTimer();
       await Promise.all([scopeTransitions, ...pendingActions]);
       generation = ++generationSequence;
       await unsubscribeCurrent();

@@ -11,6 +11,8 @@ import {
   laneMarkerFor,
   pullRequestGlyphColor,
   sessionAttributionText,
+  signoffGroupHeader,
+  signoffListEntries,
   wrapText,
 } from "./components";
 import { DENSE_THEME, TAVERN_THEME } from "./theme";
@@ -333,5 +335,48 @@ describe("PR list annotations", () => {
     expect(
       pullRequestGlyphColor(DENSE_THEME, { ...item, pr: "42", prState: "awaiting-review" }, true),
     ).toBe(DENSE_THEME.palette.selectionInk);
+  });
+});
+
+describe("sign-off list annotations", () => {
+  test("keeps session headers above unsigned work and signed history at the bottom", () => {
+    const complete = { ...item, status: "complete" as const, id: 160, title: "Chain one" };
+    const signed = { ...complete, id: 162, title: "Signed history" };
+    const lens = {
+      awaitingCount: 1,
+      error: null,
+      emptyMessage: null,
+      groups: [
+        {
+          group: 1,
+          ids: [160, 161, 162],
+          items: [complete],
+          label: "chained 160-161-162",
+          oldestAt: "2026-08-02T16:00:00Z",
+          reason: "chain" as const,
+          repo: "quest",
+          why: "chain-connected linked feature",
+        },
+      ],
+      signed: [{ item: signed, signedAt: "2026-08-02T16:00:00Z", signer: "qa/reviewer" }],
+      signedCount: 1,
+    };
+    const group = lens.groups[0];
+    if (group === undefined) {
+      throw new Error("sign-off group fixture is empty");
+    }
+
+    expect(signoffGroupHeader(group)).toBe("GROUP A · quest · chained 160-161-162 · test as one");
+    expect(signoffListEntries(lens).map((entry) => entry.kind)).toEqual([
+      "group",
+      "item",
+      "signed-header",
+      "signed",
+    ]);
+    expect(signoffListEntries(lens).at(-1)).toMatchObject({
+      kind: "signed",
+      selectedIndex: 1,
+      history: { signer: "qa/reviewer" },
+    });
   });
 });
