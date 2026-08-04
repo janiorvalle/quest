@@ -485,6 +485,7 @@ const CLI_REQUEST_DISPATCH = {
   verdict: executeLifecycleRequest,
   turnin: executeLifecycleRequest,
   complete: executeLifecycleRequest,
+  signoff: executeLifecycleRequest,
   cancel: executeLifecycleRequest,
   reopen: executeLifecycleRequest,
   update: executeLifecycleRequest,

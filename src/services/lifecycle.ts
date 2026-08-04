@@ -2,8 +2,8 @@ import { extname } from "node:path";
 
 import { z } from "zod";
 
-import { scoreDedupCandidate } from "../domain";
-import type { EvidenceFileReader } from "../evidence";
+import { scoreDedupCandidate, signoffNotCompleteMessage } from "../domain";
+import type { EvidenceFile, EvidenceFileReader } from "../evidence";
 import type {
   AcceptQuestInput,
   AcceptResult,
@@ -11,6 +11,7 @@ import type {
   EvidenceKind,
   EvidenceStage,
   LaneConflictReference,
+  NewEvidence,
   NewQuest,
   Quest,
   QuestDump,
@@ -98,6 +99,13 @@ export interface QuestMutationResult {
   readonly lease_expires_at?: string | null;
   readonly quest: Quest;
   readonly snapshot?: QuestDump;
+  readonly warnings: readonly string[];
+}
+
+export interface LifecycleSignoffBatchResult {
+  readonly changed: boolean;
+  readonly evidence: readonly Evidence[];
+  readonly quests: readonly QuestMutationResult[];
   readonly warnings: readonly string[];
 }
 
@@ -236,6 +244,15 @@ async function requireScopedQuest(
     throw new LifecycleCommandError(`quest ${id} not found in the selected scope`);
   }
   return quest;
+}
+
+async function readEvidenceFiles(
+  ports: LifecycleServicePorts,
+  request: EvidenceAttachmentRequest,
+): Promise<readonly EvidenceFile[]> {
+  return Promise.all(
+    request.paths.map((path) => ports.evidenceFiles.read(path, request.workingDirectory)),
+  );
 }
 
 async function attachEvidence(
@@ -833,7 +850,10 @@ export async function transitionLifecycleQuest(
   const warnings: string[] = [];
 
   if (transition !== undefined) {
-    if (await isTransitionReplay(ports.questStore, id, transition)) {
+    if (
+      transition.action !== "signoff" &&
+      (await isTransitionReplay(ports.questStore, id, transition))
+    ) {
       warnings.push(`quest ${id} already recorded ${transition.action}; no change was made`);
     } else {
       const effectiveTransition =
@@ -858,6 +878,64 @@ export async function transitionLifecycleQuest(
     evidence: attachments.evidence,
     quest,
     warnings: warnings.concat(attachments.warnings),
+  };
+}
+
+export async function signoffLifecycleQuests(
+  ports: LifecycleServicePorts,
+  scope: QuestScope,
+  ids: readonly number[],
+  transition: Extract<QuestTransition, { action: "signoff" }>,
+  evidenceRequest: EvidenceAttachmentRequest,
+): Promise<LifecycleSignoffBatchResult> {
+  const uniqueIds = [...new Set(ids)];
+  for (const id of uniqueIds) {
+    const quest = await requireScopedQuest(ports.questStore, id, scope);
+    if (quest.status !== "complete") {
+      throw new LifecycleCommandError(signoffNotCompleteMessage(id, quest.status));
+    }
+  }
+  const preparedEvidence = await readEvidenceFiles(ports, evidenceRequest);
+  const prepared = await Promise.all(
+    preparedEvidence.map(async (file) => ({
+      file,
+      kind: inferEvidenceKind(file.filename),
+      sha256: await ports.blobStore.put(file.bytes),
+    })),
+  );
+  const evidenceInputs: NewEvidence[] = uniqueIds.flatMap((id) =>
+    prepared.map(({ file, kind, sha256 }) => ({
+      quest_id: id,
+      sha256,
+      filename: file.filename,
+      kind,
+      stage: "signoff" as const,
+      added_by: transition.actor,
+      session_guild: evidenceRequest.sessionGuild,
+    })),
+  );
+  const result = await ports.questStore.signoffBatch({
+    ids: uniqueIds,
+    transition,
+    evidence: evidenceInputs,
+  });
+  const evidenceByQuest = new Map<number, Evidence[]>();
+  for (const evidence of result.evidence) {
+    const entries = evidenceByQuest.get(evidence.quest_id) ?? [];
+    entries.push(evidence);
+    evidenceByQuest.set(evidence.quest_id, entries);
+  }
+  const quests: QuestMutationResult[] = result.quests.map((quest) => ({
+    changed: true,
+    evidence: evidenceByQuest.get(quest.id) ?? [],
+    quest,
+    warnings: [],
+  }));
+  return {
+    changed: true,
+    evidence: result.evidence,
+    quests,
+    warnings: [],
   };
 }
 

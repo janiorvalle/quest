@@ -20,7 +20,7 @@ const evidenceStages = enumCheck(evidenceStageSchema.options);
 const chainTypes = enumCheck(chainTypeSchema.options);
 const eventActions = enumCheck(eventActionSchema.options);
 
-export const SQLITE_SCHEMA_VERSION = 6;
+export const SQLITE_SCHEMA_VERSION = 7;
 
 export const SQLITE_TABLE_NAMES = {
   quests: "quests",

@@ -1,6 +1,7 @@
 import type {
   AcceptQuestInput,
   AcceptResult,
+  Chain,
   ChainMutation,
   ChainRemovalResult,
   ChainResult,
@@ -16,6 +17,8 @@ import type {
   QuestStats,
   QuestTransition,
   Sha256,
+  SignoffBatchInput,
+  SignoffBatchResult,
   StoreCompatibilityResult,
   TouchQuestInput,
 } from "../schema";
@@ -66,6 +69,14 @@ export interface FederatedReadSnapshot {
   readonly fencedRepositories: readonly string[];
 }
 
+export interface QuestDetailSnapshot {
+  readonly chains: readonly Chain[];
+  readonly events: readonly Event[];
+  readonly evidence: readonly Evidence[];
+  readonly quest: Quest;
+  readonly related_quests: readonly Quest[];
+}
+
 export interface AcceptQuestAndExportResult {
   readonly acceptance: AcceptResult;
   readonly snapshot: QuestDump;
@@ -97,6 +108,9 @@ export interface QuestStore {
    * Duplicate verdict links are part of the same mutation. Invalid input changes no state.
    */
   transition(id: number, transition: QuestTransition): Promise<Quest>;
+
+  /** Atomically signs off every completed quest and inserts its prepared sign-off evidence. */
+  signoffBatch(input: SignoffBatchInput): Promise<SignoffBatchResult>;
 
   /**
    * Atomically checks referential integrity, uniqueness, and requires-cycle safety inside the
@@ -130,6 +144,9 @@ export interface QuestStore {
 
   /** Reads one quest from one backend-consistent query snapshot, returning null when absent. */
   getQuest(id: number): Promise<Quest | null>;
+
+  /** Reads one quest and only the evidence, events, and chain neighbors needed for its detail pane. */
+  readQuestDetail(id: number): Promise<QuestDetailSnapshot>;
 
   /** Computes every requested aggregate from one backend-consistent query snapshot. */
   stats(scope: QuestScope): Promise<QuestStats>;

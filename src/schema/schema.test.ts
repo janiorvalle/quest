@@ -58,6 +58,7 @@ describe("entity schemas", () => {
       "wont-do",
     ]);
     expect(eventActionSchema.options).toContain("cancel");
+    expect(eventActionSchema.options).toContain("signoff");
   });
 
   test("validates a complete quest and rejects out-of-budget fields", () => {
@@ -75,6 +76,18 @@ describe("entity schemas", () => {
         filename: "proof.txt",
         kind: "log",
         stage: "fix",
+        added_by: "janior/codex-w3",
+        created_at: timestamp,
+      }).success,
+    ).toBeTrue();
+    expect(
+      evidenceSchema.safeParse({
+        id: 2,
+        quest_id: 3,
+        sha256: "b".repeat(64),
+        filename: "qa.txt",
+        kind: "doc",
+        stage: "signoff",
         added_by: "janior/codex-w3",
         created_at: timestamp,
       }).success,

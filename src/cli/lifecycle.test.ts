@@ -622,6 +622,87 @@ describe("lifecycle CLI behavior", () => {
     }
   });
 
+  test("signs off multiple completed quests without changing their status rows", async () => {
+    const harness = await createHarness();
+    await writeFile(join(harness.directory, "qa-signoff.txt"), "QA passed");
+    try {
+      for (const title of ["Signed one", "Signed two", "Still in review"]) {
+        await harness.runJson(["add", title, "--kind", "task"]);
+      }
+      for (const id of [1, 2, 3]) {
+        await harness.runJson(["accept", String(id)]);
+        await harness.runJson(["turnin", String(id)]);
+      }
+      await harness.runJson(["complete", "1"]);
+      await harness.runJson(["complete", "2"]);
+
+      const beforeRejectedBatch = {
+        first: await harness.store.getQuest(1),
+        events: await harness.store.events(1),
+      };
+      const rejected = await harness.runHuman(["signoff", "1", "3"]);
+      expect(rejected.code).toBe(EXIT_DOMAIN_ERROR);
+      expect(rejected.stderr).toEqual([
+        "quest: domain: [SIGNOFF_NOT_COMPLETE] quest 3 is turned_in; sign-off applies only after review, merge, and completion. Wait for the quest to reach complete, then retry `quest signoff 3`.",
+      ]);
+      expect(await harness.store.getQuest(1)).toEqual(beforeRejectedBatch.first);
+      expect(await harness.store.events(1)).toEqual(beforeRejectedBatch.events);
+
+      const beforeMissingEvidence = {
+        first: await harness.store.events(1),
+        second: await harness.store.events(2),
+      };
+      const missingEvidence = await harness.runHuman([
+        "signoff",
+        "1",
+        "2",
+        "--evidence",
+        "missing-signoff.txt",
+      ]);
+      expect(missingEvidence.code).not.toBe(EXIT_SUCCESS);
+      expect(await harness.store.events(1)).toEqual(beforeMissingEvidence.first);
+      expect(await harness.store.events(2)).toEqual(beforeMissingEvidence.second);
+
+      const signed = await harness.runJson([
+        "signoff",
+        "1",
+        "2",
+        "--notes",
+        "QA passed",
+        "--evidence",
+        "qa-signoff.txt",
+      ]);
+      expect(signed.code).toBe(EXIT_SUCCESS);
+      expect(signed.report).toMatchObject({ command: "signoff", warnings: [] });
+      expect(reportData(signed.report)).toMatchObject({
+        changed: true,
+        quests: [
+          { changed: true, evidence: [{ stage: "signoff" }], quest: { id: 1, status: "complete" } },
+          { changed: true, evidence: [{ stage: "signoff" }], quest: { id: 2, status: "complete" } },
+        ],
+      });
+      expect(await harness.store.getQuest(1)).toEqual(beforeRejectedBatch.first);
+      expect(
+        (await harness.store.events(1)).filter(({ action }) => action === "signoff"),
+      ).toHaveLength(1);
+      expect(
+        (await harness.store.events(2)).filter(({ action }) => action === "signoff"),
+      ).toHaveLength(1);
+
+      const repeated = await harness.runJson(["signoff", "1", "2", "--notes", "QA passed"]);
+      expect(repeated.code).toBe(EXIT_SUCCESS);
+      expect(reportData(repeated.report)).toMatchObject({ changed: true });
+      expect(
+        (await harness.store.events(1)).filter(({ action }) => action === "signoff"),
+      ).toHaveLength(2);
+      expect(
+        (await harness.store.events(2)).filter(({ action }) => action === "signoff"),
+      ).toHaveLength(2);
+    } finally {
+      await harness.stop();
+    }
+  });
+
   test("records a verified merge in the completion event", async () => {
     const harness = await createHarness([], config, undefined, undefined, async () => ({
       state: "MERGED",

@@ -288,6 +288,7 @@ abandon <id>
 verdict <id> <verdict> [--notes text] [--retest]
 turnin <id> [--pr number-or-url] [--summary text] [--evidence path...]
 complete <id> [--evidence path...]
+signoff <id>... [--notes text] [--evidence path...]
 cancel <id> --reason text
 reopen <id> --notes text
 update <id> [--title title] [--area area] [--priority 1|2|3] [--guild guild]
@@ -299,6 +300,14 @@ while tasks keep a null verdict and record the reason in notes. `reopen` is a
 forward correction: `complete` returns to `ready` (or an untriaged bug to
 `open`), dropped bugs return to `open`, and dropped tasks return to `ready`;
 notes are required and the count increments.
+
+`signoff` is the QA attestation verb. It accepts one or more IDs, validates that
+every quest is already `complete` before writing any of them, records the notes
+and actor in a `signoff` event, and attaches supplied files at the `signoff`
+evidence stage. A quest is signed only when it is complete and has a sign-off
+after its latest completion; sign-off does not add a status. Use the stable
+`SIGNOFF_NOT_COMPLETE` error to wait for review, merge, and completion. Repeating
+the same sign-off is safe and appends another ledger attestation.
 
 Verdicts are `actionable`, `not-reproduced`, `works-as-intended`, `invalid`,
 `external`, `wont-do`, or `duplicate-of:<id>`. Use `--retest` only with

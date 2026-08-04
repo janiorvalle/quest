@@ -62,11 +62,13 @@ export {
   LaneConflictCommandError,
   LifecycleCommandError,
   type LifecycleServicePorts,
+  type LifecycleSignoffBatchResult,
   type LifecycleTransitionOptions,
   type PullRequestMergeChecker,
   type PullRequestMergeState,
   type QuestMutationResult,
   type SessionAttribution,
+  signoffLifecycleQuests,
   touchLifecycleQuest,
   transitionLifecycleQuest,
 } from "./lifecycle";

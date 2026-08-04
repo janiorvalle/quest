@@ -30,7 +30,7 @@ export type ChainType = z.infer<typeof chainTypeSchema>;
 export const evidenceKindSchema = z.enum(["screenshot", "doc", "log", "other"]);
 export type EvidenceKind = z.infer<typeof evidenceKindSchema>;
 
-export const evidenceStageSchema = z.enum(["report", "investigation", "fix", "verify"]);
+export const evidenceStageSchema = z.enum(["report", "investigation", "fix", "verify", "signoff"]);
 export type EvidenceStage = z.infer<typeof evidenceStageSchema>;
 
 export const eventActionSchema = z.enum([
@@ -45,5 +45,6 @@ export const eventActionSchema = z.enum([
   "update",
   "chain",
   "touch",
+  "signoff",
 ]);
 export type EventAction = z.infer<typeof eventActionSchema>;

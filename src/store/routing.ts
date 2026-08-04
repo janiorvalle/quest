@@ -17,6 +17,8 @@ import type {
   QuestTransition,
   RepoStats,
   Sha256,
+  SignoffBatchInput,
+  SignoffBatchResult,
   TouchQuestInput,
 } from "../schema";
 import {
@@ -29,6 +31,7 @@ import {
 import type {
   BlobStore,
   FederatedReadSnapshot,
+  QuestDetailSnapshot,
   QuestStore,
   QuestWatchListener,
   WatchSubscription,
@@ -490,6 +493,10 @@ export class FederatedQuestStore implements QuestStore {
     return Promise.reject(readOnlyMutationError());
   }
 
+  signoffBatch(_input: SignoffBatchInput): Promise<SignoffBatchResult> {
+    return Promise.reject(readOnlyMutationError());
+  }
+
   addChainLink(_input: ChainMutation): Promise<ChainResult> {
     return Promise.reject(readOnlyMutationError());
   }
@@ -592,6 +599,17 @@ export class FederatedQuestStore implements QuestStore {
     const matches = await matchingQuestSources(sources, id, this.#repositoryScope);
     requireUnambiguousQuest(matches, id);
     return matches[0]?.quest ?? null;
+  }
+
+  async readQuestDetail(id: number): Promise<QuestDetailSnapshot> {
+    const sources = await this.#sourcesForRepositoryScope();
+    const matches = await matchingQuestSources(sources, id, this.#repositoryScope);
+    requireUnambiguousQuest(matches, id);
+    const match = matches[0];
+    if (match === undefined) {
+      throw new Error(`quest ${id} does not exist`);
+    }
+    return match.source.questStore.readQuestDetail(id);
   }
 
   async stats(scope: QuestScope): Promise<QuestStats> {

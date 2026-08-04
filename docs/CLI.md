@@ -252,7 +252,24 @@ quest turnin <id>                 Change submitted (merged/in review), awaiting
 quest complete <id>               Verification passed; done ("green"). If the append-only
                                   history contains a PR, that PR must be merged.
     --evidence <path>...          Attach proof from the independent retest ("verify").
+
+quest signoff <id>...             Record QA attestation for one or more completed quests.
+    --notes <text>                 Store the QA notes on each sign-off event.
+    --evidence <path>...           Attach evidence at the "signoff" stage.
 ```
+
+Sign-off is derived state, not a new quest status: a quest is signed when it is
+`complete` and its latest `signoff` event occurs after its latest `complete` event.
+Reopening and completing the quest again requires a new attestation. A sign-off
+does not change the quest row, and repeating it appends another attestation safely.
+The command validates every ID before writing any of them. A non-complete quest
+returns `SIGNOFF_NOT_COMPLETE` and explains that review, merge, and completion must
+happen first.
+
+The sign-off event bumps the logical store wire version to 8. Version 7 logical
+backups are normalized on import; a v0.15.0 reader rejects a dump containing a
+sign-off event instead of silently dropping the attestation, so older binaries
+must be upgraded before reading the new wire format.
 
 Completion reads the latest turn-in event carrying a PR, not the mutable quest
 `pr` field. When `gh` can verify the PR, only `MERGED` passes; an open or closed

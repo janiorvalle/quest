@@ -14,6 +14,7 @@ import {
   leaseExpiry,
   materializeExpiredLease,
   normalizeLeaseTtlMinutes,
+  signoffNotCompleteMessage,
   statusAfterClaimRelease,
   statusForRetestVerdict,
   statusForVerdict,
@@ -52,7 +53,10 @@ import {
   questScopeSchema,
   questStatsSchema,
   questTransitionSchema,
+  type SignoffBatchInput,
+  type SignoffBatchResult,
   STORE_SCHEMA_VERSION,
+  signoffBatchInputSchema,
   stableSerialize,
   type TouchQuestInput,
   touchQuestInputSchema,
@@ -61,6 +65,7 @@ import type {
   AcceptQuestAndExportResult,
   BackupDatabaseInspection,
   FederatedReadSnapshot,
+  QuestDetailSnapshot,
   QuestStore,
   QuestWatchListener,
   StoreMigrationSession,
@@ -576,9 +581,13 @@ export class SqliteStore implements QuestStore {
       const current = this.#requireStoredQuest(parsedId);
       this.#requireRepositoryUnfenced(current.repo);
       const timestamp = this.#now();
-      this.#requireLeaseOwner(current, parsedTransition.actor, timestamp);
+      if (parsedTransition.action !== "signoff") {
+        this.#requireLeaseOwner(current, parsedTransition.actor, timestamp);
+      }
       const updated = this.#applyTransition(current, parsedTransition, timestamp);
-      this.#updateQuest(updated);
+      if (parsedTransition.action !== "signoff") {
+        this.#updateQuest(updated);
+      }
 
       if (parsedTransition.action === "verdict" && parsedTransition.duplicate_of !== null) {
         const duplicateLink = chainSchema.parse({
@@ -606,6 +615,117 @@ export class SqliteStore implements QuestStore {
     });
     this.#emitWatchers();
     return quest;
+  }
+
+  async signoffBatch(input: SignoffBatchInput): Promise<SignoffBatchResult> {
+    const parsed = signoffBatchInputSchema.parse(input);
+    const result = this.#writeTransaction(() => this.#commitSignoffBatch(parsed));
+    this.#emitWatchers();
+    return result;
+  }
+
+  #loadSignoffBatchQuests(
+    ids: readonly number[],
+    transition: Extract<QuestTransition, { action: "signoff" }>,
+  ): Map<number, Quest> {
+    const questsById = new Map(ids.map((id) => [id, this.#requireStoredQuest(id)]));
+    for (const quest of questsById.values()) {
+      this.#requireRepositoryUnfenced(quest.repo);
+      this.#applyTransition(quest, transition, this.#now());
+    }
+    return questsById;
+  }
+
+  #groupSignoffEvidence(
+    evidence: readonly NewEvidence[],
+    questsById: ReadonlyMap<number, Quest>,
+  ): Map<number, NewEvidence[]> {
+    const evidenceByQuest = new Map<number, NewEvidence[]>();
+    for (const input of evidence) {
+      if (input.stage !== "signoff") {
+        throw new Error("sign-off batches accept only signoff-stage evidence");
+      }
+      const quest = questsById.get(input.quest_id);
+      if (quest === undefined) {
+        throw new Error(
+          `sign-off evidence references quest ${input.quest_id} outside the requested batch`,
+        );
+      }
+      if (quest.status !== "complete") {
+        throw new Error(signoffNotCompleteMessage(quest.id, quest.status));
+      }
+      const entries = evidenceByQuest.get(input.quest_id) ?? [];
+      entries.push(input);
+      evidenceByQuest.set(input.quest_id, entries);
+    }
+    return evidenceByQuest;
+  }
+
+  #persistSignoffEvidence(questId: number, input: NewEvidence, timestamp: string): Evidence {
+    const existing = this.#findEvidence(input);
+    if (existing !== null) {
+      return existing;
+    }
+    const insertion = runStatement(
+      this.#database,
+      `INSERT INTO evidence (
+        quest_id, sha256, filename, kind, stage, added_by, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      input.quest_id,
+      input.sha256,
+      input.filename,
+      input.kind,
+      input.stage,
+      input.added_by,
+      timestamp,
+    );
+    const evidenceId = Number(insertion.lastInsertRowid);
+    const { lease_ttl_minutes: _leaseTtlMinutes, ...persistedInput } = input;
+    this.#appendEvent(questId, timestamp, input.added_by, "update", {
+      evidence_id: evidenceId,
+      ...persistedInput,
+      session_guild: input.session_guild ?? null,
+    });
+    return this.#requireEvidence(evidenceId);
+  }
+
+  #persistSignoffQuest(
+    quest: Quest,
+    transition: Extract<QuestTransition, { action: "signoff" }>,
+    evidenceInputs: readonly NewEvidence[],
+    timestamp: string,
+  ): Evidence[] {
+    const { lease_ttl_minutes: _leaseTtlMinutes, ...persistedTransition } = transition;
+    this.#appendEvent(quest.id, timestamp, transition.actor, "signoff", {
+      ...persistedTransition,
+      session_guild: transition.session_guild ?? null,
+    });
+    return evidenceInputs.map((input) => this.#persistSignoffEvidence(quest.id, input, timestamp));
+  }
+
+  #commitSignoffBatch(input: SignoffBatchInput): SignoffBatchResult {
+    const ids = [...new Set(input.ids)];
+    const questsById = this.#loadSignoffBatchQuests(ids, input.transition);
+    const evidenceByQuest = this.#groupSignoffEvidence(input.evidence, questsById);
+    const timestamp = this.#now();
+    const evidence: Evidence[] = [];
+    const quests: Quest[] = [];
+    for (const id of ids) {
+      const quest = questsById.get(id);
+      if (quest === undefined) {
+        throw new Error(`quest ${id} does not exist`);
+      }
+      evidence.push(
+        ...this.#persistSignoffQuest(
+          quest,
+          input.transition,
+          evidenceByQuest.get(id) ?? [],
+          timestamp,
+        ),
+      );
+      quests.push(this.#publicQuest(quest));
+    }
+    return { evidence, quests };
   }
 
   #removeDuplicateLinksForReopen(
@@ -722,7 +842,12 @@ export class SqliteStore implements QuestStore {
       const current = this.#requireStoredQuest(parsed.quest_id);
       this.#requireRepositoryUnfenced(current.repo);
       const timestamp = this.#now();
-      this.#requireLeaseOwner(current, parsed.added_by, timestamp);
+      if (parsed.stage === "signoff" && current.status !== "complete") {
+        throw new Error(signoffNotCompleteMessage(current.id, current.status));
+      }
+      if (parsed.stage !== "signoff") {
+        this.#requireLeaseOwner(current, parsed.added_by, timestamp);
+      }
       if (current.status === "accepted") {
         this.#updateQuest(this.#renewLease(current, timestamp, parsed.lease_ttl_minutes));
       }
@@ -771,6 +896,45 @@ export class SqliteStore implements QuestStore {
   async getQuest(id: number): Promise<Quest | null> {
     const parsedId = questSchema.shape.id.parse(id);
     return this.#readTransaction(() => this.#getQuest(parsedId));
+  }
+
+  async readQuestDetail(id: number): Promise<QuestDetailSnapshot> {
+    const parsedId = questSchema.shape.id.parse(id);
+    return this.#readTransaction(() => {
+      const quest = this.#requireStoredQuest(parsedId);
+      const evidence = getRows<Evidence, [number]>(
+        this.#database,
+        `${selectEvidenceSql} WHERE quest_id = ? ORDER BY id`,
+        parsedId,
+      ).map((row) => evidenceSchema.parse(row));
+      const events = getRows<EventRow, [number]>(
+        this.#database,
+        `${selectEventsSql} WHERE quest_id = ? ORDER BY id`,
+        parsedId,
+      ).map(decodeEvent);
+      const chains = getRows<Chain, [number, number]>(
+        this.#database,
+        `${selectChainsSql}
+         WHERE quest_id = ? OR target_id = ?
+         ORDER BY quest_id, target_id, type`,
+        parsedId,
+        parsedId,
+      ).map((row) => chainSchema.parse(row));
+      const relatedIds = new Set(
+        chains.flatMap((link) => [link.quest_id, link.target_id]).filter((id) => id !== parsedId),
+      );
+      const relatedQuests = [...relatedIds].flatMap((relatedId) => {
+        const relatedQuest = this.#getStoredQuest(relatedId);
+        return relatedQuest === null ? [] : [this.#publicQuest(relatedQuest)];
+      });
+      return {
+        chains,
+        events,
+        evidence,
+        quest: this.#publicQuest(quest),
+        related_quests: relatedQuests,
+      };
+    });
   }
 
   async stats(scope: QuestScope): Promise<QuestStats> {
@@ -1614,6 +1778,11 @@ export class SqliteStore implements QuestStore {
           lease_expires_at: null,
           updated_at: timestamp,
         });
+      case "signoff":
+        if (current.status !== "complete") {
+          throw new Error(signoffNotCompleteMessage(current.id, current.status));
+        }
+        return current;
       case "cancel":
         return this.#applyCancelTransition(current, transition, timestamp);
       case "reopen":
@@ -1877,6 +2046,22 @@ export class SqliteStore implements QuestStore {
       throw new Error(`evidence ${id} does not exist`);
     }
     return evidenceSchema.parse(row);
+  }
+
+  #findEvidence(input: NewEvidence): Evidence | null {
+    const row = getRow<Evidence, [number, string, string, string, string, string]>(
+      this.#database,
+      `${selectEvidenceSql}
+       WHERE quest_id = ? AND sha256 = ? AND filename = ? AND kind = ? AND stage = ? AND added_by = ?
+       LIMIT 1`,
+      input.quest_id,
+      input.sha256,
+      input.filename,
+      input.kind,
+      input.stage,
+      input.added_by,
+    );
+    return row === null ? null : evidenceSchema.parse(row);
   }
 
   #allQuests(): Quest[] {

@@ -8,7 +8,7 @@ const displayIdSchema = z.int().positive();
 
 // Lease TTLs are part of the Convex wire contract; deploy the matching backend before
 // a client with configurable leases writes to it.
-export const STORE_SCHEMA_VERSION = 7;
+export const STORE_SCHEMA_VERSION = 8;
 export const MAX_LEASE_TTL_MINUTES = 100_000_000;
 const leaseTtlMinutesSchema = z.int().positive().max(MAX_LEASE_TTL_MINUTES);
 
@@ -155,6 +155,15 @@ const verdictTransitionSchema = z
     },
   );
 
+const signoffTransitionSchema = z.strictObject({
+  action: z.literal("signoff"),
+  actor: nonEmptyTextSchema,
+  lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
+  ...sessionAttributionFields,
+  session_guild: sessionGuildSchema,
+  notes: z.string().nullable(),
+});
+
 export const questTransitionSchema = z.union([
   z.strictObject({
     action: z.literal("abandon"),
@@ -193,6 +202,7 @@ export const questTransitionSchema = z.union([
         path: ["pr_verified_merged"],
       },
     ),
+  signoffTransitionSchema,
   z.strictObject({
     action: z.literal("reopen"),
     actor: nonEmptyTextSchema,
@@ -232,6 +242,19 @@ export const questTransitionSchema = z.union([
   }),
 ]);
 export type QuestTransition = z.infer<typeof questTransitionSchema>;
+
+export const signoffBatchInputSchema = z.strictObject({
+  ids: z.array(displayIdSchema).min(1),
+  transition: signoffTransitionSchema,
+  evidence: z.array(newEvidenceSchema),
+});
+export type SignoffBatchInput = z.infer<typeof signoffBatchInputSchema>;
+
+export const signoffBatchResultSchema = z.strictObject({
+  quests: z.array(questSchema),
+  evidence: z.array(evidenceSchema),
+});
+export type SignoffBatchResult = z.infer<typeof signoffBatchResultSchema>;
 
 export const chainMutationSchema = z.strictObject({
   link: newChainSchema,

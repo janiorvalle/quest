@@ -30,6 +30,7 @@ export type {
   BackupDatabaseRestoreSession,
   BlobStore,
   Clock,
+  QuestDetailSnapshot,
   QuestStore,
   QuestWatchListener,
   StoreCompatibilityProbe,
