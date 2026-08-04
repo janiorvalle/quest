@@ -76,6 +76,14 @@ const preSignoffQuestDumpSchema = z.strictObject({
   events: z.array(eventSchema),
 });
 
+const preActualFilesQuestDumpSchema = z.strictObject({
+  schema_version: z.literal(8),
+  quests: z.array(questSchema),
+  evidence: z.array(evidenceSchema),
+  chains: z.array(chainSchema),
+  events: z.array(eventSchema),
+});
+
 const preLeaseQuestDumpSchema = z.strictObject({
   schema_version: z.literal(3),
   quests: z.array(preLeaseQuestSchema),
@@ -132,6 +140,14 @@ export function parseQuestBackupExport(serialized: string): QuestDump {
   const current = questDumpSchema.safeParse(value);
   if (current.success) {
     return current.data;
+  }
+
+  const preActualFiles = preActualFilesQuestDumpSchema.safeParse(value);
+  if (preActualFiles.success) {
+    return questDumpSchema.parse({
+      ...preActualFiles.data,
+      schema_version: STORE_SCHEMA_VERSION,
+    });
   }
 
   const preSignoff = preSignoffQuestDumpSchema.safeParse(value);

@@ -31,4 +31,16 @@ export {
   type QuestPlan,
   type QuestPlanInput,
 } from "./plan";
+export {
+  computeQaQueue,
+  computeQaQueueFromDump,
+  type QaGroupingReason,
+  type QaQueue,
+  type QaQueueInput,
+  type QaSession,
+  type QaShell,
+  type QaSignoffVariant,
+  qaGroupingReasonValues,
+  qaShellValues,
+} from "./qa";
 export { hasSignoffEvent, isQuestSigned, signoffNotCompleteMessage } from "./signoff";
