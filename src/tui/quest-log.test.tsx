@@ -38,6 +38,7 @@ const SNAPSHOT: QuestLogSnapshot = {
   items: [ALPHA, BETA],
   loading: false,
   plan: null,
+  refreshing: false,
   signoff: {
     ...EMPTY_QUEST_LOG_SIGNOFF,
     awaitingCount: 2,
