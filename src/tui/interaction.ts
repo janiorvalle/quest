@@ -14,6 +14,8 @@ export interface QuestLogInteractionState {
 
 export type QuestLogLens = "dev" | "signoff";
 export type QuestLogSortMode = "flat" | "plan";
+export type QuestLogScrollDirection = "down" | "up";
+export type QuestLogScrollRegion = "detail" | "list";
 
 export interface QuestLogKey {
   readonly name: string;
@@ -377,4 +379,24 @@ export function reduceReadOnlyInteraction(
     navigationResult(normalized, key, context) ??
     viewResult(normalized, key, context) ?? { intent: { type: "none" }, state: normalized }
   );
+}
+
+export function reduceReadOnlyScroll(
+  state: QuestLogInteractionState,
+  region: QuestLogScrollRegion,
+  direction: QuestLogScrollDirection,
+  context: QuestLogInteractionContext,
+): QuestLogInteractionResult {
+  const normalized = normalizeState(state, context);
+  const step = direction === "up" ? -1 : 1;
+  return {
+    intent: { type: "none" },
+    state:
+      region === "list"
+        ? moveSelectionState(normalized, step, context)
+        : {
+            ...normalized,
+            detailScrollOffset: detailScrollOffset(normalized.detailScrollOffset, step, context),
+          },
+  };
 }

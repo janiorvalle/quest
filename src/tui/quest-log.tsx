@@ -1,3 +1,4 @@
+import type { MouseEvent } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -21,6 +22,7 @@ import {
   QuestListPane,
   SignoffListPane,
   SignoffSubheader,
+  StaticText,
   StatusRow,
   TabsRow,
 } from "./components";
@@ -30,8 +32,10 @@ import {
   type QuestLogInteractionState,
   type QuestLogKey,
   type QuestLogLens,
+  type QuestLogScrollRegion,
   type QuestLogSortMode,
   reduceReadOnlyInteraction,
+  reduceReadOnlyScroll,
 } from "./interaction";
 import { MAIN_CHROME_ROWS, mainPaneGeometry } from "./layout";
 import { openPrWithNotice } from "./pr";
@@ -213,6 +217,8 @@ function ReadOnlyLayout({
   activeAreaIndex,
   activeSelectedIndex,
   notice,
+  onDetailScroll,
+  onListScroll,
   policyItems,
   planAvailable,
   runtime,
@@ -236,6 +242,8 @@ function ReadOnlyLayout({
   readonly activeAreaIndex: number;
   readonly activeSelectedIndex: number;
   readonly notice: string;
+  readonly onDetailScroll: (event: MouseEvent) => void;
+  readonly onListScroll: (event: MouseEvent) => void;
   readonly policyItems: readonly QuestLogItem[];
   readonly planAvailable: boolean;
   readonly runtime: QuestLogRuntime;
@@ -288,7 +296,10 @@ function ReadOnlyLayout({
           width: "100%",
         }}
       >
-        <box style={{ flexShrink: 0, height: geometry.listHeight, width: geometry.listWidth }}>
+        <box
+          onMouseScroll={onListScroll}
+          style={{ flexShrink: 0, height: geometry.listHeight, width: geometry.listWidth }}
+        >
           {lens === "signoff" ? (
             <SignoffListPane
               height={geometry.narrow ? listHeight : mainHeight}
@@ -317,12 +328,15 @@ function ReadOnlyLayout({
           <HorizontalRule width={width} />
         ) : (
           <box style={{ height: "100%", overflow: "hidden", width: 1 }}>
-            <text fg={theme.palette.borderIdle}>
+            <StaticText fg={theme.palette.borderIdle}>
               {theme.glyphs.ruleVertical.repeat(Math.max(1, mainHeight))}
-            </text>
+            </StaticText>
           </box>
         )}
-        <box style={{ flexGrow: 1, height: "100%", width: geometry.detailWidth }}>
+        <box
+          onMouseScroll={onDetailScroll}
+          style={{ flexGrow: 1, height: "100%", width: geometry.detailWidth }}
+        >
           <DetailPane
             detail={detail}
             item={current}
@@ -350,6 +364,12 @@ function savedThemeNotice(theme: QuestTheme): string {
 
 function unsavedThemeNotice(theme: QuestTheme, reason: string): string {
   return `Theme: ${theme.name} (not saved: ${reason})`;
+}
+
+function verticalScrollDirection(event: MouseEvent): "down" | "up" | undefined {
+  return event.scroll?.direction === "down" || event.scroll?.direction === "up"
+    ? event.scroll.direction
+    : undefined;
 }
 
 function keyboardInteractionResult(
@@ -620,6 +640,27 @@ export function QuestLogApp({
     }
   });
 
+  const handleScroll = (region: QuestLogScrollRegion, event: MouseEvent): void => {
+    const direction = verticalScrollDirection(event);
+    if (direction === undefined) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const result = reduceReadOnlyScroll(interactionRef.current, region, direction, {
+      areaCount: activeAreaKeys.length,
+      areaKeys: activeAreaKeys,
+      detailContentRows: detailMetrics.contentRows,
+      detailViewportRows: detailMetrics.viewportRows,
+      questId: currentQuestId,
+      visibleCount: activeItems.length,
+      visibleQuestIds: activeQuestIds,
+      visibleQuestKeys: activeQuestKeys,
+    });
+    interactionRef.current = result.state;
+    setInteraction(result.state);
+  };
+
   return (
     <QuestThemeContext.Provider value={theme}>
       <ReadOnlyLayout
@@ -639,6 +680,8 @@ export function QuestLogApp({
           (lens === "signoff" ? snapshot.signoff.error : null) ??
           (detailState.detailStale ? "Detail refresh failed; showing stale data" : notice)
         }
+        onDetailScroll={(event) => handleScroll("detail", event)}
+        onListScroll={(event) => handleScroll("list", event)}
         policyItems={policyItems}
         planAvailable={planAvailable}
         runtime={runtime}

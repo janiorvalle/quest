@@ -25,6 +25,7 @@ import {
   type UpgradeOperations,
 } from "../services";
 import type { BlobStore, Clock, QuestStore, StoreCompatibilityProbe } from "../store";
+import { InvalidTuiMouseError, selectQuestMouse } from "../tui/mouse-selection";
 import {
   assertKnownThemeFlag,
   selectQuestTheme,
@@ -196,6 +197,7 @@ export interface OperationalCliApplicationPorts extends CliApplicationPorts {
 
 export interface FutureTuiContext {
   readonly identity?: string;
+  readonly mouse: boolean;
   readonly ports: OperationalCliApplicationPorts;
   readonly scope: QuestScope;
   readonly theme: ViewerTheme;
@@ -275,6 +277,7 @@ interface CliErrorDispatchRule {
 const CLI_ERROR_DISPATCH: readonly CliErrorDispatchRule[] = [
   { kind: "usage", matches: (error) => error instanceof ScopeResolutionError },
   { kind: "usage", matches: (error) => error instanceof UnknownThemeError },
+  { kind: "usage", matches: (error) => error instanceof InvalidTuiMouseError },
   { kind: "usage", matches: (error) => error instanceof ConvexDeploymentError },
   { kind: "domain", matches: (error) => error instanceof StoreCompatibilityError },
   { kind: "usage", matches: (error) => error instanceof LifecycleCliUsageError },
@@ -1009,6 +1012,13 @@ function resolveViewerTheme(
   };
 }
 
+function resolveViewerMouse(dependencies: QuestCliDependencies): boolean {
+  return selectQuestMouse({
+    configMouse: dependencies.config.tui?.mouse,
+    environmentMouse: dependencies.environment?.["QUEST_TUI_MOUSE"],
+  });
+}
+
 async function executeBareQuestRequest(
   flags: GlobalCliOptions,
   dependencies: QuestCliDependencies,
@@ -1024,6 +1034,7 @@ async function executeBareQuestRequest(
       ...(dependencies.config.identity === undefined
         ? {}
         : { identity: dependencies.config.identity }),
+      mouse: resolveViewerMouse(dependencies),
       ports: requireOperationalPorts(ports),
       scope: resolved.scope,
       theme: resolveViewerTheme(flags, dependencies),
