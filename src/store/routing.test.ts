@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { newQuestSchema } from "../schema";
-import type { FederatedStoreSource } from ".";
+import type { FederatedStoreSource, WatchSubscription } from ".";
 import {
   FederatedBlobStore,
   FederatedQuestStore,
@@ -284,6 +284,7 @@ describe("federated quest reads", () => {
     const questStore = new SqliteStore(join(root, "remote.db"), { now: () => timestamp });
     let snapshotReads = 0;
     let unsubscribed = false;
+    let subscription: WatchSubscription | undefined;
     try {
       await questStore.addQuest(task("remote", "Remote quest"));
       const snapshot = { dump: await questStore.exportAll(), fencedRepositories: [] };
@@ -311,7 +312,7 @@ describe("federated quest reads", () => {
         },
       };
       const emissions: unknown[] = [];
-      const subscription = await new FederatedQuestStore([source]).watch({}, (quests) =>
+      subscription = await new FederatedQuestStore([source]).watch({}, (quests) =>
         emissions.push(quests),
       );
 
@@ -319,8 +320,10 @@ describe("federated quest reads", () => {
       expect(snapshotReads).toBe(1);
       expect(emissions.at(-1)).toMatchObject([{ repo: "remote" }]);
       await subscription.unsubscribe();
+      subscription = undefined;
       expect(unsubscribed).toBeTrue();
     } finally {
+      await subscription?.unsubscribe();
       questStore.close();
       await rm(root, { force: true, recursive: true });
     }
@@ -330,6 +333,7 @@ describe("federated quest reads", () => {
     const root = await mkdtemp(join(tmpdir(), "quest-federated-snapshot-poll-"));
     const questStore = new SqliteStore(join(root, "remote.db"), { now: () => timestamp });
     let snapshotReads = 0;
+    let subscription: WatchSubscription | undefined;
     try {
       await questStore.addQuest(task("remote", "Remote quest"));
       const dump = await questStore.exportAll();
@@ -346,15 +350,15 @@ describe("federated quest reads", () => {
         },
       };
       const emissions: (readonly ReturnType<typeof task>[])[] = [];
-      const subscription = await new FederatedQuestStore([source]).watch({}, (quests) =>
+      subscription = await new FederatedQuestStore([source]).watch({}, (quests) =>
         emissions.push(quests),
       );
 
       await Bun.sleep(1_100);
       expect(snapshotReads).toBeGreaterThanOrEqual(3);
       expect(emissions.at(-1)).toEqual([]);
-      await subscription.unsubscribe();
     } finally {
+      await subscription?.unsubscribe();
       questStore.close();
       await rm(root, { force: true, recursive: true });
     }
@@ -384,6 +388,7 @@ describe("federated quest reads", () => {
       includeRepository: (repo) => repo === "local",
       questStore: localStore,
     };
+    let subscription: WatchSubscription | undefined;
 
     try {
       await localStore.addQuest(task("local", "Local quest"));
@@ -391,7 +396,7 @@ describe("federated quest reads", () => {
         readonly error: Error | undefined;
         readonly repos: readonly string[];
       }> = [];
-      const subscription = await new FederatedQuestStore([remoteSource, localSource], undefined, {
+      subscription = await new FederatedQuestStore([remoteSource, localSource], undefined, {
         allowPartialReads: true,
       }).watch({}, (quests, error) => {
         emissions.push({ error, repos: quests.map((quest) => quest.repo) });
@@ -400,8 +405,8 @@ describe("federated quest reads", () => {
       await Bun.sleep(1_250);
       expect(refreshCount).toBe(2);
       expect(emissions.at(-1)).toEqual({ error: outage, repos: ["local"] });
-      await subscription.unsubscribe();
     } finally {
+      await subscription?.unsubscribe();
       remoteStore.close();
       localStore.close();
       await rm(root, { force: true, recursive: true });
@@ -413,6 +418,7 @@ describe("federated quest reads", () => {
     const remoteStore = new SqliteStore(join(root, "remote.db"), { now: () => timestamp });
     const localStore = new SqliteStore(join(root, "local.db"), { now: () => timestamp });
     let watchAttempts = 0;
+    let subscription: WatchSubscription | undefined;
 
     try {
       await remoteStore.addQuest(task("remote", "Remote quest"));
@@ -449,7 +455,7 @@ describe("federated quest reads", () => {
         readonly error: Error | undefined;
         readonly repos: readonly string[];
       }> = [];
-      const subscription = await new FederatedQuestStore([remoteSource, localSource], undefined, {
+      subscription = await new FederatedQuestStore([remoteSource, localSource], undefined, {
         allowPartialReads: true,
       }).watch({}, (quests, error) => {
         emissions.push({ error, repos: quests.map((quest) => quest.repo).sort() });
@@ -459,8 +465,8 @@ describe("federated quest reads", () => {
       await Bun.sleep(1_100);
       expect(watchAttempts).toBe(2);
       expect(emissions.at(-1)).toEqual({ error: undefined, repos: ["local", "remote"] });
-      await subscription.unsubscribe();
     } finally {
+      await subscription?.unsubscribe();
       remoteStore.close();
       localStore.close();
       await rm(root, { force: true, recursive: true });
@@ -487,13 +493,14 @@ describe("federated quest reads", () => {
         }
       },
     };
+    let subscription: WatchSubscription | undefined;
 
     try {
-      const subscription = await new FederatedQuestStore([source]).watch({}, () => undefined);
+      subscription = await new FederatedQuestStore([source]).watch({}, () => undefined);
       await Bun.sleep(2_250);
       expect(refreshCount).toBe(3);
-      await subscription.unsubscribe();
     } finally {
+      await subscription?.unsubscribe();
       questStore.close();
       await rm(root, { force: true, recursive: true });
     }
@@ -503,6 +510,7 @@ describe("federated quest reads", () => {
     const root = await mkdtemp(join(tmpdir(), "quest-federated-progressive-watch-"));
     const remoteStore = new SqliteStore(join(root, "remote.db"), { now: () => timestamp });
     const localStore = new SqliteStore(join(root, "local.db"), { now: () => timestamp });
+    let subscription: WatchSubscription | undefined;
     try {
       await localStore.addQuest(task("local", "Local quest"));
       const remoteSnapshot = { dump: await remoteStore.exportAll(), fencedRepositories: [] };
@@ -534,10 +542,10 @@ describe("federated quest reads", () => {
       }
       const localPaint = emissions.find((emission) => emission.repos.includes("local"));
 
+      subscription = await opening;
       expect((localPaint?.at ?? Number.POSITIVE_INFINITY) - startedAt).toBeLessThan(100);
-      const subscription = await opening;
-      await subscription.unsubscribe();
     } finally {
+      await subscription?.unsubscribe();
       remoteStore.close();
       localStore.close();
       await rm(root, { force: true, recursive: true });
