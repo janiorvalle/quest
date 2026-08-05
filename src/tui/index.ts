@@ -16,9 +16,18 @@ export {
   type QuestLogInteractionState,
   type QuestLogKey,
   type QuestLogLens,
+  type QuestLogScrollDirection,
+  type QuestLogScrollRegion,
   reduceReadOnlyInteraction,
+  reduceReadOnlyScroll,
 } from "./interaction";
 export { launchQuestLog } from "./launch";
+export {
+  INVALID_TUI_MOUSE_CODE,
+  InvalidTuiMouseError,
+  type MouseSelectionSources,
+  selectQuestMouse,
+} from "./mouse-selection";
 export { QuestLogApp } from "./quest-log";
 export {
   DENSE_THEME,

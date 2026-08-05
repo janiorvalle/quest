@@ -70,7 +70,25 @@ values are self-declared like identity, not server-attested security facts.
 The dispatcher sets them for spawned workers only when its provider arguments or
 resolved provider configuration make the values explicit.
 
-## Viewer theme
+## Viewer preferences
+
+The viewer enables terminal mouse tracking by default. Hover the quest list and use the wheel to
+move its selection one row per notch; hover the detail pane to move that pane one row per notch.
+Tracking captures wheel input and changes native terminal text selection while the viewer runs, so
+use Shift-drag when the terminal supports it, or disable tracking to restore native selection and
+wheel behavior fully:
+
+```toml
+[tui]
+# Mouse tracking captures the wheel; set false to keep native selection and scrolling.
+mouse = false
+```
+
+`QUEST_TUI_MOUSE=true` or `QUEST_TUI_MOUSE=false` overrides `[tui] mouse`. Without either setting,
+mouse tracking is enabled. Terminals that do not report mouse events keep the keyboard-only behavior
+without an error; `j`/`k`, arrow keys, and `J`/`K` remain available everywhere.
+
+### Theme
 
 The viewer picks its theme from the first source that names one:
 `--theme <name>`, then `QUEST_THEME`, then `[tui] theme` in the user config,

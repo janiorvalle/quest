@@ -1,3 +1,4 @@
+import type { TextProps } from "@opentui/react";
 import { stringWidth } from "bun";
 import type { PlanLaneCluster } from "../domain/plan";
 import type {
@@ -13,6 +14,10 @@ import type {
 } from "../services/quest-log-model";
 import { DENSE_THEME, type QuestTheme, questPriorityInk, questStatusText } from "./theme";
 import { useQuestTheme } from "./theme-context";
+
+export function StaticText(props: TextProps) {
+  return <text {...props} selectable={false} />;
+}
 
 export interface HeaderCounts {
   readonly active: number;
@@ -79,9 +84,9 @@ export function HorizontalRule({ width }: { readonly width: number }) {
   const theme = useQuestTheme();
   return (
     <box style={{ height: 1, overflow: "hidden", width: "100%" }}>
-      <text fg={theme.palette.borderIdle}>
+      <StaticText fg={theme.palette.borderIdle}>
         {theme.glyphs.ruleHorizontal.repeat(Math.max(1, width))}
-      </text>
+      </StaticText>
     </box>
   );
 }
@@ -90,7 +95,7 @@ function Counts({ counts, compact }: { readonly counts: HeaderCounts; readonly c
   const theme = useQuestTheme();
   if (compact) {
     return (
-      <text>
+      <StaticText>
         <span fg={theme.palette.textPrimary}>
           <strong>{counts.total}</strong>
         </span>
@@ -103,11 +108,11 @@ function Counts({ counts, compact }: { readonly counts: HeaderCounts; readonly c
         {counts.ready === 0 ? null : (
           <span fg={theme.status.ready.color}>{` ${counts.ready}${theme.glyphs.watching}`}</span>
         )}
-      </text>
+      </StaticText>
     );
   }
   return (
-    <text>
+    <StaticText>
       <span fg={theme.palette.textPrimary}>
         <strong>{counts.total}</strong>
       </span>
@@ -131,7 +136,7 @@ function Counts({ counts, compact }: { readonly counts: HeaderCounts; readonly c
           fg={theme.status.open.color}
         >{`  ${counts.blocked} ${theme.glyphs.blockedFlag}`}</span>
       )}
-    </text>
+    </StaticText>
   );
 }
 
@@ -188,7 +193,7 @@ export function AppHeader({
         width: "100%",
       }}
     >
-      <text>
+      <StaticText>
         <span fg={theme.palette.accent}>
           <strong>{theme.labels.appTitle}</strong>
         </span>
@@ -196,15 +201,15 @@ export function AppHeader({
         {headerContext(theme, "repo", fit(repo, compact ? 18 : 28))}
         {optionalHeaderContext(theme, "branch", branch, compact ? 18 : 28, showSignoffContext)}
         {optionalHeaderContext(theme, "identity", identity, compact ? 18 : 28, showSignoffContext)}
-      </text>
+      </StaticText>
       {lens === "signoff" ? (
-        <text>
+        <StaticText>
           <span fg={theme.palette.textPrimary}>
             <strong>{signoff.awaiting}</strong>
           </span>
           <span fg={theme.palette.textMuted}> awaiting</span>
           <span fg={theme.palette.textDim}>{` · ${signoff.signed} signed`}</span>
-        </text>
+        </StaticText>
       ) : (
         <Counts compact={compact} counts={counts} />
       )}
@@ -258,20 +263,20 @@ export function TabsRow({
                 paddingRight: 1,
               }}
             >
-              <text>
+              <StaticText>
                 <span fg={active ? theme.palette.accent : theme.palette.textMuted}>
                   {active ? <strong>{tab.label}</strong> : tab.label}
                 </span>
                 <span
                   fg={active ? theme.palette.textMuted : theme.palette.textDim}
                 >{` ${tab.count}`}</span>
-              </text>
+              </StaticText>
             </box>
           );
         })}
       </box>
       <box style={{ flexShrink: 0, paddingLeft: 1 }}>
-        <text fg={theme.palette.textDim}>{fit(hint, Math.max(1, width - 2))}</text>
+        <StaticText fg={theme.palette.textDim}>{fit(hint, Math.max(1, width - 2))}</StaticText>
       </box>
     </box>
   );
@@ -298,10 +303,12 @@ export function SignoffSubheader({
         width: "100%",
       }}
     >
-      <text fg={theme.palette.sectionLabel}>
+      <StaticText fg={theme.palette.sectionLabel}>
         <strong>COMPLETED ONLY · TEST SESSIONS</strong>
-      </text>
-      <text fg={theme.palette.textDim}>{fit(`scope: ${scope}`, Math.max(1, width - 2))}</text>
+      </StaticText>
+      <StaticText fg={theme.palette.textDim}>
+        {fit(`scope: ${scope}`, Math.max(1, width - 2))}
+      </StaticText>
     </box>
   );
 }
@@ -645,16 +652,16 @@ export function QuestListPane({
     items.length === 0 ? 12 : Math.max(1, Math.round((visible.length / items.length) * 12));
   return (
     <box style={{ flexDirection: "column", height: "100%", overflow: "hidden", width: "100%" }}>
-      <text fg={theme.palette.sectionLabel}>
+      <StaticText fg={theme.palette.sectionLabel}>
         <strong>{listHeader(showKind, showAssignee, statusWidth)}</strong>
-      </text>
-      <text fg={theme.palette.borderIdle}>
+      </StaticText>
+      <StaticText fg={theme.palette.borderIdle}>
         {theme.glyphs.ruleHorizontal.repeat(Math.max(1, paneWidth))}
-      </text>
+      </StaticText>
       {visible.length === 0 ? (
-        <text fg={theme.palette.textMuted}>
+        <StaticText fg={theme.palette.textMuted}>
           {loading ? "loading quests…" : "no quests in this view"}
-        </text>
+        </StaticText>
       ) : (
         visible.map((item, index) => {
           const actualIndex = start + index;
@@ -675,7 +682,7 @@ export function QuestListPane({
               }}
             >
               {selected ? (
-                <text fg={theme.palette.selectionInk}>
+                <StaticText fg={theme.palette.selectionInk}>
                   <strong>
                     {rowText(
                       theme,
@@ -688,9 +695,9 @@ export function QuestListPane({
                       laneMarker,
                     )}
                   </strong>
-                </text>
+                </StaticText>
               ) : (
-                <text>
+                <StaticText>
                   {rowText(
                     theme,
                     item,
@@ -701,16 +708,16 @@ export function QuestListPane({
                     false,
                     laneMarker,
                   )}
-                </text>
+                </StaticText>
               )}
             </box>
           );
         })
       )}
       <box style={{ flexGrow: 1 }} />
-      <text fg={theme.palette.textDim}>
+      <StaticText fg={theme.palette.textDim}>
         {`↑↓ move · ${items.length} of ${totalCount} shown${hiddenDoneCount === 0 ? "" : ` · ${hiddenDoneCount} done hidden (d)`}  ${theme.glyphs.scrollbarTrack.repeat(scrollPosition)}${theme.glyphs.scrollbarFull.repeat(scrollExtent)}${theme.glyphs.scrollbarTrack.repeat(Math.max(0, 12 - scrollPosition - scrollExtent))}`}
-      </text>
+      </StaticText>
     </box>
   );
 }
@@ -819,11 +826,11 @@ function signoffHeaderRow(
         width: "100%",
       }}
     >
-      <text fg={options.theme.palette.sectionLabel}>
+      <StaticText fg={options.theme.palette.sectionLabel}>
         <strong>
           {fit(`${options.theme.glyphs.chainComplete} ${entry.text}`, options.paneWidth)}
         </strong>
-      </text>
+      </StaticText>
     </box>
   );
 }
@@ -879,14 +886,14 @@ function signoffQuestRow(
         width: "100%",
       }}
     >
-      <text>
+      <StaticText>
         {selected ? <strong>{row}</strong> : row}
         {suffix === "" ? null : (
           <span fg={selected ? options.theme.palette.selectionInk : options.theme.palette.textDim}>
             {` ${suffix}`}
           </span>
         )}
-      </text>
+      </StaticText>
     </box>
   );
 }
@@ -950,18 +957,18 @@ export function SignoffListPane({
     entries.length === 0 ? 12 : Math.max(1, Math.round((visible.length / entries.length) * 12));
   return (
     <box style={{ flexDirection: "column", height: "100%", overflow: "hidden", width: "100%" }}>
-      <text fg={theme.palette.sectionLabel}>
+      <StaticText fg={theme.palette.sectionLabel}>
         <strong>{listHeader(showKind, showAssignee, statusWidth)}</strong>
-      </text>
-      <text fg={theme.palette.borderIdle}>
+      </StaticText>
+      <StaticText fg={theme.palette.borderIdle}>
         {theme.glyphs.ruleHorizontal.repeat(Math.max(1, paneWidth))}
-      </text>
+      </StaticText>
       {visible.length === 0 ? (
-        <text fg={theme.palette.textMuted}>
+        <StaticText fg={theme.palette.textMuted}>
           {loading
             ? "loading sign-off lens…"
             : (lens.error ?? lens.emptyMessage ?? "No unsigned completed quests.")}
-        </text>
+        </StaticText>
       ) : (
         visible.map((entry, index) =>
           signoffListRow(entry, start + index, {
@@ -976,9 +983,9 @@ export function SignoffListPane({
         )
       )}
       <box style={{ flexGrow: 1 }} />
-      <text fg={theme.palette.textDim}>
+      <StaticText fg={theme.palette.textDim}>
         {`↑↓ move · ${lens.awaitingCount} awaiting · ${lens.signedCount} signed  ${theme.glyphs.scrollbarTrack.repeat(scrollPosition)}${theme.glyphs.scrollbarFull.repeat(scrollExtent)}${theme.glyphs.scrollbarTrack.repeat(Math.max(0, 12 - scrollPosition - scrollExtent))}`}
-      </text>
+      </StaticText>
     </box>
   );
 }
@@ -1716,23 +1723,23 @@ function DetailEvidenceRowView({
 }) {
   if (row.kind === "loading") {
     return (
-      <text fg={theme.palette.textDim} key={row.key} wrapMode="none">
+      <StaticText fg={theme.palette.textDim} key={row.key} wrapMode="none">
         {fit(row.text ?? "loading detail…", width)}
-      </text>
+      </StaticText>
     );
   }
   if (row.kind === "empty") {
     return (
-      <text fg={theme.palette.textDim} key={row.key} wrapMode="none">
+      <StaticText fg={theme.palette.textDim} key={row.key} wrapMode="none">
         {fit(theme.labels.evidenceEmpty, width)}
-      </text>
+      </StaticText>
     );
   }
   if (row.kind === "marker") {
     return (
-      <text fg={theme.palette.textDim} key={row.key} wrapMode="none">
+      <StaticText fg={theme.palette.textDim} key={row.key} wrapMode="none">
         {fit("…", width)}
-      </text>
+      </StaticText>
     );
   }
   const evidence = row.entry;
@@ -1743,14 +1750,14 @@ function DetailEvidenceRowView({
   const glyph = complete ? theme.glyphs.evidenceComplete : theme.glyphs.evidencePending;
   const prefix = `${glyph} `;
   return (
-    <text key={row.key} wrapMode="none">
+    <StaticText key={row.key} wrapMode="none">
       {row.continuation ? (
         <span fg={theme.palette.textDim}>{row.indent}</span>
       ) : (
         <span fg={complete ? theme.status.complete.color : theme.palette.warn}>{prefix}</span>
       )}
       <span fg={theme.palette.textPrimary}>{row.text ?? ""}</span>
-    </text>
+    </StaticText>
   );
 }
 
@@ -1779,10 +1786,10 @@ function DetailActivityRowView({
   readonly theme: QuestTheme;
 }) {
   if (row.kind === "placeholder" || row.kind === "marker") {
-    return <text fg={theme.palette.textDim}>{row.placeholder}</text>;
+    return <StaticText fg={theme.palette.textDim}>{row.placeholder}</StaticText>;
   }
   return (
-    <text wrapMode="none">
+    <StaticText wrapMode="none">
       {row.continuation ? (
         <span fg={theme.palette.textDim}>{row.indent}</span>
       ) : (
@@ -1794,7 +1801,7 @@ function DetailActivityRowView({
       {row.detail === null ? null : (
         <span fg={theme.palette.textDim}>{row.continuation ? row.detail : ` · ${row.detail}`}</span>
       )}
-    </text>
+    </StaticText>
   );
 }
 
@@ -1808,7 +1815,7 @@ function DetailChainRowView({
   readonly theme: QuestTheme;
 }) {
   if (row.kind === "marker") {
-    return <text fg={theme.palette.textDim}>…</text>;
+    return <StaticText fg={theme.palette.textDim}>…</StaticText>;
   }
   const ref = row.ref;
   if (ref === null) {
@@ -1820,25 +1827,25 @@ function DetailChainRowView({
         ? stringWidth(`${ref.id} ${theme.glyphs.arrow} `)
         : stringWidth(`${item.id} ${theme.labels.chainDuplicateOf} ${ref.id} `);
     return (
-      <text wrapMode="none">
+      <StaticText wrapMode="none">
         <span fg={theme.palette.textDim}>{" ".repeat(prefixWidth)}</span>
         <span fg={theme.palette.textDim}>{row.body}</span>
-      </text>
+      </StaticText>
     );
   }
   return row.kind === "relation" ? (
-    <text wrapMode="none">
+    <StaticText wrapMode="none">
       <span fg={theme.status[ref.status].color}>{`${ref.id} `}</span>
       <span fg={theme.palette.textMuted}>{`${theme.glyphs.arrow} `}</span>
       <span fg={theme.palette.textDim}>{row.body}</span>
-    </text>
+    </StaticText>
   ) : (
-    <text wrapMode="none">
+    <StaticText wrapMode="none">
       <span fg={theme.palette.textPrimary}>{`${item.id} `}</span>
       <span fg={theme.palette.textMuted}>{`${theme.labels.chainDuplicateOf} `}</span>
       <span fg={theme.status[ref.status].color}>{`${ref.id} `}</span>
       <span fg={theme.palette.textDim}>{row.body}</span>
-    </text>
+    </StaticText>
   );
 }
 
@@ -1867,30 +1874,30 @@ function DetailHeader({
   const statusSuffixWidth = Math.min(detailContentWidth, stringWidth(statusSuffix));
   const statusPrefixWidth = Math.max(0, detailContentWidth - statusSuffixWidth);
   const rows = [
-    <text key="title" wrapMode="none">
+    <StaticText key="title" wrapMode="none">
       <span fg={theme.palette.textMuted}>{titlePrefix}</span>
       <span fg={theme.palette.textPrimary}>
         <strong>
           {fit(item.title, Math.max(1, detailContentWidth - stringWidth(titlePrefix)))}
         </strong>
       </span>
-    </text>,
-    <text key="status" wrapMode="none">
+    </StaticText>,
+    <StaticText key="status" wrapMode="none">
       <span fg={theme.palette.textMuted}>{fit(statusPrefix, statusPrefixWidth)}</span>
       <span fg={status.color}>{fit(statusSuffix, statusSuffixWidth)}</span>
-    </text>,
-    <text fg={theme.palette.borderIdle} key="rule">
+    </StaticText>,
+    <StaticText fg={theme.palette.borderIdle} key="rule">
       {theme.glyphs.ruleHorizontal.repeat(Math.max(1, paneWidth - 2))}
-    </text>,
-    <text fg={theme.palette.textMuted} key="assignee" wrapMode="none">
+    </StaticText>,
+    <StaticText fg={theme.palette.textMuted} key="assignee" wrapMode="none">
       {fit(assigneeWithAttribution, detailContentWidth)}
-    </text>,
-    <text fg={theme.palette.textMuted} key="opened-by" wrapMode="none">
+    </StaticText>,
+    <StaticText fg={theme.palette.textMuted} key="opened-by" wrapMode="none">
       {fit(`opened by   ${item.openedBy}`, detailContentWidth)}
-    </text>,
-    <text fg={theme.palette.accent} key="pr" wrapMode="none">
+    </StaticText>,
+    <StaticText fg={theme.palette.accent} key="pr" wrapMode="none">
       {fit(`pr          ${item.pr ?? "—"}`, detailContentWidth)}
-    </text>,
+    </StaticText>,
   ];
   return <>{rows.slice(0, headerRows)}</>;
 }
@@ -1930,27 +1937,27 @@ function DetailDocumentLineView({
       return <DetailChainRowView item={item} row={line.row} theme={theme} />;
     case "description":
       return (
-        <text fg={theme.palette.textPrimary} key={line.key} wrapMode="none">
+        <StaticText fg={theme.palette.textPrimary} key={line.key} wrapMode="none">
           {line.text}
-        </text>
+        </StaticText>
       );
     case "evidence":
       return <DetailEvidence rows={[line.row]} width={Math.max(1, paneWidth)} />;
     case "file":
       return (
-        <text fg={theme.palette.textMuted} key={line.key} wrapMode="none">
+        <StaticText fg={theme.palette.textMuted} key={line.key} wrapMode="none">
           {line.text}
-        </text>
+        </StaticText>
       );
     case "lane-conflict":
       return (
-        <text fg={theme.palette.warn} key={line.key} wrapMode="none">
+        <StaticText fg={theme.palette.warn} key={line.key} wrapMode="none">
           {line.text}
-        </text>
+        </StaticText>
       );
     case "section":
       return (
-        <text fg={theme.palette.sectionLabel} key={line.key}>
+        <StaticText fg={theme.palette.sectionLabel} key={line.key}>
           <strong>
             {detailSectionLabel(
               theme,
@@ -1958,7 +1965,7 @@ function DetailDocumentLineView({
               line.section === "evidence" ? line.count : undefined,
             )}
           </strong>
-        </text>
+        </StaticText>
       );
   }
 }
@@ -2005,7 +2012,7 @@ export function DetailPane({
           width: "100%",
         }}
       >
-        <text fg={theme.palette.textMuted}>select a quest</text>
+        <StaticText fg={theme.palette.textMuted}>select a quest</StaticText>
       </box>
     );
   }
@@ -2063,9 +2070,9 @@ export function DetailPane({
         </box>
       ) : null}
       {metrics.showFooter ? (
-        <text fg={theme.palette.textDim} wrapMode="none">
+        <StaticText fg={theme.palette.textDim} wrapMode="none">
           {fit(footer, Math.max(1, paneWidth - 2))}
-        </text>
+        </StaticText>
       ) : null}
     </box>
   );
@@ -2093,7 +2100,7 @@ export function StatusRow({
         width: "100%",
       }}
     >
-      <text>
+      <StaticText>
         <span fg={theme.status.complete.color}>{`${theme.glyphs.watching} watching`}</span>
         <span fg={theme.palette.textMuted}>{` · live · poll ${pollIntervalMs}ms`}</span>
         {notice === "Watching for quest changes" ? null : (
@@ -2101,8 +2108,8 @@ export function StatusRow({
             fg={theme.palette.textSecondary}
           >{` · ${fit(notice, Math.max(1, width - 48))}`}</span>
         )}
-      </text>
-      <text fg={theme.palette.textMuted}>read-only</text>
+      </StaticText>
+      <StaticText fg={theme.palette.textMuted}>read-only</StaticText>
     </box>
   );
 }
@@ -2166,7 +2173,7 @@ export function FooterKeymap({
         width: "100%",
       }}
     >
-      <text>
+      <StaticText>
         {actions.map(([key, label]) => (
           <span key={`${key}:${label}`}>
             {key === "" ? null : (
@@ -2179,13 +2186,13 @@ export function FooterKeymap({
             </span>
           </span>
         ))}
-      </text>
-      <text>
+      </StaticText>
+      <StaticText>
         <span fg={theme.palette.hint}>
           <strong>q</strong>
         </span>
         <span fg={theme.palette.textMuted}> quit</span>
-      </text>
+      </StaticText>
     </box>
   );
 }
