@@ -9,6 +9,7 @@ import {
   executeSkillCli,
   hasQuestSkillInstalled,
   QUEST_SKILL_INSTALL_SUGGESTION,
+  refreshInstalledSkillsAfterUpgrade,
   SkillCliConflictError,
   type SkillCliRequest,
 } from "./skill";
@@ -174,4 +175,106 @@ test("Commander captures skill install options without opening a backend", async
 test("skill detection is unknown when no home directory is available", async () => {
   expect(await hasQuestSkillInstalled({})).toBeUndefined();
   expect(QUEST_SKILL_INSTALL_SUGGESTION).toContain("quest skill install");
+});
+
+test("upgrade refreshes only skill homes that were already installed", async () => {
+  const home = await temporaryHome();
+  const claudeDirectory = join(home, ".claude", "skills", "quest");
+  const codexDirectory = join(home, ".codex", "skills", "quest");
+  const calls: string[][] = [];
+  try {
+    for (const directory of [claudeDirectory, codexDirectory]) {
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "SKILL.md"), "stale skill\n", "utf8");
+    }
+    const result = await refreshInstalledSkillsAfterUpgrade({
+      environment: { HOME: home },
+      executablePath: "/staged/quest",
+      previousVersion: "0.15.0",
+      runCommand: async (executable, arguments_) => {
+        calls.push([executable, ...arguments_]);
+        const directory = arguments_.at(-1);
+        if (directory === undefined) {
+          throw new Error("missing test directory");
+        }
+        for (const file of bundledSkillFiles) {
+          await mkdir(join(directory, file.relativePath, ".."), { recursive: true });
+          await writeFile(join(directory, file.relativePath), file.content, "utf8");
+        }
+        return { exitCode: 0, stderr: "" };
+      },
+    });
+
+    expect(result).toEqual({
+      failures: [],
+      refreshed: [
+        { agent: "Claude Code", previous_version: "0.15.0" },
+        { agent: "Codex", previous_version: "0.15.0" },
+      ],
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => call[0] === "/staged/quest")).toBe(true);
+    for (const directory of [claudeDirectory, codexDirectory]) {
+      for (const file of bundledSkillFiles) {
+        expect(await readFile(join(directory, file.relativePath), "utf8")).toBe(file.content);
+      }
+    }
+  } finally {
+    await rm(home, { force: true, recursive: true });
+  }
+});
+
+test("upgrade leaves absent skill homes untouched", async () => {
+  const home = await temporaryHome();
+  let commandRuns = 0;
+  try {
+    const result = await refreshInstalledSkillsAfterUpgrade({
+      environment: { HOME: home },
+      executablePath: "/staged/quest",
+      previousVersion: "0.15.0",
+      runCommand: async () => {
+        commandRuns += 1;
+        return { exitCode: 0, stderr: "" };
+      },
+    });
+
+    expect(result).toEqual({ failures: [], refreshed: [] });
+    expect(commandRuns).toBe(0);
+    expect(await Bun.file(join(home, ".claude", "skills", "quest", "SKILL.md")).exists()).toBe(
+      false,
+    );
+    expect(await Bun.file(join(home, ".codex", "skills", "quest", "SKILL.md")).exists()).toBe(
+      false,
+    );
+  } finally {
+    await rm(home, { force: true, recursive: true });
+  }
+});
+
+test("upgrade reports a refresh failure with the manual remedy", async () => {
+  const home = await temporaryHome();
+  const codexDirectory = join(home, ".codex", "skills", "quest");
+  try {
+    await mkdir(codexDirectory, { recursive: true });
+    await writeFile(join(codexDirectory, "SKILL.md"), "stale skill\n", "utf8");
+    const result = await refreshInstalledSkillsAfterUpgrade({
+      environment: { HOME: home },
+      executablePath: "/staged/quest",
+      previousVersion: "0.15.0",
+      runCommand: async () => ({ exitCode: 1, stderr: "permission denied" }),
+    });
+
+    expect(result).toEqual({
+      failures: [
+        {
+          agent: "Codex",
+          message: "permission denied",
+          remedy: "quest skill install --force",
+        },
+      ],
+      refreshed: [],
+    });
+  } finally {
+    await rm(home, { force: true, recursive: true });
+  }
 });

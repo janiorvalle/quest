@@ -111,10 +111,12 @@ export {
   hasQuestSkillInstalled,
   isSkillCliRequest,
   QUEST_SKILL_INSTALL_SUGGESTION,
+  refreshInstalledSkillsAfterUpgrade,
   registerSkillCommands,
   SkillCliConflictError,
   type SkillCliRequest,
   SkillCliUsageError,
+  type SkillRefreshCommandRunner,
 } from "./skill";
 export {
   type ExecuteUpgradeCliOptions,

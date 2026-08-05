@@ -90,6 +90,7 @@ import {
   locateGitRoot,
   type WorkingDirectoryValidator,
 } from "./scope";
+import { refreshInstalledSkillsAfterUpgrade } from "./skill";
 import { executeUpgradeCli, isUpgradeCliRequest, type UpgradeCliRequest } from "./upgrade";
 
 type BackendName = Config["store"]["backend"];
@@ -1329,6 +1330,12 @@ async function runStandaloneUpgrade(
     createUpgradeOperations({
       executablePath: platform.directories.executable,
       platform: platform.name,
+      refreshInstalledSkills: (executablePath, previousVersion) =>
+        refreshInstalledSkillsAfterUpgrade({
+          environment: options.environment,
+          executablePath,
+          previousVersion,
+        }),
       ...(options.environment["QUEST_UPGRADE_REPO"] === undefined
         ? {}
         : { repository: options.environment["QUEST_UPGRADE_REPO"] }),
@@ -1426,6 +1433,8 @@ export async function createCompositionRoot(
   const upgrade = createUpgradeOperations({
     executablePath: platform.directories.executable,
     platform: platform.name,
+    refreshInstalledSkills: (executablePath, previousVersion) =>
+      refreshInstalledSkillsAfterUpgrade({ environment, executablePath, previousVersion }),
     ...(environment["QUEST_UPGRADE_REPO"] === undefined
       ? {}
       : { repository: environment["QUEST_UPGRADE_REPO"] }),

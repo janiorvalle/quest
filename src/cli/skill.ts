@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -7,6 +8,7 @@ import { z } from "zod";
 
 import { type CliOutputBoundary, EXIT_SUCCESS, type ExitCode, formatQuestReport } from "../output";
 import { questReportSchema } from "../schema";
+import type { SkillRefreshResult } from "../services";
 import type { CliFormat } from "./scope";
 import { bundledSkillFiles, bundledSkillMarkdown } from "./skill-assets";
 
@@ -66,6 +68,16 @@ interface SkillDirectories {
   readonly claude: string;
   readonly codex: string;
 }
+
+interface SkillRefreshCommandResult {
+  readonly exitCode: number;
+  readonly stderr: string;
+}
+
+export type SkillRefreshCommandRunner = (
+  executable: string,
+  arguments_: readonly string[],
+) => Promise<SkillRefreshCommandResult>;
 
 interface SkillDirectoryOptions {
   readonly claudeDirectory?: string | undefined;
@@ -440,6 +452,87 @@ function skillDirectoryCandidates(
     (directory): directory is string => directory !== undefined,
   );
   return directories.length === 0 ? undefined : directories;
+}
+
+function defaultSkillRefreshCommandRunner(
+  executable: string,
+  arguments_: readonly string[],
+): Promise<SkillRefreshCommandResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, arguments_, {
+      stdio: ["ignore", "ignore", "pipe"],
+      windowsHide: true,
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.once("error", reject);
+    child.once("close", (exitCode) => resolve({ exitCode: exitCode ?? 1, stderr }));
+  });
+}
+
+function installedSkillCandidates(
+  environment: Readonly<Record<string, string | undefined>>,
+): readonly { readonly agent: string; readonly directory: string }[] {
+  const claude = resolveDirectory(undefined, environment, CLAUDE_DIRECTORY_ENVIRONMENT, [
+    ".claude",
+    "skills",
+    "quest",
+  ]);
+  const codex = resolveDirectory(
+    undefined,
+    environment,
+    CODEX_DIRECTORY_ENVIRONMENT,
+    [".codex", "skills", "quest"],
+    { environmentName: CODEX_HOME_ENVIRONMENT, segments: ["skills", "quest"] },
+  );
+  return [
+    ...(claude === undefined ? [] : [{ agent: "Claude Code", directory: claude }]),
+    ...(codex === undefined ? [] : [{ agent: "Codex", directory: codex }]),
+  ];
+}
+
+export async function refreshInstalledSkillsAfterUpgrade(options: {
+  readonly environment: Readonly<Record<string, string | undefined>>;
+  readonly executablePath: string;
+  readonly previousVersion: string;
+  readonly runCommand?: SkillRefreshCommandRunner;
+}): Promise<SkillRefreshResult> {
+  const failures: SkillRefreshResult["failures"][number][] = [];
+  const refreshed: SkillRefreshResult["refreshed"][number][] = [];
+  const runCommand = options.runCommand ?? defaultSkillRefreshCommandRunner;
+  for (const candidate of installedSkillCandidates(options.environment)) {
+    try {
+      const metadata = await lstat(skillFilePath(candidate.directory, "SKILL.md"));
+      if (!metadata.isFile()) {
+        throw new Error(`${skillFilePath(candidate.directory, "SKILL.md")} is not a regular file`);
+      }
+      const result = await runCommand(options.executablePath, [
+        "skill",
+        "install",
+        "--force",
+        "--claude-dir",
+        candidate.directory,
+        "--codex-dir",
+        candidate.directory,
+      ]);
+      if (result.exitCode !== 0) {
+        throw new Error(result.stderr.trim() || `new quest binary exited ${result.exitCode}`);
+      }
+      refreshed.push({ agent: candidate.agent, previous_version: options.previousVersion });
+    } catch (error: unknown) {
+      if (isMissingPathError(error)) {
+        continue;
+      }
+      failures.push({
+        agent: candidate.agent,
+        message: error instanceof Error ? error.message : String(error),
+        remedy: "quest skill install --force",
+      });
+    }
+  }
+  return { failures, refreshed };
 }
 
 export async function hasQuestSkillInstalled(

@@ -154,6 +154,7 @@ describe("upgrade service", () => {
     const checksum = createHash("sha256").update(artifact).digest("hex");
     const requested: string[] = [];
     const { calls, fileSystem } = fakeFileSystem();
+    const refreshCalls: string[] = [];
     const operations = createUpgradeOperations({
       architecture: "arm64",
       executablePath: "/install/quest",
@@ -167,6 +168,13 @@ describe("upgrade service", () => {
         requested,
       ),
       platform: "darwin",
+      refreshInstalledSkills: async (executablePath, previousVersion) => {
+        refreshCalls.push(`${executablePath}:${previousVersion}`);
+        return {
+          failures: [],
+          refreshed: [{ agent: "Codex", previous_version: previousVersion }],
+        };
+      },
       repository: "owner/repo",
     });
 
@@ -175,12 +183,79 @@ describe("upgrade service", () => {
       current_version: "0.8.0",
       installed: true,
       latest_version: "0.8.1",
+      skill_refreshes: [{ agent: "Codex", previous_version: "0.8.0" }],
       update_available: true,
     });
     expect(requested).toEqual([latestUrl, artifactApiUrl, checksumsApiUrl]);
     expect(calls.indexOf("rm:/install/quest")).toBeLessThan(
       calls.findIndex((call) => call.startsWith("move:")),
     );
+    expect(refreshCalls).toEqual(["/install/quest:0.8.0"]);
+  });
+
+  test("refreshes from the staged new binary when replacement is deferred", async () => {
+    const artifact = new TextEncoder().encode("quest 0.8.1");
+    const checksum = createHash("sha256").update(artifact).digest("hex");
+    const { fileSystem } = fakeFileSystem();
+    const refreshPaths: string[] = [];
+    const operations = createUpgradeOperations({
+      architecture: "arm64",
+      executablePath: "/install/quest",
+      fileSystem,
+      httpClient: httpClient(
+        new Map([
+          [latestUrl, response(releasePayload())],
+          [artifactApiUrl, response(artifact)],
+          [checksumsApiUrl, response(`${checksum}  quest-0.8.1-darwin-arm64\n`)],
+        ]),
+        [],
+      ),
+      platform: "darwin",
+      refreshInstalledSkills: async (executablePath) => {
+        refreshPaths.push(executablePath);
+        return { failures: [], refreshed: [] };
+      },
+      replaceExecutable: async () => "scheduled",
+      repository: "owner/repo",
+    });
+
+    await expect(operations.install("0.8.0")).resolves.toMatchObject({ installed: true });
+    expect(refreshPaths).toEqual(["/install/.quest-upgrade-123/quest"]);
+  });
+
+  test("keeps a successful binary upgrade successful when skill refresh throws", async () => {
+    const artifact = new TextEncoder().encode("quest 0.8.1");
+    const checksum = createHash("sha256").update(artifact).digest("hex");
+    const { fileSystem } = fakeFileSystem();
+    const operations = createUpgradeOperations({
+      architecture: "arm64",
+      executablePath: "/install/quest",
+      fileSystem,
+      httpClient: httpClient(
+        new Map([
+          [latestUrl, response(releasePayload())],
+          [artifactApiUrl, response(artifact)],
+          [checksumsApiUrl, response(`${checksum}  quest-0.8.1-darwin-arm64\n`)],
+        ]),
+        [],
+      ),
+      platform: "darwin",
+      refreshInstalledSkills: async () => {
+        throw new Error("permission denied");
+      },
+      repository: "owner/repo",
+    });
+
+    await expect(operations.install("0.8.0")).resolves.toMatchObject({
+      installed: true,
+      skill_refresh_failures: [
+        {
+          agent: "Claude Code and Codex",
+          message: "permission denied",
+          remedy: "quest skill install --force",
+        },
+      ],
+    });
   });
 
   test("refuses a checksum mismatch before touching the installed binary", async () => {

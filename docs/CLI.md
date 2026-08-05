@@ -453,6 +453,15 @@ quest upgrade [--check]             Check the latest release, or install it.
                                     Downloads only the current platform artifact,
                                     verifies checksums.txt, then unlinks and
                                     renames the staged binary into place.
+                                    Also refreshes the Quest skill in Claude Code
+                                    and Codex homes where it is already installed;
+                                    it never installs the skill into a new home.
+                                    A refresh failure is reported separately with
+                                    `quest skill install --force` as the remedy and
+                                    does not turn a successful binary swap into a
+                                    failed upgrade. On Windows, the deferred swap
+                                    refreshes from the staged new binary so the
+                                    skill matches the binary installed after exit.
                                     --check never downloads or changes files.
 ```
 
