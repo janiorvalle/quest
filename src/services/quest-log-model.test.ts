@@ -594,17 +594,25 @@ describe("read-only quest log runtime", () => {
     let lateSubscriptionClosed = false;
     let lateSubscriptionCloseAttempts = 0;
     let previousScopeListener: QuestWatchListener | undefined;
+    let releaseFailedWatch = (): void => undefined;
+    const failedWatch = new Promise<void>((resolve) => {
+      releaseFailedWatch = resolve;
+    });
+    let releaseLateWatch = (): void => undefined;
+    const lateWatch = new Promise<void>((resolve) => {
+      releaseLateWatch = resolve;
+    });
     store.watch = async (filter, listener) => {
       watchCalls += 1;
       if (watchCalls === 1) {
         previousScopeListener = listener;
       }
       if (watchCalls === 4) {
-        await Bun.sleep(30);
+        await failedWatch;
         throw new Error("scope watch failed");
       }
       if (watchCalls === 5) {
-        await Bun.sleep(60);
+        await lateWatch;
         const subscription = await watch(filter, listener);
         return {
           unsubscribe: async () => {
@@ -629,7 +637,7 @@ describe("read-only quest log runtime", () => {
       );
 
       const switching = runtime.cycleScope();
-      await Bun.sleep(10);
+      await waitFor(() => watchCalls === 5);
       await store.addQuest(questInput("alpha", "Alpha arrived during rollback"));
       await store.acceptQuest({ id: alpha.id, owner: "worker" });
       await store.transition(alpha.id, {
@@ -646,6 +654,8 @@ describe("read-only quest log runtime", () => {
         await store.listQuests({ repo: "alpha" }),
         new Error("[CONVEX_REALTIME_WATCH_FAILED] previous scope disconnected; retrying"),
       );
+      releaseFailedWatch();
+      releaseLateWatch();
       await expect(switching).rejects.toThrow("scope watch failed");
       expect(latest(snapshots)).toMatchObject({
         currentRepo: "alpha",
@@ -663,6 +673,8 @@ describe("read-only quest log runtime", () => {
       expect(lateSubscriptionCloseAttempts).toBe(2);
       expect(lateSubscriptionClosed).toBeTrue();
     } finally {
+      releaseFailedWatch();
+      releaseLateWatch();
       unsubscribe();
       await runtime.stop();
       store.close();
