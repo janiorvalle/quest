@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 
 import type { UpgradeFileSystem, UpgradeHttpClient } from "./upgrade";
 import { createUpgradeOperations } from "./upgrade";
@@ -220,7 +221,7 @@ describe("upgrade service", () => {
     });
 
     await expect(operations.install("0.8.0")).resolves.toMatchObject({ installed: true });
-    expect(refreshPaths).toEqual(["/install/.quest-upgrade-123/quest"]);
+    expect(refreshPaths).toEqual([join("/install", ".quest-upgrade-123", "quest")]);
   });
 
   test("keeps a successful binary upgrade successful when skill refresh throws", async () => {
