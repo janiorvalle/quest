@@ -144,6 +144,8 @@ function harness(options: {
           latest_version: "1.2.3",
           release_url: "https://example.com/release",
           repository: "janiorvalle/quest",
+          skill_refresh_failures: [],
+          skill_refreshes: [],
           target: "darwin-arm64",
           update_available: false,
         }),

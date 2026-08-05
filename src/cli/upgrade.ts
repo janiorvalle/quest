@@ -24,6 +24,19 @@ const upgradeDataSchema = z.strictObject({
   latest_version: z.string().trim().min(1),
   release_url: z.url(),
   repository: z.string().trim().min(1),
+  skill_refresh_failures: z.array(
+    z.strictObject({
+      agent: z.string().trim().min(1),
+      message: z.string().trim().min(1),
+      remedy: z.literal("quest skill install --force"),
+    }),
+  ),
+  skill_refreshes: z.array(
+    z.strictObject({
+      agent: z.string().trim().min(1),
+      previous_version: z.string().trim().min(1),
+    }),
+  ),
   target: z.string().trim().min(1),
   update_available: z.boolean(),
 });
@@ -66,7 +79,14 @@ function renderUpgrade(result: UpgradeResult, check: boolean): string {
   if (check) {
     return `quest upgrade: ${result.latest_version} is available (current ${result.current_version}); run quest upgrade to install\n`;
   }
-  return `Upgraded quest ${result.current_version} -> ${result.latest_version}\nchecksum: ${result.checksum}\n`;
+  const refreshes = result.skill_refreshes.map(
+    (refresh) => `refreshed skill for ${refresh.agent} (was ${refresh.previous_version})\n`,
+  );
+  const failures = result.skill_refresh_failures.map(
+    (failure) =>
+      `warning: could not refresh skill for ${failure.agent}: ${failure.message}; run \`${failure.remedy}\`\n`,
+  );
+  return `Upgraded quest ${result.current_version} -> ${result.latest_version}\nchecksum: ${result.checksum}\n${refreshes.join("")}${failures.join("")}`;
 }
 
 export async function executeUpgradeCli(options: ExecuteUpgradeCliOptions): Promise<ExitCode> {
@@ -75,6 +95,8 @@ export async function executeUpgradeCli(options: ExecuteUpgradeCliOptions): Prom
         ...(await options.operations.check(options.applicationVersion)),
         checksum: null,
         installed: false,
+        skill_refresh_failures: [],
+        skill_refreshes: [],
       }
     : await options.operations.install(options.applicationVersion);
   const data = upgradeDataSchema.parse(result);
@@ -84,7 +106,10 @@ export async function executeUpgradeCli(options: ExecuteUpgradeCliOptions): Prom
       data,
       filters: {},
       generated_at: await options.clock.now(),
-      warnings: [],
+      warnings: data.skill_refresh_failures.map(
+        (failure) =>
+          `could not refresh skill for ${failure.agent}: ${failure.message}; run ${failure.remedy}`,
+      ),
     });
     options.output.write(formatQuestReport(report));
   } else {
