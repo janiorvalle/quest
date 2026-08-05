@@ -531,9 +531,13 @@ describe("read-only quest log runtime", () => {
     await store.addQuest(questInput("beta", "Beta quest"));
     const watch = store.watch.bind(store);
     let delayWatchRegistration = false;
+    let releaseDelayedWatches = (): void => undefined;
+    const delayedWatches = new Promise<void>((resolve) => {
+      releaseDelayedWatches = resolve;
+    });
     store.watch = async (filter, listener) => {
       if (delayWatchRegistration) {
-        await Bun.sleep(300);
+        await delayedWatches;
       }
       return watch(filter, listener);
     };
@@ -564,9 +568,11 @@ describe("read-only quest log runtime", () => {
       expect((stalePaint?.at ?? Number.POSITIVE_INFINITY) - startedAt).toBeLessThan(100);
       expect(stalePaint?.value.items.map((item) => item.repo)).toEqual(["beta"]);
       expect(refreshFinished).toBeFalse();
+      releaseDelayedWatches();
       await expect(switching).resolves.toEqual({ currentRepo: "beta", scope: "current" });
       expect(latest(snapshots.map(({ value }) => value)).refreshing).toBeFalse();
     } finally {
+      releaseDelayedWatches();
       unsubscribe();
       await runtime.stop();
       store.close();
