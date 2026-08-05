@@ -77,43 +77,56 @@ describe("Convex reactive watches", () => {
     const fake = fakeClients();
     const store = new ConvexStore("http://127.0.0.1:3210", { clients: fake.clients });
     const emissions: unknown[] = [];
+    let subscription: Awaited<ReturnType<ConvexStore["watch"]>> | undefined;
 
-    const subscription = await store.watch({ repo: "quest" }, (quests) => emissions.push(quests));
-    expect(fake.httpQueries()).toBe(1);
-    expect(fake.entries).toHaveLength(2);
+    try {
+      subscription = await store.watch({ repo: "quest" }, (quests) => emissions.push(quests));
+      expect(fake.httpQueries()).toBe(1);
+      expect(fake.entries).toHaveLength(2);
 
-    fake.entries[0]?.callback([quest]);
-    fake.entries[1]?.callback([quest]);
-    fake.entries[0]?.callback([]);
-    expect(emissions).toEqual([[quest], []]);
-    expect(fake.httpQueries()).toBe(1);
+      fake.entries[0]?.callback([quest]);
+      fake.entries[1]?.callback([quest]);
+      fake.entries[0]?.callback([]);
+      expect(emissions).toEqual([[quest], []]);
+      expect(fake.httpQueries()).toBe(1);
 
-    await subscription.unsubscribe();
-    expect(fake.entries.every((entry) => entry.unsubscribed)).toBeTrue();
+      await subscription.unsubscribe();
+      subscription = undefined;
+      expect(fake.entries.every((entry) => entry.unsubscribed)).toBeTrue();
+    } finally {
+      await subscription?.unsubscribe();
+    }
   });
 
   test("streams federated snapshots and closes the realtime subscription", async () => {
     const fake = fakeClients();
     const store = new ConvexStore("http://127.0.0.1:3210", { clients: fake.clients });
     const emissions: unknown[] = [];
-    const subscription = await store.watchFederatedSnapshot((snapshot) => emissions.push(snapshot));
-    const snapshot = {
-      dump: {
-        chains: [],
-        events: [],
-        evidence: [],
-        quests: [],
-        schema_version: STORE_SCHEMA_VERSION,
-      },
-      fencedRepositories: ["migrating"],
-    };
+    let subscription: Awaited<ReturnType<ConvexStore["watchFederatedSnapshot"]>> | undefined;
 
-    fake.entries[0]?.callback(snapshot);
-    expect(emissions).toEqual([snapshot]);
-    expect(fake.httpQueries()).toBe(1);
-    expect(fake.entries[0]?.args).toEqual({});
-    await subscription.unsubscribe();
-    expect(fake.entries[0]?.unsubscribed).toBeTrue();
+    try {
+      subscription = await store.watchFederatedSnapshot((snapshot) => emissions.push(snapshot));
+      const snapshot = {
+        dump: {
+          chains: [],
+          events: [],
+          evidence: [],
+          quests: [],
+          schema_version: STORE_SCHEMA_VERSION,
+        },
+        fencedRepositories: ["migrating"],
+      };
+
+      fake.entries[0]?.callback(snapshot);
+      expect(emissions).toEqual([snapshot]);
+      expect(fake.httpQueries()).toBe(1);
+      expect(fake.entries[0]?.args).toEqual({});
+      await subscription.unsubscribe();
+      subscription = undefined;
+      expect(fake.entries[0]?.unsubscribed).toBeTrue();
+    } finally {
+      await subscription?.unsubscribe();
+    }
   });
 
   test("does not let an expired-lease refresh overwrite a newer realtime snapshot", async () => {
@@ -148,7 +161,7 @@ describe("Convex reactive watches", () => {
     const store = new ConvexStore("http://127.0.0.1:3210", { clients });
     const emissions: Array<{ readonly dump: { readonly quests: readonly { title: string }[] } }> =
       [];
-    const subscription = await store.watchFederatedSnapshot((snapshot) => emissions.push(snapshot));
+    let subscription: Awaited<ReturnType<ConvexStore["watchFederatedSnapshot"]>> | undefined;
     const { backfill: _backfill, ...storedQuestFields } = quest;
     const expiringQuest = questSchema.parse({
       ...storedQuestFields,
@@ -169,39 +182,47 @@ describe("Convex reactive watches", () => {
       fencedRepositories: [],
     });
 
-    entries[0]?.callback(snapshot("Older lease snapshot"));
-    await Bun.sleep(10);
-    entries[0]?.callback(snapshot("New realtime snapshot"));
-    resolveRefresh?.(snapshot("Stale HTTP snapshot"));
-    await Bun.sleep(10);
+    try {
+      subscription = await store.watchFederatedSnapshot((value) => emissions.push(value));
+      entries[0]?.callback(snapshot("Older lease snapshot"));
+      await Bun.sleep(10);
+      entries[0]?.callback(snapshot("New realtime snapshot"));
+      resolveRefresh?.(snapshot("Stale HTTP snapshot"));
+      await Bun.sleep(10);
 
-    expect(emissions.at(-1)?.dump.quests[0]?.title).toBe("New realtime snapshot");
-    await subscription.unsubscribe();
+      expect(emissions.at(-1)?.dump.quests[0]?.title).toBe("New realtime snapshot");
+    } finally {
+      await subscription?.unsubscribe();
+    }
   });
 
   test("retries a lease rebind without dropping the existing subscriptions", async () => {
     const fake = fakeClients();
     const store = new ConvexStore("http://127.0.0.1:3210", { clients: fake.clients });
     const errors: Error[] = [];
-    const subscription = await store.watch({}, (_quests, error) => {
-      if (error !== undefined) {
-        errors.push(error);
-      }
-    });
+    let subscription: Awaited<ReturnType<ConvexStore["watch"]>> | undefined;
     const expiringQuest = {
       ...quest,
       lease_expires_at: "2026-08-05T20:00:00.001Z",
       status: "accepted",
     };
 
-    fake.failNextQuery();
-    fake.entries[1]?.callback([expiringQuest]);
-    await Bun.sleep(1_100);
+    try {
+      subscription = await store.watch({}, (_quests, error) => {
+        if (error !== undefined) {
+          errors.push(error);
+        }
+      });
+      fake.failNextQuery();
+      fake.entries[1]?.callback([expiringQuest]);
+      await Bun.sleep(1_100);
 
-    expect(errors.map((error) => error.message)).toContain("temporary server-time failure");
-    expect(fake.httpQueries()).toBe(3);
-    expect(fake.entries).toHaveLength(4);
-    expect(fake.entries.slice(0, 2).every((entry) => entry.unsubscribed)).toBeTrue();
-    await subscription.unsubscribe();
+      expect(errors.map((error) => error.message)).toContain("temporary server-time failure");
+      expect(fake.httpQueries()).toBe(3);
+      expect(fake.entries).toHaveLength(4);
+      expect(fake.entries.slice(0, 2).every((entry) => entry.unsubscribed)).toBeTrue();
+    } finally {
+      await subscription?.unsubscribe();
+    }
   });
 });
