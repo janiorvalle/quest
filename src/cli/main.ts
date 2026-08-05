@@ -56,6 +56,8 @@ import {
   FederatedBlobStore,
   FederatedQuestStore,
   FederatedReadError,
+  type FederatedReadSnapshot,
+  type FederatedSnapshotWatchListener,
   type FederatedStoreSource,
   inspectSqliteStore,
   LocalBlobStore,
@@ -66,6 +68,7 @@ import {
   SqliteBackupDatabase,
   type SqliteStore,
   type StoreCompatibilityProbe,
+  type WatchSubscription,
 } from "../store";
 import { applicationVersion } from "../version";
 import { createConvexOnboardingOperations } from "./members";
@@ -385,20 +388,26 @@ async function createFederatedStoreSource(
     application.questStore,
   );
   const readSnapshot = application.questStore.readFederatedSnapshot?.bind(application.questStore);
+  const watchSnapshot = application.questStore.watchFederatedSnapshot?.bind(application.questStore);
+  const observeSnapshot = (snapshot: FederatedReadSnapshot): FederatedReadSnapshot => {
+    const nextFences = new Set(snapshot.fencedRepositories);
+    if (observedFences !== undefined && !sameRepositorySet(observedFences, nextFences)) {
+      routingStale = true;
+    }
+    observedFences = nextFences;
+    fencedRepositories = nextFences;
+    readFailure = compatibilityFailure;
+    return snapshot;
+  };
   const readSnapshotPort =
-    readSnapshot === undefined
+    readSnapshot === undefined ? undefined : async () => observeSnapshot(await readSnapshot());
+  const watchSnapshotPort =
+    watchSnapshot === undefined
       ? undefined
-      : async () => {
-          const snapshot = await readSnapshot();
-          const nextFences = new Set(snapshot.fencedRepositories);
-          if (observedFences !== undefined && !sameRepositorySet(observedFences, nextFences)) {
-            routingStale = true;
-          }
-          observedFences = nextFences;
-          fencedRepositories = nextFences;
-          readFailure = compatibilityFailure;
-          return snapshot;
-        };
+      : (listener: Parameters<typeof watchSnapshot>[0]) =>
+          watchSnapshot((snapshot, error) => {
+            listener(error === undefined ? observeSnapshot(snapshot) : snapshot, error);
+          });
   const refresh = async (): Promise<void> => {
     if (listFencedRepositories === undefined) {
       return;
@@ -449,6 +458,7 @@ async function createFederatedStoreSource(
     ...(readSnapshotPort === undefined ? {} : { readSnapshot: readSnapshotPort }),
     routesRepository: (repo) => repositoryMatcher(config, handle.store, repo),
     ...(readSnapshotPort !== undefined || listFencedRepositories === undefined ? {} : { refresh }),
+    ...(watchSnapshotPort === undefined ? {} : { watchSnapshot: watchSnapshotPort }),
   };
 }
 
@@ -492,11 +502,23 @@ function createUnavailableFederatedStoreSource(
     }
     await activeSource?.refresh?.();
   };
+  const recoveryWatchSnapshot: FederatedStoreSource["watchSnapshot"] =
+    handle.store.backend !== "convex"
+      ? undefined
+      : (listener) =>
+          watchRecoveringFederatedSource({
+            currentWatch: () => activeSource?.watchSnapshot,
+            listener,
+            refresh,
+          });
   return {
     get blobStore() {
       return activeSource?.blobStore ?? blobStore;
     },
     includeRepository: (repo) => activeSource?.includeRepository(repo) ?? false,
+    needsWatchPolling: () =>
+      recoveryWatchSnapshot === undefined &&
+      (activeSource === undefined || activeSource.watchSnapshot === undefined),
     get questStore() {
       return activeSource?.questStore ?? questStore;
     },
@@ -506,6 +528,47 @@ function createUnavailableFederatedStoreSource(
     },
     refresh,
     routesRepository: (repo) => repositoryBelongsToPhysicalBackend(config, handle.store, repo),
+    ...(recoveryWatchSnapshot === undefined ? {} : { watchSnapshot: recoveryWatchSnapshot }),
+  };
+}
+
+interface RecoveringFederatedWatchOptions {
+  readonly currentWatch: () => FederatedStoreSource["watchSnapshot"];
+  readonly listener: FederatedSnapshotWatchListener;
+  readonly refresh: () => Promise<void>;
+}
+
+async function watchRecoveringFederatedSource(
+  options: RecoveringFederatedWatchOptions,
+): Promise<WatchSubscription> {
+  let subscribed = true;
+  let liveSubscription: WatchSubscription | undefined;
+
+  const connect = async (): Promise<void> => {
+    await options.refresh();
+    if (!subscribed) {
+      return;
+    }
+    const watchSnapshot = options.currentWatch();
+    if (watchSnapshot === undefined) {
+      throw new FederatedReadError(
+        "[FEDERATED_REALTIME_UNAVAILABLE] the recovered backend is not ready for live updates; retry registration",
+      );
+    }
+    const openedSubscription = await watchSnapshot(options.listener);
+    if (!subscribed) {
+      await openedSubscription.unsubscribe();
+      return;
+    }
+    liveSubscription = openedSubscription;
+  };
+
+  await connect();
+  return {
+    unsubscribe: async () => {
+      subscribed = false;
+      await liveSubscription?.unsubscribe();
+    },
   };
 }
 

@@ -10,6 +10,7 @@ import {
   eventRepository,
   type Quest,
   type QuestDump,
+  type QuestFilter,
   type QuestScope,
   type QuestStatus,
 } from "../schema";
@@ -80,6 +81,7 @@ export interface QuestLogSnapshot {
   readonly items: readonly QuestLogItem[];
   readonly loading: boolean;
   readonly plan: QuestLogPlan | null;
+  readonly refreshing: boolean;
   readonly signoff: QuestLogSignoffLens;
   readonly scope: QuestLogScope;
 }
@@ -155,6 +157,15 @@ interface SignoffLensRefreshRequest {
   readonly scope: QuestLogScope;
 }
 
+interface CachedQuestLogScope {
+  readonly blockedIds: ReadonlySet<string>;
+  readonly error: string | null;
+  readonly mergedPrQuestIds: ReadonlySet<string>;
+  readonly planSnapshot: QuestPlanSnapshot | null;
+  readonly quests: readonly Quest[];
+  readonly signoffLens: QuestLogSignoffLens;
+}
+
 export const EMPTY_QUEST_LOG_SIGNOFF: QuestLogSignoffLens = {
   awaitingCount: 0,
   error: null,
@@ -170,6 +181,7 @@ export const EMPTY_QUEST_LOG_SNAPSHOT: QuestLogSnapshot = {
   items: [],
   loading: true,
   plan: null,
+  refreshing: false,
   signoff: EMPTY_QUEST_LOG_SIGNOFF,
   scope: "all",
 };
@@ -474,6 +486,84 @@ function filterForScope(scope: QuestLogScope, currentRepo: string | null) {
   return scope === "current" && currentRepo !== null ? { repo: currentRepo } : {};
 }
 
+async function registerWatchSubscriptions(
+  registrations: readonly Promise<WatchSubscription>[],
+  retainFailedCleanup: (subscription: WatchSubscription) => void,
+): Promise<readonly WatchSubscription[]> {
+  const results = await Promise.allSettled(registrations);
+  const subscriptions = results.flatMap((result) =>
+    result.status === "fulfilled" ? [result.value] : [],
+  );
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure === undefined) {
+    return subscriptions;
+  }
+  const cleanupResults = await Promise.allSettled(
+    subscriptions.map((subscription) => subscription.unsubscribe()),
+  );
+  for (const [index, cleanupResult] of cleanupResults.entries()) {
+    if (cleanupResult.status === "rejected") {
+      const subscription = subscriptions[index];
+      if (subscription !== undefined) {
+        retainFailedCleanup(subscription);
+      }
+    }
+  }
+  throw failure.reason;
+}
+
+async function refreshScopeRowsAfterFailedSetup(
+  store: QuestStore,
+  filter: QuestFilter,
+  fallbackQuests: readonly Quest[],
+  fallbackBlockedIds: ReadonlySet<string>,
+): Promise<{ readonly blockedIds: ReadonlySet<string>; readonly quests: readonly Quest[] }> {
+  const [refreshedQuests, refreshedBlockedQuests] = await Promise.all([
+    store.listQuests(filter).catch(() => fallbackQuests),
+    store
+      .listQuests({ ...filter, blocked: true })
+      .catch(() =>
+        fallbackQuests.filter((quest) =>
+          fallbackBlockedIds.has(questIdentity(quest.repo, quest.id)),
+        ),
+      ),
+  ]);
+  if (filter.repo !== undefined) {
+    return {
+      blockedIds: new Set(
+        refreshedBlockedQuests.map((quest) => questIdentity(quest.repo, quest.id)),
+      ),
+      quests: refreshedQuests,
+    };
+  }
+  const refreshedRepositories = new Set(refreshedQuests.map((quest) => quest.repo));
+  const preservedQuests = fallbackQuests.filter((quest) => !refreshedRepositories.has(quest.repo));
+  const preservedBlockedIds = new Set(
+    preservedQuests
+      .map((quest) => questIdentity(quest.repo, quest.id))
+      .filter((identity) => fallbackBlockedIds.has(identity)),
+  );
+  for (const quest of refreshedBlockedQuests) {
+    preservedBlockedIds.add(questIdentity(quest.repo, quest.id));
+  }
+  return {
+    blockedIds: preservedBlockedIds,
+    quests: [...preservedQuests, ...refreshedQuests],
+  };
+}
+
+function rollbackReadError(
+  hadSubscriptions: boolean,
+  subscriptionErrors: readonly (string | null)[],
+  previousError: string | null,
+): string | null {
+  return hadSubscriptions
+    ? (subscriptionErrors.find((message) => message !== null) ?? null)
+    : previousError;
+}
+
 function nextScopeRepository(
   scope: QuestLogScope,
   currentRepo: string | null,
@@ -514,16 +604,61 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
   let signoffLens: QuestLogSignoffLens = EMPTY_QUEST_LOG_SIGNOFF;
   let planRevision = 0;
   let loading = true;
+  let scopeRefreshing = false;
+  let signoffRefreshing = false;
   let generation = 0;
   let generationSequence = 0;
   let mergedPrRefreshRevision = 0;
   let signoffRefreshTimer: ReturnType<typeof setInterval> | null = null;
   let signoffLensActive = false;
   let subscriptions: readonly WatchSubscription[] = [];
+  let repositorySubscription: WatchSubscription | null = null;
   let scopeTransitions: Promise<void> = Promise.resolve();
   const pendingActions = new Set<Promise<void>>();
   const retiredSubscriptions = new Set<WatchSubscription>();
   const listeners = new Set<(snapshot: QuestLogSnapshot) => void>();
+  const cachedScopes = new Map<string, CachedQuestLogScope>();
+  const repositoryNames = new Set<string>(currentRepo === null ? [] : [currentRepo]);
+
+  const scopeKey = (targetScope: QuestLogScope, targetRepo: string | null): string =>
+    targetScope === "all" ? "all" : `repo:${targetRepo ?? ""}`;
+
+  const cacheCurrentScope = (): void => {
+    if (loading || error !== null) {
+      return;
+    }
+    for (const quest of quests) {
+      repositoryNames.add(quest.repo);
+    }
+    cachedScopes.set(scopeKey(scope, currentRepo), {
+      blockedIds,
+      error,
+      mergedPrQuestIds,
+      planSnapshot,
+      quests,
+      signoffLens,
+    });
+    if (scope === "all") {
+      for (const repository of repositoryNames) {
+        const key = scopeKey("current", repository);
+        if (cachedScopes.has(key)) {
+          continue;
+        }
+        cachedScopes.set(key, {
+          blockedIds: new Set(
+            [...blockedIds].filter((identity) => identity.startsWith(`${repository}\u0000`)),
+          ),
+          error: null,
+          mergedPrQuestIds: new Set(
+            [...mergedPrQuestIds].filter((identity) => identity.startsWith(`${repository}\u0000`)),
+          ),
+          planSnapshot: null,
+          quests: quests.filter((quest) => quest.repo === repository),
+          signoffLens: EMPTY_QUEST_LOG_SIGNOFF,
+        });
+      }
+    }
+  };
 
   const planScope = (targetScope: QuestLogScope, targetRepo: string | null): QuestScope => ({
     repo: targetScope === "current" && targetRepo !== null ? targetRepo : null,
@@ -605,12 +740,14 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
       items,
       loading,
       plan: planSnapshot === null ? null : planForItems(planSnapshot, items),
+      refreshing: scopeRefreshing || signoffRefreshing,
       signoff: signoffLens,
       scope,
     };
   };
 
   const emit = (): void => {
+    cacheCurrentScope();
     const value = snapshot();
     for (const listener of listeners) {
       listener(value);
@@ -644,6 +781,8 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
   let pendingSignoffLensRefresh: SignoffLensRefreshRequest | null = null;
   let signoffLensRefreshRunning = false;
   let scopeSetupGeneration: number | null = null;
+  let subscriptionGeneration = generation;
+  let subscriptionReadErrors: [string | null, string | null] = [null, null];
 
   const clearPlanAfterRefreshFailure = (requestGeneration: number): void => {
     if (requestGeneration !== generation || scopeSetupGeneration !== null) {
@@ -750,6 +889,10 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     targetScope: QuestLogScope,
     targetRepo: string | null,
   ): void => {
+    if (signoffLensActive && !signoffRefreshing) {
+      signoffRefreshing = true;
+      emit();
+    }
     pendingSignoffLensRefresh = {
       generation: activeGeneration,
       repo: targetRepo,
@@ -766,6 +909,10 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
         await applySignoffLensRefresh(request);
       }
       signoffLensRefreshRunning = false;
+      if (signoffRefreshing) {
+        signoffRefreshing = false;
+        emit();
+      }
     })();
     const completion = action.then(
       () => undefined,
@@ -805,6 +952,10 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     signoffLensActive = active;
     if (!active) {
       stopSignoffRefreshTimer();
+      if (signoffRefreshing) {
+        signoffRefreshing = false;
+        emit();
+      }
       return;
     }
     startSignoffRefreshTimer();
@@ -828,17 +979,31 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     targetScope: QuestLogScope = scope,
     targetRepo: string | null = currentRepo,
   ): Promise<void> => {
+    const previousState = {
+      blockedIds,
+      currentRepo,
+      error,
+      generation,
+      loading,
+      mergedPrQuestIds,
+      planSnapshot,
+      quests,
+      scope,
+      signoffLens,
+    };
+    const hadPreviousSubscriptions = subscriptions.length > 0;
     const activeGeneration = ++generationSequence;
     scopeSetupGeneration = activeGeneration;
     const filter = filterForScope(targetScope, targetRepo);
-    let nextQuests: readonly Quest[] = [];
-    let nextBlockedIds: ReadonlySet<string> = new Set();
-    let nextMergedPrQuestIds: ReadonlySet<string> = new Set();
-    let nextSignoffLens: QuestLogSignoffLens = EMPTY_QUEST_LOG_SIGNOFF;
-    let nextLoading = true;
-    let nextError: string | null = null;
+    const cachedScope = cachedScopes.get(scopeKey(targetScope, targetRepo));
+    let nextQuests: readonly Quest[] = cachedScope?.quests ?? [];
+    let nextBlockedIds: ReadonlySet<string> = cachedScope?.blockedIds ?? new Set();
+    let nextMergedPrQuestIds: ReadonlySet<string> = cachedScope?.mergedPrQuestIds ?? new Set();
+    let nextSignoffLens: QuestLogSignoffLens = cachedScope?.signoffLens ?? EMPTY_QUEST_LOG_SIGNOFF;
+    let nextLoading = cachedScope === undefined;
+    let nextError: string | null = cachedScope?.error ?? null;
     const nextReadErrors: Array<string | null> = [null, null];
-    const updateNextReadError = (index: number, readError?: FederatedReadError): void => {
+    const updateNextReadError = (index: number, readError?: Error): void => {
       nextReadErrors[index] = readError?.message ?? null;
       nextError = nextReadErrors.find((message) => message !== null) ?? null;
     };
@@ -846,6 +1011,18 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
       nextReadErrors.find((message) => message !== null) ?? null;
     const nextSubscriptions: WatchSubscription[] = [];
     const planRevisionBeforeSetup = planRevision;
+    generation = activeGeneration;
+    currentRepo = targetRepo;
+    scope = targetScope;
+    error = nextError;
+    quests = nextQuests;
+    blockedIds = nextBlockedIds;
+    mergedPrQuestIds = nextMergedPrQuestIds;
+    signoffLens = nextSignoffLens;
+    planSnapshot = cachedScope?.planSnapshot ?? null;
+    loading = nextLoading;
+    scopeRefreshing = true;
+    emit();
     const [loadedPlanSnapshot, loadedMergedPrQuestIds, loadedSignoffLens] = await Promise.all([
       loadPlan(targetScope, targetRepo).catch(() => null),
       loadMergedPrQuestIds(targetScope, targetRepo).catch(() => new Set<string>()),
@@ -858,66 +1035,110 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     nextSignoffLens = loadedSignoffLens;
     try {
       nextSubscriptions.push(
-        await options.store.watch(filter, (watchedQuests, readError) => {
-          if (readError instanceof FederatedReadError) {
-            nextQuests = watchedQuests;
-            nextLoading = false;
-            updateNextReadError(0, readError);
-            handleWatchReadError(activeGeneration, readError, () => {
+        ...(await registerWatchSubscriptions(
+          [
+            options.store.watch(filter, (watchedQuests, readError) => {
+              if (activeGeneration === subscriptionGeneration) {
+                subscriptionReadErrors[0] = readError?.message ?? null;
+              }
+              if (readError !== undefined) {
+                nextQuests = watchedQuests;
+                nextLoading = false;
+                updateNextReadError(0, readError);
+                handleWatchReadError(activeGeneration, readError, () => {
+                  quests = nextQuests;
+                  loading = false;
+                });
+                return;
+              }
+              nextQuests = watchedQuests;
+              nextLoading = false;
+              updateNextReadError(0);
+              if (activeGeneration !== generation) {
+                return;
+              }
+              error = activeReadError();
               quests = nextQuests;
               loading = false;
-            });
-            return;
-          }
-          nextQuests = watchedQuests;
-          nextLoading = false;
-          updateNextReadError(0);
-          if (activeGeneration !== generation) {
-            return;
-          }
-          error = activeReadError();
-          quests = nextQuests;
-          loading = false;
-          emit();
-          requestPlanRefresh(activeGeneration, targetScope, targetRepo);
-          requestMergedPrQuestIdsRefresh(activeGeneration, targetScope, targetRepo);
-          if (signoffLensActive) {
-            requestSignoffLensRefresh(activeGeneration, targetScope, targetRepo);
-          }
-        }),
-      );
-      nextSubscriptions.push(
-        await options.store.watch({ ...filter, blocked: true }, (blockedQuests, readError) => {
-          if (readError instanceof FederatedReadError) {
-            nextBlockedIds = new Set(
-              blockedQuests.map((quest) => questIdentity(quest.repo, quest.id)),
-            );
-            updateNextReadError(1, readError);
-            handleWatchReadError(activeGeneration, readError, () => {
+              emit();
+              requestPlanRefresh(activeGeneration, targetScope, targetRepo);
+              requestMergedPrQuestIdsRefresh(activeGeneration, targetScope, targetRepo);
+              if (signoffLensActive) {
+                requestSignoffLensRefresh(activeGeneration, targetScope, targetRepo);
+              }
+            }),
+            options.store.watch({ ...filter, blocked: true }, (blockedQuests, readError) => {
+              if (activeGeneration === subscriptionGeneration) {
+                subscriptionReadErrors[1] = readError?.message ?? null;
+              }
+              if (readError !== undefined) {
+                nextBlockedIds = new Set(
+                  blockedQuests.map((quest) => questIdentity(quest.repo, quest.id)),
+                );
+                updateNextReadError(1, readError);
+                handleWatchReadError(activeGeneration, readError, () => {
+                  blockedIds = nextBlockedIds;
+                });
+                return;
+              }
+              nextBlockedIds = new Set(
+                blockedQuests.map((quest) => questIdentity(quest.repo, quest.id)),
+              );
+              updateNextReadError(1);
+              if (activeGeneration !== generation) {
+                return;
+              }
+              error = activeReadError();
               blockedIds = nextBlockedIds;
-            });
-            return;
-          }
-          nextBlockedIds = new Set(
-            blockedQuests.map((quest) => questIdentity(quest.repo, quest.id)),
-          );
-          updateNextReadError(1);
-          if (activeGeneration !== generation) {
-            return;
-          }
-          error = activeReadError();
-          blockedIds = nextBlockedIds;
-          emit();
-          requestPlanRefresh(activeGeneration, targetScope, targetRepo);
-          if (signoffLensActive) {
-            requestSignoffLensRefresh(activeGeneration, targetScope, targetRepo);
-          }
-        }),
+              emit();
+              requestPlanRefresh(activeGeneration, targetScope, targetRepo);
+              if (signoffLensActive) {
+                requestSignoffLensRefresh(activeGeneration, targetScope, targetRepo);
+              }
+            }),
+          ],
+          (subscription) => retiredSubscriptions.add(subscription),
+        )),
       );
-    } catch (error) {
+    } catch (setupError) {
       scopeSetupGeneration = null;
       await disposeSubscriptions(nextSubscriptions);
-      throw error;
+      const previousFilter = filterForScope(previousState.scope, previousState.currentRepo);
+      const [refreshedRows, refreshedPlan, refreshedMergedPrQuestIds, refreshedSignoffLens] =
+        await Promise.all([
+          refreshScopeRowsAfterFailedSetup(
+            options.store,
+            previousFilter,
+            previousState.quests,
+            previousState.blockedIds,
+          ),
+          loadPlan(previousState.scope, previousState.currentRepo).catch(
+            () => previousState.planSnapshot,
+          ),
+          loadMergedPrQuestIds(previousState.scope, previousState.currentRepo).catch(
+            () => previousState.mergedPrQuestIds,
+          ),
+          loadSignoffLens(previousState.scope, previousState.currentRepo).catch(
+            () => previousState.signoffLens,
+          ),
+        ]);
+      generation = previousState.generation;
+      currentRepo = previousState.currentRepo;
+      scope = previousState.scope;
+      error = rollbackReadError(
+        hadPreviousSubscriptions,
+        subscriptionReadErrors,
+        previousState.error,
+      );
+      quests = refreshedRows.quests;
+      blockedIds = refreshedRows.blockedIds;
+      mergedPrQuestIds = refreshedMergedPrQuestIds;
+      signoffLens = refreshedSignoffLens;
+      planSnapshot = refreshedPlan;
+      loading = previousState.loading;
+      scopeRefreshing = false;
+      emit();
+      throw setupError;
     }
 
     const previousSubscriptions = subscriptions;
@@ -926,6 +1147,8 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     scope = targetScope;
     error = nextError;
     subscriptions = nextSubscriptions;
+    subscriptionGeneration = activeGeneration;
+    subscriptionReadErrors = [nextReadErrors[0] ?? null, nextReadErrors[1] ?? null];
     quests = nextQuests;
     blockedIds = nextBlockedIds;
     mergedPrQuestIds = nextMergedPrQuestIds;
@@ -935,6 +1158,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     }
     scopeSetupGeneration = null;
     loading = nextLoading;
+    scopeRefreshing = false;
     emit();
     requestPlanRefresh(activeGeneration, targetScope, targetRepo);
     requestMergedPrQuestIdsRefresh(activeGeneration, targetScope, targetRepo);
@@ -962,13 +1186,11 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     planSnapshot = null;
     signoffLens = EMPTY_QUEST_LOG_SIGNOFF;
     loading = false;
+    scopeRefreshing = false;
     emit();
   };
 
-  const showPartialScopeWarning = (
-    activeGeneration: number,
-    readError: FederatedReadError,
-  ): void => {
+  const showPartialScopeWarning = (activeGeneration: number, readError: Error): void => {
     if (activeGeneration !== generation) {
       return;
     }
@@ -979,7 +1201,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
 
   const handleWatchReadError = (
     activeGeneration: number,
-    readError: FederatedReadError,
+    readError: Error,
     applyPartialSnapshot: () => void,
   ): void => {
     if (activeGeneration !== generation) {
@@ -989,18 +1211,55 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     showPartialScopeWarning(activeGeneration, readError);
   };
 
-  const knownRepositories = async (): Promise<readonly string[]> => {
+  const refreshKnownRepositories = async (): Promise<void> => {
     const stats = await options.store.stats({ repo: null });
-    const repositories = new Set(stats.repos.map((repository) => repository.repo));
-    if (currentRepo !== null) {
-      repositories.add(currentRepo);
+    for (const repository of stats.repos) {
+      repositoryNames.add(repository.repo);
     }
-    return [...repositories].sort((left, right) => left.localeCompare(right));
+    if (currentRepo !== null) {
+      repositoryNames.add(currentRepo);
+    }
+  };
+
+  const recordDiscoveredRepositories = (discoveredQuests: readonly Quest[]): void => {
+    const questsByRepository = new Map<string, Quest[]>();
+    for (const quest of discoveredQuests) {
+      repositoryNames.add(quest.repo);
+      const repositoryQuests = questsByRepository.get(quest.repo) ?? [];
+      repositoryQuests.push(quest);
+      questsByRepository.set(quest.repo, repositoryQuests);
+    }
+    for (const [repository, repositoryQuests] of questsByRepository) {
+      if (scope === "current" && currentRepo === repository) {
+        continue;
+      }
+      const key = scopeKey("current", repository);
+      const cached = cachedScopes.get(key);
+      cachedScopes.set(key, {
+        blockedIds: cached?.blockedIds ?? new Set(),
+        error: cached?.error ?? null,
+        mergedPrQuestIds: cached?.mergedPrQuestIds ?? new Set(),
+        planSnapshot: cached?.planSnapshot ?? null,
+        quests: repositoryQuests,
+        signoffLens: cached?.signoffLens ?? EMPTY_QUEST_LOG_SIGNOFF,
+      });
+    }
+  };
+
+  const startRepositoryDiscovery = async (): Promise<void> => {
+    repositorySubscription = await options.store.watch({}, recordDiscoveredRepositories);
   };
 
   const readKnownRepositories = async (): Promise<readonly string[] | null> => {
+    if (repositorySubscription !== null && repositoryNames.size > 0) {
+      return [...repositoryNames].sort((left, right) => left.localeCompare(right));
+    }
     try {
-      return await knownRepositories();
+      await refreshKnownRepositories();
+      if (repositorySubscription === null) {
+        await startRepositoryDiscovery().catch(() => undefined);
+      }
+      return [...repositoryNames].sort((left, right) => left.localeCompare(right));
     } catch (readError: unknown) {
       if (!(readError instanceof FederatedReadError)) {
         throw readError;
@@ -1047,6 +1306,10 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
     enqueueScopeTransition(async () => {
       try {
         await subscribeToScope();
+        await Promise.all([
+          refreshKnownRepositories().catch(() => undefined),
+          startRepositoryDiscovery().catch(() => undefined),
+        ]);
       } catch (readError: unknown) {
         if (!(readError instanceof FederatedReadError)) {
           throw readError;
@@ -1137,7 +1400,14 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
       stopSignoffRefreshTimer();
       await Promise.all([scopeTransitions, ...pendingActions]);
       generation = ++generationSequence;
-      await unsubscribeCurrent();
+      scopeRefreshing = false;
+      signoffRefreshing = false;
+      const discoverySubscription = repositorySubscription;
+      repositorySubscription = null;
+      await Promise.all([
+        unsubscribeCurrent(),
+        discoverySubscription?.unsubscribe() ?? Promise.resolve(),
+      ]);
     },
     subscribe: (listener) => {
       listeners.add(listener);

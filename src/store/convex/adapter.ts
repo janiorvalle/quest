@@ -28,6 +28,7 @@ import {
   questTransitionSchema,
   type SignoffBatchInput,
   type SignoffBatchResult,
+  STORE_SCHEMA_VERSION,
   signoffBatchInputSchema,
   stableSerialize,
   type TouchQuestInput,
@@ -35,6 +36,7 @@ import {
 } from "../../schema";
 import type {
   FederatedReadSnapshot,
+  FederatedSnapshotWatchListener,
   AcceptQuestAndExportResult as PortAcceptQuestAndExportResult,
   QuestDetailSnapshot,
   QuestStore,
@@ -49,6 +51,36 @@ import {
   convexApi,
   createConvexClientPair,
 } from "./client";
+
+interface RealtimeSubscription {
+  unsubscribe(): void;
+}
+
+function realtimeWatchError(error: unknown): Error {
+  return error instanceof Error
+    ? error
+    : new Error(
+        "[CONVEX_WATCH_FAILED] the live Convex query stopped responding; check the deployment connection and retry",
+      );
+}
+
+function leaseRefreshDelay(
+  quests: readonly Quest[],
+  leaseCutoff: string,
+  boundAt: number,
+): number | null {
+  const nextExpiry = quests
+    .filter((quest) => quest.status === "accepted" && quest.lease_expires_at !== null)
+    .map((quest) => Date.parse(quest.lease_expires_at ?? ""))
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right)[0];
+  const serverAtBind = Date.parse(leaseCutoff);
+  if (nextExpiry === undefined || !Number.isFinite(serverAtBind)) {
+    return null;
+  }
+  const estimatedServerNow = serverAtBind + (Date.now() - boundAt);
+  return Math.min(Math.max(0, nextExpiry - estimatedServerNow + 1), 2_147_483_647);
+}
 
 type TestableMutation<T> = {
   readonly input: T;
@@ -273,6 +305,110 @@ export class ConvexStore implements QuestStore {
     }
   }
 
+  async watchFederatedSnapshot(
+    listener: FederatedSnapshotWatchListener,
+  ): Promise<WatchSubscription> {
+    let active = true;
+    let leaseTimer: ReturnType<typeof setTimeout> | undefined;
+    let leaseCutoff = await this.serverTime();
+    let leaseCutoffObservedAt = Date.now();
+    let snapshotRevision = 0;
+    let latestSnapshot: FederatedReadSnapshot = {
+      dump: {
+        schema_version: STORE_SCHEMA_VERSION,
+        chains: [],
+        events: [],
+        evidence: [],
+        quests: [],
+      },
+      fencedRepositories: [],
+    };
+
+    const retryLeaseRefresh = (error: unknown): void => {
+      if (!active) {
+        return;
+      }
+      listener(latestSnapshot, realtimeWatchError(error));
+      leaseTimer = setTimeout(() => {
+        void refreshExpiredLeases().catch(retryLeaseRefresh);
+      }, 1_000);
+      leaseTimer.unref?.();
+    };
+
+    const scheduleLeaseRefresh = (): void => {
+      if (leaseTimer !== undefined) {
+        clearTimeout(leaseTimer);
+      }
+      const delay = leaseRefreshDelay(
+        latestSnapshot.dump.quests,
+        leaseCutoff,
+        leaseCutoffObservedAt,
+      );
+      leaseTimer =
+        delay === null
+          ? undefined
+          : setTimeout(() => {
+              void refreshExpiredLeases().catch(retryLeaseRefresh);
+            }, delay);
+      leaseTimer?.unref?.();
+    };
+
+    const refreshExpiredLeases = async (): Promise<void> => {
+      const refreshRevision = snapshotRevision;
+      const [nextLeaseCutoff, snapshot] = await Promise.all([
+        this.serverTime(),
+        this.readFederatedSnapshot(),
+      ]);
+      if (!active || refreshRevision !== snapshotRevision) {
+        return;
+      }
+      snapshotRevision += 1;
+      leaseCutoff = nextLeaseCutoff;
+      leaseCutoffObservedAt = Date.now();
+      latestSnapshot = {
+        dump: questDumpSchema.parse(snapshot.dump),
+        fencedRepositories: [...snapshot.fencedRepositories],
+      };
+      listener(latestSnapshot);
+      scheduleLeaseRefresh();
+    };
+
+    const subscription = this.#clients.realtime.onUpdate(
+      convexApi.federatedSnapshot,
+      { ...authTokenInput(this.#clients) },
+      (snapshot) => {
+        if (!active) {
+          return;
+        }
+        snapshotRevision += 1;
+        latestSnapshot = {
+          dump: questDumpSchema.parse(snapshot.dump),
+          fencedRepositories: [...snapshot.fencedRepositories],
+        };
+        listener(latestSnapshot);
+        scheduleLeaseRefresh();
+      },
+      (error) => {
+        if (active) {
+          listener(latestSnapshot, realtimeWatchError(error));
+        }
+      },
+    );
+    return {
+      unsubscribe: async () => {
+        if (!active) {
+          return;
+        }
+        active = false;
+        if (leaseTimer !== undefined) {
+          clearTimeout(leaseTimer);
+          leaseTimer = undefined;
+        }
+        subscription.unsubscribe();
+      },
+    };
+  }
+
   async getQuest(id: number): Promise<Quest | null> {
     const parsed = questSchema.shape.id.parse(id);
     const leaseCutoff = await this.serverTime();
@@ -353,92 +489,91 @@ export class ConvexStore implements QuestStore {
 
   async watch(filter: QuestFilter, listener: QuestWatchListener): Promise<WatchSubscription> {
     const parsed = questFilterSchema.parse(filter);
-    const initialCutoff = await this.serverTime();
     let subscribed = true;
     let leaseTimer: ReturnType<typeof setTimeout> | undefined;
-    let refreshGeneration = 0;
-    let scheduleLeaseRefresh: (quests: readonly Quest[], leaseCutoff: string) => void = () =>
-      undefined;
-    const refresh = (): void => {
+    let generation = 0;
+    let subscription: RealtimeSubscription | undefined;
+    let leaseSubscription: RealtimeSubscription | undefined;
+    let latestQuests: readonly Quest[] = [];
+
+    const retryBind = (error: unknown): void => {
       if (!subscribed) {
         return;
       }
-      refreshGeneration += 1;
-      const generation = refreshGeneration;
-      void this.serverTime()
-        .then((leaseCutoff) =>
-          Promise.all([
-            this.#clients.http.query(convexApi.listQuests, {
-              ...authTokenInput(this.#clients),
-              filter: parsed,
-              lease_cutoff: leaseCutoff,
-            }),
-            this.#clients.http.query(convexApi.listQuests, {
-              ...authTokenInput(this.#clients),
-              filter: {},
-              lease_cutoff: leaseCutoff,
-            }),
-          ]).then(([quests, allQuests]) => ({ quests, allQuests, leaseCutoff })),
-        )
-        .then(({ quests, allQuests, leaseCutoff }) => {
-          if (!subscribed || generation !== refreshGeneration) {
+      listener(latestQuests, realtimeWatchError(error));
+      leaseTimer = setTimeout(() => {
+        void bind().catch(retryBind);
+      }, 1_000);
+      leaseTimer.unref?.();
+    };
+
+    const bind = async (): Promise<void> => {
+      const leaseCutoff = await this.serverTime();
+      if (!subscribed) {
+        return;
+      }
+      const boundAt = Date.now();
+      const activeGeneration = ++generation;
+      const onError = (error: unknown): void => {
+        if (subscribed && activeGeneration === generation) {
+          listener(latestQuests, realtimeWatchError(error));
+        }
+      };
+      const nextSubscription = this.#clients.realtime.onUpdate(
+        convexApi.listQuests,
+        { ...authTokenInput(this.#clients), filter: parsed, lease_cutoff: leaseCutoff },
+        (quests) => {
+          if (!subscribed || activeGeneration !== generation) {
             return;
           }
+          latestQuests = quests;
           listener(quests);
-          scheduleLeaseRefresh(allQuests, leaseCutoff);
-        })
-        .catch(() => {
-          if (subscribed && generation === refreshGeneration) {
-            leaseTimer = setTimeout(refresh, 1_000);
+        },
+        onError,
+      );
+      const nextLeaseSubscription = this.#clients.realtime.onUpdate(
+        convexApi.listQuests,
+        { ...authTokenInput(this.#clients), filter: {}, lease_cutoff: leaseCutoff },
+        (quests) => {
+          if (!subscribed || activeGeneration !== generation) {
+            return;
           }
-        });
+          if (leaseTimer !== undefined) {
+            clearTimeout(leaseTimer);
+          }
+          const delay = leaseRefreshDelay(quests, leaseCutoff, boundAt);
+          leaseTimer =
+            delay === null
+              ? undefined
+              : setTimeout(() => {
+                  void bind().catch(retryBind);
+                }, delay);
+          leaseTimer?.unref?.();
+        },
+        onError,
+      );
+      const previousSubscription = subscription;
+      const previousLeaseSubscription = leaseSubscription;
+      subscription = nextSubscription;
+      leaseSubscription = nextLeaseSubscription;
+      previousSubscription?.unsubscribe();
+      previousLeaseSubscription?.unsubscribe();
     };
-    // Convex reruns queries for writes, not for wall-clock lease expiry, so refresh at the next lease boundary.
-    scheduleLeaseRefresh = (quests, leaseCutoff) => {
-      if (leaseTimer !== undefined) {
-        clearTimeout(leaseTimer);
-        leaseTimer = undefined;
-      }
-      const expirations = quests
-        .filter((quest) => quest.status === "accepted" && quest.lease_expires_at !== null)
-        .map((quest) => Date.parse(quest.lease_expires_at ?? ""))
-        .filter(Number.isFinite)
-        .sort((left, right) => left - right);
-      const nextExpiry = expirations[0];
-      if (nextExpiry === undefined) {
-        return;
-      }
-      const serverNow = Date.parse(leaseCutoff);
-      if (!Number.isFinite(serverNow)) {
-        leaseTimer = setTimeout(refresh, 1_000);
-        return;
-      }
-      const delay = Math.min(Math.max(0, nextExpiry - serverNow + 1), 2_147_483_647);
-      leaseTimer = setTimeout(refresh, delay);
-    };
-    const subscription = this.#clients.realtime.onUpdate(
-      convexApi.listQuests,
-      { ...authTokenInput(this.#clients), filter: parsed, lease_cutoff: initialCutoff },
-      refresh,
-    );
-    const leaseSubscription = this.#clients.realtime.onUpdate(
-      convexApi.listQuests,
-      { ...authTokenInput(this.#clients), filter: {}, lease_cutoff: initialCutoff },
-      refresh,
-    );
-    refresh();
+
+    await bind();
     return {
       unsubscribe: async () => {
         if (!subscribed) {
           return;
         }
         subscribed = false;
+        generation += 1;
         if (leaseTimer !== undefined) {
           clearTimeout(leaseTimer);
           leaseTimer = undefined;
         }
-        subscription.unsubscribe();
-        leaseSubscription.unsubscribe();
+        subscription?.unsubscribe();
+        leaseSubscription?.unsubscribe();
       },
     };
   }

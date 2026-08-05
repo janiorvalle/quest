@@ -31,6 +31,7 @@ import {
 import type {
   BlobStore,
   FederatedReadSnapshot,
+  FederatedSnapshotWatchListener,
   QuestDetailSnapshot,
   QuestStore,
   QuestWatchListener,
@@ -40,11 +41,13 @@ import type {
 export interface FederatedStoreSource {
   readonly blobStore: BlobStore;
   readonly includeRepository: (repo: string) => boolean;
+  readonly needsWatchPolling?: () => boolean;
   readonly questStore: QuestStore;
   readonly readError?: (repository: string | undefined) => Error | undefined;
   readonly readSnapshot?: (() => Promise<FederatedReadSnapshot>) | undefined;
   readonly refresh?: () => Promise<void>;
   readonly routesRepository?: (repo: string) => boolean;
+  readonly watchSnapshot?: (listener: FederatedSnapshotWatchListener) => Promise<WatchSubscription>;
 }
 
 export class FederatedReadError extends Error {
@@ -377,6 +380,89 @@ async function refreshFederatedWatchResult(
   return readError === undefined
     ? { snapshot: filterQuests(quests, source) }
     : { error: readError };
+}
+
+function reactiveFederatedWatchResult(
+  filter: QuestFilter,
+  source: FederatedStoreSource,
+  snapshot: FederatedReadSnapshot,
+  sourceError: Error | undefined,
+): FederatedWatchResult {
+  if (sourceError !== undefined) {
+    return { error: federatedWatchReadError(filter, sourceError) };
+  }
+  const readError = source.readError?.(filter.repo);
+  return readError === undefined
+    ? { snapshot: filterSnapshotQuests(snapshot, source, filter) }
+    : { error: readError };
+}
+
+function watchFederatedSource(
+  source: FederatedStoreSource,
+  filter: QuestFilter,
+  onQuests: QuestWatchListener,
+  onSnapshot: Parameters<NonNullable<QuestStore["watchFederatedSnapshot"]>>[0],
+): Promise<WatchSubscription> {
+  const watchSnapshot =
+    source.watchSnapshot ??
+    (source.needsWatchPolling === undefined
+      ? source.questStore.watchFederatedSnapshot?.bind(source.questStore)
+      : undefined);
+  return watchSnapshot === undefined
+    ? source.questStore.watch(filter, onQuests)
+    : watchSnapshot(onSnapshot);
+}
+
+function sourceHasReactiveWatch(source: FederatedStoreSource): boolean {
+  return (
+    source.watchSnapshot !== undefined ||
+    (source.needsWatchPolling === undefined &&
+      source.questStore.watchFederatedSnapshot !== undefined)
+  );
+}
+
+function sourceNeedsPolling(source: FederatedStoreSource): boolean {
+  return (
+    (source.refresh !== undefined || source.readSnapshot !== undefined) &&
+    (source.needsWatchPolling?.() ?? !sourceHasReactiveWatch(source))
+  );
+}
+
+async function readInitialFederatedWatchResults(
+  sources: readonly FederatedStoreSource[],
+  filter: QuestFilter,
+  progressive: boolean,
+  listener: QuestWatchListener,
+): Promise<FederatedWatchResult[]> {
+  const results: FederatedWatchResult[] = sources.map(() => ({}));
+  await Promise.all(
+    sources.map(async (source, index) => {
+      const result = await readFederatedWatchSnapshot(filter, source);
+      results[index] = result;
+      if (progressive && result.snapshot !== undefined) {
+        listener(
+          mergeQuestSnapshots(results.map((candidate) => candidate.snapshot ?? [])),
+          results.find((candidate) => candidate.error !== undefined)?.error,
+        );
+      }
+    }),
+  );
+  return results;
+}
+
+function requireUsableInitialWatch(
+  filter: QuestFilter,
+  allowPartialReads: boolean,
+  results: readonly FederatedWatchResult[],
+): void {
+  const initialError = results.find((result) => result.error !== undefined)?.error;
+  const hasHealthySource = results.some((result) => result.error === undefined);
+  if (
+    initialError !== undefined &&
+    (filter.repo !== undefined || !allowPartialReads || !hasHealthySource)
+  ) {
+    throw initialError;
+  }
 }
 
 function readOnlyMutationError(): FederatedReadError {
@@ -762,17 +848,13 @@ export class FederatedQuestStore implements QuestStore {
     if (scopedFilter.repo !== undefined) {
       this.#sourcesForRepository(scopedFilter.repo);
     }
-    const initialResults = await Promise.all(
-      sources.map((source) => readFederatedWatchSnapshot(scopedFilter, source)),
+    const initialResults = await readInitialFederatedWatchResults(
+      sources,
+      scopedFilter,
+      scopedFilter.repo === undefined && this.#allowPartialReads,
+      listener,
     );
-    const initialError = initialResults.find((result) => result.error !== undefined)?.error;
-    const hasHealthySource = initialResults.some((result) => result.error === undefined);
-    if (
-      initialError !== undefined &&
-      (scopedFilter.repo !== undefined || !this.#allowPartialReads || !hasHealthySource)
-    ) {
-      throw initialError;
-    }
+    requireUsableInitialWatch(scopedFilter, this.#allowPartialReads, initialResults);
     const sourceErrors = initialResults.map((result) => result.error);
     const snapshots = initialResults.map((result) => result.snapshot ?? []);
     let active = true;
@@ -807,11 +889,14 @@ export class FederatedQuestStore implements QuestStore {
     };
     const applyRefreshResults = (
       generations: readonly number[],
-      results: readonly FederatedWatchResult[],
+      results: readonly (FederatedWatchResult | undefined)[],
     ): { readonly applied: boolean; readonly firstError: Error | undefined } => {
       let firstError: Error | undefined;
       let applied = false;
       for (const [index, result] of results.entries()) {
+        if (result === undefined) {
+          continue;
+        }
         if (generations[index] !== sourceRefreshGenerations[index]) {
           continue;
         }
@@ -832,9 +917,17 @@ export class FederatedQuestStore implements QuestStore {
       }
       refreshRunning = true;
       try {
-        const generations = sources.map((_source, index) => beginSourceRefresh(index));
+        const generations = sources.map((source, index) =>
+          !sourceNeedsPolling(source)
+            ? (sourceRefreshGenerations[index] ?? 0)
+            : beginSourceRefresh(index),
+        );
         const results = await Promise.all(
-          sources.map((source) => readFederatedWatchSnapshot(scopedFilter, source)),
+          sources.map((source) =>
+            !sourceNeedsPolling(source)
+              ? Promise.resolve(undefined)
+              : readFederatedWatchSnapshot(scopedFilter, source),
+          ),
         );
         if (!active) {
           return;
@@ -847,49 +940,109 @@ export class FederatedQuestStore implements QuestStore {
         refreshRunning = false;
       }
     };
-    const refreshTimer = setInterval(() => {
-      track(refreshSnapshot());
-    }, 1_000);
-    refreshTimer.unref?.();
+    const refreshTimer = sources.some(sourceNeedsPolling)
+      ? setInterval(() => {
+          track(refreshSnapshot());
+        }, 1_000)
+      : undefined;
+    refreshTimer?.unref?.();
     const subscriptions: WatchSubscription[] = [];
+    const watchRetryTimers = new Map<number, ReturnType<typeof setTimeout>>();
+    const clearWatchRetryTimers = (): void => {
+      for (const timer of watchRetryTimers.values()) {
+        clearTimeout(timer);
+      }
+      watchRetryTimers.clear();
+    };
     let unsubscribePromise: Promise<void> | undefined;
+    let registrationComplete = false;
+    const deferredWatchResults: Array<() => void> = [];
     try {
       for (const [index, source] of sources.entries()) {
         if (
-          initialResults[index]?.error !== undefined ||
-          sourceReadError(source, scopedFilter.repo) !== undefined
+          (initialResults[index]?.error !== undefined ||
+            sourceReadError(source, scopedFilter.repo) !== undefined) &&
+          !sourceHasReactiveWatch(source)
         ) {
           continue;
         }
-        subscriptions.push(
-          await source.questStore.watch(scopedFilter, (quests, sourceError) => {
-            const refreshGeneration = beginSourceRefresh(index);
-            const action = refreshFederatedWatchResult(
-              scopedFilter,
+        const handleResult = (result: FederatedWatchResult, refreshGeneration: number): void => {
+          if (!registrationComplete) {
+            deferredWatchResults.push(() => handleResult(result, refreshGeneration));
+            return;
+          }
+          if (!active || refreshGeneration !== sourceRefreshGenerations[index]) {
+            return;
+          }
+          sourceErrors[index] = result.error;
+          if (result.error !== undefined) {
+            snapshots[index] = [];
+            emit(result.error);
+            return;
+          }
+          snapshots[index] = result.snapshot ?? [];
+          emit();
+        };
+        const registerSourceWatch = async (): Promise<void> => {
+          try {
+            const subscription = await watchFederatedSource(
               source,
-              quests,
-              sourceError,
-            ).then((result) => {
-              if (!active || refreshGeneration !== sourceRefreshGenerations[index]) {
-                return;
-              }
-              sourceErrors[index] = result.error;
-              if (result.error !== undefined) {
-                snapshots[index] = [];
-                emit(result.error);
-                return;
-              }
-              snapshots[index] = result.snapshot ?? [];
-              emit();
-            });
-            track(action);
-          }),
-        );
+              scopedFilter,
+              (quests, sourceError) => {
+                const refreshGeneration = beginSourceRefresh(index);
+                const action = refreshFederatedWatchResult(
+                  scopedFilter,
+                  source,
+                  quests,
+                  sourceError,
+                ).then((result) => handleResult(result, refreshGeneration));
+                track(action);
+              },
+              (snapshot, sourceError) => {
+                const refreshGeneration = beginSourceRefresh(index);
+                handleResult(
+                  reactiveFederatedWatchResult(scopedFilter, source, snapshot, sourceError),
+                  refreshGeneration,
+                );
+              },
+            );
+            if (!active) {
+              await subscription.unsubscribe();
+              return;
+            }
+            subscriptions.push(subscription);
+          } catch (watchError: unknown) {
+            if (!active) {
+              return;
+            }
+            if (scopedFilter.repo !== undefined || !this.#allowPartialReads) {
+              throw watchError;
+            }
+            const readError = federatedWatchReadError(scopedFilter, watchError);
+            sourceErrors[index] = readError;
+            snapshots[index] = [];
+            emit(readError);
+            const retryTimer = setTimeout(() => {
+              watchRetryTimers.delete(index);
+              track(registerSourceWatch());
+            }, 1_000);
+            retryTimer.unref?.();
+            watchRetryTimers.set(index, retryTimer);
+          }
+        };
+        await registerSourceWatch();
       }
       emit();
+      registrationComplete = true;
+      for (const applyResult of deferredWatchResults) {
+        applyResult();
+      }
     } catch (error: unknown) {
       active = false;
-      clearInterval(refreshTimer);
+      clearWatchRetryTimers();
+      if (refreshTimer !== undefined) {
+        clearInterval(refreshTimer);
+      }
       await Promise.allSettled(subscriptions.map((subscription) => subscription.unsubscribe()));
       await waitForCallbacks();
       throw error;
@@ -900,7 +1053,10 @@ export class FederatedQuestStore implements QuestStore {
           return unsubscribePromise;
         }
         active = false;
-        clearInterval(refreshTimer);
+        clearWatchRetryTimers();
+        if (refreshTimer !== undefined) {
+          clearInterval(refreshTimer);
+        }
         unsubscribePromise = (async () => {
           const results = await Promise.allSettled(
             subscriptions.map((subscription) => subscription.unsubscribe()),

@@ -64,6 +64,11 @@ export interface WatchSubscription {
 
 export type QuestWatchListener = (quests: readonly Quest[], error?: Error) => void;
 
+export type FederatedSnapshotWatchListener = (
+  snapshot: FederatedReadSnapshot,
+  error?: Error,
+) => void;
+
 export interface FederatedReadSnapshot {
   readonly dump: QuestDump;
   readonly fencedRepositories: readonly string[];
@@ -181,6 +186,9 @@ export interface QuestStore {
    * backend-consistent snapshot; registration returns an idempotent async unsubscriber.
    */
   watch(filter: QuestFilter, listener: QuestWatchListener): Promise<WatchSubscription>;
+
+  /** Reactively emits the complete federated read snapshot when the backend supports it. */
+  watchFederatedSnapshot?(listener: FederatedSnapshotWatchListener): Promise<WatchSubscription>;
 }
 
 export interface StoreMigrationSession {

@@ -2080,11 +2080,11 @@ export function DetailPane({
 
 export function StatusRow({
   notice,
-  pollIntervalMs,
+  refreshing,
   width,
 }: {
   readonly notice: string;
-  readonly pollIntervalMs: number;
+  readonly refreshing: boolean;
   readonly width: number;
 }) {
   const theme = useQuestTheme();
@@ -2102,7 +2102,7 @@ export function StatusRow({
     >
       <StaticText>
         <span fg={theme.status.complete.color}>{`${theme.glyphs.watching} watching`}</span>
-        <span fg={theme.palette.textMuted}>{` · live · poll ${pollIntervalMs}ms`}</span>
+        <span fg={theme.palette.textMuted}>{refreshing ? " · live · refreshing" : " · live"}</span>
         {notice === "Watching for quest changes" ? null : (
           <span
             fg={theme.palette.textSecondary}
