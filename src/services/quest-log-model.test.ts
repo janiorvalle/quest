@@ -524,6 +524,56 @@ describe("read-only quest log runtime", () => {
     }
   });
 
+  test("paints a cached scope before a delayed live watch finishes rebinding", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-log-stale-scope-"));
+    const store = createSqliteStore(join(directory, "quest.db"));
+    await store.addQuest(questInput("alpha", "Alpha quest"));
+    await store.addQuest(questInput("beta", "Beta quest"));
+    const watch = store.watch.bind(store);
+    let delayWatchRegistration = false;
+    store.watch = async (filter, listener) => {
+      if (delayWatchRegistration) {
+        await Bun.sleep(300);
+      }
+      return watch(filter, listener);
+    };
+    const snapshots: Array<{ readonly at: number; readonly value: QuestLogSnapshot }> = [];
+    const runtime = createQuestLogRuntime({ initialScope: { repo: "alpha" }, store });
+    const unsubscribe = runtime.subscribe((value) =>
+      snapshots.push({ at: performance.now(), value }),
+    );
+
+    try {
+      await runtime.start();
+      delayWatchRegistration = true;
+      const startedAt = performance.now();
+      let refreshFinished = false;
+      const switching = runtime.cycleScope().then((selection) => {
+        refreshFinished = true;
+        return selection;
+      });
+      await waitFor(() =>
+        snapshots.some(
+          ({ at, value }) => at >= startedAt && value.currentRepo === "beta" && value.refreshing,
+        ),
+      );
+      const stalePaint = snapshots.find(
+        ({ at, value }) => at >= startedAt && value.currentRepo === "beta" && value.refreshing,
+      );
+
+      expect((stalePaint?.at ?? Number.POSITIVE_INFINITY) - startedAt).toBeLessThan(100);
+      expect(stalePaint?.value.items.map((item) => item.repo)).toEqual(["beta"]);
+      expect(refreshFinished).toBeFalse();
+      await expect(switching).resolves.toEqual({ currentRepo: "beta", scope: "current" });
+      expect(latest(snapshots.map(({ value }) => value)).refreshing).toBeFalse();
+    } finally {
+      unsubscribe();
+      await runtime.stop();
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
   test("restores the previous live scope when a rebind fails", async () => {
     const directory = await mkdtemp(join(tmpdir(), "quest-log-scope-rollback-"));
     const store = createSqliteStore(join(directory, "quest.db"));
@@ -535,30 +585,156 @@ describe("read-only quest log runtime", () => {
     const unsubscribe = runtime.subscribe((snapshot) => snapshots.push(snapshot));
     const watch = store.watch.bind(store);
     let watchCalls = 0;
+    let lateSubscriptionClosed = false;
+    let lateSubscriptionCloseAttempts = 0;
+    let previousScopeListener: QuestWatchListener | undefined;
     store.watch = async (filter, listener) => {
       watchCalls += 1;
-      if (watchCalls === 3) {
+      if (watchCalls === 1) {
+        previousScopeListener = listener;
+      }
+      if (watchCalls === 4) {
+        await Bun.sleep(30);
         throw new Error("scope watch failed");
+      }
+      if (watchCalls === 5) {
+        await Bun.sleep(60);
+        const subscription = await watch(filter, listener);
+        return {
+          unsubscribe: async () => {
+            lateSubscriptionCloseAttempts += 1;
+            if (lateSubscriptionCloseAttempts === 1) {
+              throw new Error("fixture transient unsubscribe failure");
+            }
+            lateSubscriptionClosed = true;
+            await subscription.unsubscribe();
+          },
+        };
       }
       return watch(filter, listener);
     };
 
     try {
-      await store.addQuest(questInput("alpha", "Alpha quest"));
+      const alpha = await store.addQuest(questInput("alpha", "Alpha quest"));
       await store.addQuest(questInput("beta", "Beta quest"));
       await runtime.start();
       await waitFor(
         () => latest(snapshots).loading === false && latest(snapshots).items.length === 1,
       );
 
-      await expect(runtime.cycleScope()).rejects.toThrow("scope watch failed");
+      const switching = runtime.cycleScope();
+      await Bun.sleep(10);
+      await store.addQuest(questInput("alpha", "Alpha arrived during rollback"));
+      await store.acceptQuest({ id: alpha.id, owner: "worker" });
+      await store.transition(alpha.id, {
+        action: "turnin",
+        actor: "worker",
+        pr: "https://github.com/janiorvalle/quest/pull/254",
+      });
+      await store.transition(alpha.id, {
+        action: "complete",
+        actor: "worker",
+        pr_verified_merged: true,
+      });
+      previousScopeListener?.(
+        await store.listQuests({ repo: "alpha" }),
+        new Error("[CONVEX_REALTIME_WATCH_FAILED] previous scope disconnected; retrying"),
+      );
+      await expect(switching).rejects.toThrow("scope watch failed");
       expect(latest(snapshots)).toMatchObject({
         currentRepo: "alpha",
         scope: "current",
       });
-      expect(latest(snapshots).items.map((item) => item.repo)).toEqual(["alpha"]);
+      expect(latest(snapshots).items.map((item) => item.title)).toEqual([
+        "Alpha quest",
+        "Alpha arrived during rollback",
+      ]);
+      expect(latest(snapshots).items.find((item) => item.id === alpha.id)?.prState).toBe("merged");
+      expect(latest(snapshots).error).toContain("previous scope disconnected");
+      expect(lateSubscriptionCloseAttempts).toBe(1);
+      expect(lateSubscriptionClosed).toBeFalse();
+      await runtime.stop();
+      expect(lateSubscriptionCloseAttempts).toBe(2);
+      expect(lateSubscriptionClosed).toBeTrue();
     } finally {
       unsubscribe();
+      await runtime.stop();
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("preserves missing repositories when an all-scope rollback refresh is partial", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-log-partial-rollback-"));
+    const store = createSqliteStore(join(directory, "quest.db"));
+    await store.addQuest(questInput("alpha", "Alpha quest"));
+    await store.addQuest(questInput("beta", "Beta quest"));
+    const watch = store.watch.bind(store);
+    const listQuests = store.listQuests.bind(store);
+    let watchCalls = 0;
+    let rollbackReadsArePartial = false;
+    store.watch = async (filter, listener) => {
+      watchCalls += 1;
+      if (watchCalls === 4) {
+        rollbackReadsArePartial = true;
+        throw new Error("scope watch failed");
+      }
+      return watch(filter, listener);
+    };
+    store.listQuests = async (filter = {}) => {
+      const quests = await listQuests(filter);
+      return rollbackReadsArePartial && filter.repo === undefined
+        ? quests.filter((quest) => quest.repo === "alpha")
+        : quests;
+    };
+    const snapshots: QuestLogSnapshot[] = [];
+    const runtime = createQuestLogRuntime({ initialScope: { repo: null }, store });
+    const unsubscribe = runtime.subscribe((snapshot) => snapshots.push(snapshot));
+
+    try {
+      await runtime.start();
+      await expect(runtime.cycleScope()).rejects.toThrow("scope watch failed");
+      expect(latest(snapshots)).toMatchObject({ currentRepo: null, scope: "all" });
+      expect(
+        latest(snapshots)
+          .items.map((item) => item.repo)
+          .sort(),
+      ).toEqual(["alpha", "beta"]);
+    } finally {
+      unsubscribe();
+      await runtime.stop();
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("refreshes repository names after discovery registration fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-log-discovery-retry-"));
+    const store = createSqliteStore(join(directory, "quest.db"));
+    await store.addQuest(questInput("alpha", "Alpha quest"));
+    const watch = store.watch.bind(store);
+    let discoveryAttempts = 0;
+    store.watch = async (filter, listener) => {
+      if (filter.repo === undefined && filter.blocked === undefined) {
+        discoveryAttempts += 1;
+        if (discoveryAttempts === 1) {
+          throw new Error("fixture discovery registration failed");
+        }
+      }
+      return watch(filter, listener);
+    };
+    const runtime = createQuestLogRuntime({ initialScope: { repo: "alpha" }, store });
+
+    try {
+      await runtime.start();
+      await store.addQuest(questInput("beta", "Beta quest"));
+
+      await expect(runtime.cycleScope()).resolves.toEqual({
+        currentRepo: "beta",
+        scope: "current",
+      });
+      expect(discoveryAttempts).toBe(2);
+    } finally {
       await runtime.stop();
       store.close();
       await rm(directory, { force: true, recursive: true });
@@ -629,8 +805,8 @@ describe("read-only quest log runtime", () => {
         throw new Error("quest log did not establish both named-scope watches");
       }
 
-      const outage = new FederatedReadError(
-        "[FEDERATED_SCOPE_UNAVAILABLE] repository remote backend is unreachable; retry when its deployment is reachable",
+      const outage = new Error(
+        "[CONVEX_REALTIME_WATCH_FAILED] the live Convex watch disconnected; retrying automatically",
       );
       mainWatch.listener([], outage);
       blockedWatch.listener([]);

@@ -279,6 +279,271 @@ describe("federated quest reads", () => {
     }
   });
 
+  test("does not poll a source that exposes a reactive federated snapshot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-federated-reactive-watch-"));
+    const questStore = new SqliteStore(join(root, "remote.db"), { now: () => timestamp });
+    let snapshotReads = 0;
+    let unsubscribed = false;
+    try {
+      await questStore.addQuest(task("remote", "Remote quest"));
+      const snapshot = { dump: await questStore.exportAll(), fencedRepositories: [] };
+      const reactiveQuestStore = Object.assign(questStore, {
+        watchFederatedSnapshot: async (
+          listener: Parameters<
+            NonNullable<FederatedStoreSource["questStore"]["watchFederatedSnapshot"]>
+          >[0],
+        ) => {
+          listener(snapshot);
+          return {
+            unsubscribe: async () => {
+              unsubscribed = true;
+            },
+          };
+        },
+      });
+      const source: FederatedStoreSource = {
+        blobStore: new LocalBlobStore(join(root, "remote-evidence")),
+        includeRepository: (repo) => repo === "remote",
+        questStore: reactiveQuestStore,
+        readSnapshot: async () => {
+          snapshotReads += 1;
+          return snapshot;
+        },
+      };
+      const emissions: unknown[] = [];
+      const subscription = await new FederatedQuestStore([source]).watch({}, (quests) =>
+        emissions.push(quests),
+      );
+
+      await Bun.sleep(1_250);
+      expect(snapshotReads).toBe(1);
+      expect(emissions.at(-1)).toMatchObject([{ repo: "remote" }]);
+      await subscription.unsubscribe();
+      expect(unsubscribed).toBeTrue();
+    } finally {
+      questStore.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("polls a non-reactive snapshot source for fence-only changes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-federated-snapshot-poll-"));
+    const questStore = new SqliteStore(join(root, "remote.db"), { now: () => timestamp });
+    let snapshotReads = 0;
+    try {
+      await questStore.addQuest(task("remote", "Remote quest"));
+      const dump = await questStore.exportAll();
+      const source: FederatedStoreSource = {
+        blobStore: new LocalBlobStore(join(root, "remote-evidence")),
+        includeRepository: (repo) => repo === "remote",
+        questStore,
+        readSnapshot: async () => {
+          snapshotReads += 1;
+          return {
+            dump,
+            fencedRepositories: snapshotReads >= 3 ? ["remote"] : [],
+          };
+        },
+      };
+      const emissions: (readonly ReturnType<typeof task>[])[] = [];
+      const subscription = await new FederatedQuestStore([source]).watch({}, (quests) =>
+        emissions.push(quests),
+      );
+
+      await Bun.sleep(1_100);
+      expect(snapshotReads).toBeGreaterThanOrEqual(3);
+      expect(emissions.at(-1)).toEqual([]);
+      await subscription.unsubscribe();
+    } finally {
+      questStore.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("preserves an unavailable reactive source error while recovery is pending", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-federated-reactive-recovery-"));
+    const remoteStore = new SqliteStore(join(root, "remote.db"), { now: () => timestamp });
+    const localStore = new SqliteStore(join(root, "local.db"), { now: () => timestamp });
+    const outage = new FederatedReadError(
+      "[FEDERATED_SCOPE_UNAVAILABLE] remote is unavailable; retry when its deployment is reachable",
+    );
+    let refreshCount = 0;
+    const remoteSource: FederatedStoreSource = {
+      blobStore: new LocalBlobStore(join(root, "remote-evidence")),
+      includeRepository: (repo) => repo === "remote",
+      needsWatchPolling: () => false,
+      questStore: remoteStore,
+      readError: () => outage,
+      refresh: async () => {
+        refreshCount += 1;
+      },
+      watchSnapshot: async () => ({ unsubscribe: async () => undefined }),
+    };
+    const localSource: FederatedStoreSource = {
+      blobStore: new LocalBlobStore(join(root, "local-evidence")),
+      includeRepository: (repo) => repo === "local",
+      questStore: localStore,
+    };
+
+    try {
+      await localStore.addQuest(task("local", "Local quest"));
+      const emissions: Array<{
+        readonly error: Error | undefined;
+        readonly repos: readonly string[];
+      }> = [];
+      const subscription = await new FederatedQuestStore([remoteSource, localSource], undefined, {
+        allowPartialReads: true,
+      }).watch({}, (quests, error) => {
+        emissions.push({ error, repos: quests.map((quest) => quest.repo) });
+      });
+
+      await Bun.sleep(1_250);
+      expect(refreshCount).toBe(2);
+      expect(emissions.at(-1)).toEqual({ error: outage, repos: ["local"] });
+      await subscription.unsubscribe();
+    } finally {
+      remoteStore.close();
+      localStore.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("retries an initially failed reactive source without closing healthy peers", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-federated-reactive-retry-"));
+    const remoteStore = new SqliteStore(join(root, "remote.db"), { now: () => timestamp });
+    const localStore = new SqliteStore(join(root, "local.db"), { now: () => timestamp });
+    let watchAttempts = 0;
+
+    try {
+      await remoteStore.addQuest(task("remote", "Remote quest"));
+      await localStore.addQuest(task("local", "Local quest"));
+      const remoteSnapshot = { dump: await remoteStore.exportAll(), fencedRepositories: [] };
+      const reactiveRemoteStore = Object.assign(remoteStore, {
+        watchFederatedSnapshot: async (
+          listener: Parameters<
+            NonNullable<FederatedStoreSource["questStore"]["watchFederatedSnapshot"]>
+          >[0],
+        ) => {
+          watchAttempts += 1;
+          if (watchAttempts === 1) {
+            throw new Error("remote reactive registration failed");
+          }
+          listener(remoteSnapshot);
+          return { unsubscribe: async () => undefined };
+        },
+      });
+      const remoteSource: FederatedStoreSource = {
+        blobStore: new LocalBlobStore(join(root, "remote-evidence")),
+        includeRepository: (repo) => repo === "remote",
+        questStore: reactiveRemoteStore,
+        readSnapshot: async () => {
+          throw new Error("remote initial snapshot failed");
+        },
+      };
+      const localSource: FederatedStoreSource = {
+        blobStore: new LocalBlobStore(join(root, "local-evidence")),
+        includeRepository: (repo) => repo === "local",
+        questStore: localStore,
+      };
+      const emissions: Array<{
+        readonly error: Error | undefined;
+        readonly repos: readonly string[];
+      }> = [];
+      const subscription = await new FederatedQuestStore([remoteSource, localSource], undefined, {
+        allowPartialReads: true,
+      }).watch({}, (quests, error) => {
+        emissions.push({ error, repos: quests.map((quest) => quest.repo).sort() });
+      });
+
+      expect(emissions.at(-1)?.repos).toEqual(["local"]);
+      await Bun.sleep(1_100);
+      expect(watchAttempts).toBe(2);
+      expect(emissions.at(-1)).toEqual({ error: undefined, repos: ["local", "remote"] });
+      await subscription.unsubscribe();
+    } finally {
+      remoteStore.close();
+      localStore.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("keeps polling an unavailable source until its own recovery completes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-federated-recovery-poll-"));
+    const questStore = new SqliteStore(join(root, "fallback.db"), { now: () => timestamp });
+    let refreshCount = 0;
+    let needsRecovery = true;
+    const reactiveQuestStore = Object.assign(questStore, {
+      watchFederatedSnapshot: async () => ({ unsubscribe: async () => undefined }),
+    });
+    const source: FederatedStoreSource = {
+      blobStore: new LocalBlobStore(join(root, "fallback-evidence")),
+      includeRepository: () => true,
+      needsWatchPolling: () => needsRecovery,
+      questStore: reactiveQuestStore,
+      refresh: async () => {
+        refreshCount += 1;
+        if (refreshCount >= 2) {
+          needsRecovery = false;
+        }
+      },
+    };
+
+    try {
+      const subscription = await new FederatedQuestStore([source]).watch({}, () => undefined);
+      await Bun.sleep(2_250);
+      expect(refreshCount).toBe(3);
+      await subscription.unsubscribe();
+    } finally {
+      questStore.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("paints a healthy source without waiting for a slow federated peer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-federated-progressive-watch-"));
+    const remoteStore = new SqliteStore(join(root, "remote.db"), { now: () => timestamp });
+    const localStore = new SqliteStore(join(root, "local.db"), { now: () => timestamp });
+    try {
+      await localStore.addQuest(task("local", "Local quest"));
+      const remoteSnapshot = { dump: await remoteStore.exportAll(), fencedRepositories: [] };
+      const sources: FederatedStoreSource[] = [
+        {
+          blobStore: new LocalBlobStore(join(root, "remote-evidence")),
+          includeRepository: (repo) => repo === "remote",
+          questStore: remoteStore,
+          readSnapshot: async () => {
+            await Bun.sleep(300);
+            return remoteSnapshot;
+          },
+        },
+        {
+          blobStore: new LocalBlobStore(join(root, "local-evidence")),
+          includeRepository: (repo) => repo === "local",
+          questStore: localStore,
+        },
+      ];
+      const emissions: Array<{ readonly at: number; readonly repos: readonly string[] }> = [];
+      const startedAt = performance.now();
+      const opening = new FederatedQuestStore(sources, undefined, {
+        allowPartialReads: true,
+      }).watch({}, (quests) => {
+        emissions.push({ at: performance.now(), repos: quests.map((quest) => quest.repo) });
+      });
+      while (!emissions.some((emission) => emission.repos.includes("local"))) {
+        await Bun.sleep(2);
+      }
+      const localPaint = emissions.find((emission) => emission.repos.includes("local"));
+
+      expect((localPaint?.at ?? Number.POSITIVE_INFINITY) - startedAt).toBeLessThan(100);
+      const subscription = await opening;
+      await subscription.unsubscribe();
+    } finally {
+      remoteStore.close();
+      localStore.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   test("does not keep stale rows when a partial federated watch loses a backend", async () => {
     const root = await mkdtemp(join(tmpdir(), "quest-federated-watch-outage-"));
     const remoteStore = new SqliteStore(join(root, "remote.db"), { now: () => timestamp });

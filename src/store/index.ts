@@ -30,6 +30,8 @@ export type {
   BackupDatabaseRestoreSession,
   BlobStore,
   Clock,
+  FederatedReadSnapshot,
+  FederatedSnapshotWatchListener,
   QuestDetailSnapshot,
   QuestStore,
   QuestWatchListener,

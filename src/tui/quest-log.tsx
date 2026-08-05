@@ -215,7 +215,6 @@ function ReadOnlyLayout({
   notice,
   policyItems,
   planAvailable,
-  runtime,
   signoff,
   signoffItems,
   signoffSelectedIndex,
@@ -238,7 +237,6 @@ function ReadOnlyLayout({
   readonly notice: string;
   readonly policyItems: readonly QuestLogItem[];
   readonly planAvailable: boolean;
-  readonly runtime: QuestLogRuntime;
   readonly signoff: QuestLogSignoffLens;
   readonly signoffItems: readonly QuestLogItem[];
   readonly signoffSelectedIndex: number;
@@ -334,7 +332,7 @@ function ReadOnlyLayout({
         </box>
       </box>
       <HorizontalRule width={width} />
-      <StatusRow notice={notice} pollIntervalMs={runtime.pollIntervalMs} width={width} />
+      <StatusRow notice={notice} refreshing={snapshot.refreshing} width={width} />
       <FooterKeymap lens={lens} planAvailable={planAvailable} sortMode={sortMode} width={width} />
     </box>
   );
@@ -414,6 +412,7 @@ export function QuestLogApp({
     items: [],
     loading: true,
     plan: null,
+    refreshing: false,
     signoff: EMPTY_QUEST_LOG_SIGNOFF,
     scope: "all",
   });
@@ -641,7 +640,6 @@ export function QuestLogApp({
         }
         policyItems={policyItems}
         planAvailable={planAvailable}
-        runtime={runtime}
         signoff={snapshot.signoff}
         signoffItems={signoffItems}
         signoffSelectedIndex={activeSelectedIndex}
