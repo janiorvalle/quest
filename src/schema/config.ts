@@ -73,6 +73,7 @@ export const configSchema = objectInputSchema.pipe(
     // new top-level shape.
     tui: z
       .object({
+        mouse: z.boolean().optional(),
         theme: nonEmptyTextSchema.optional(),
       })
       .optional(),

@@ -144,6 +144,8 @@ function harness(options: {
           latest_version: "1.2.3",
           release_url: "https://example.com/release",
           repository: "janiorvalle/quest",
+          skill_refresh_failures: [],
+          skill_refreshes: [],
           target: "darwin-arm64",
           update_available: false,
         }),
@@ -420,6 +422,79 @@ describe("Commander CLI wiring", () => {
       const environmentRun = viewerHarness({ QUEST_THEME: "ledgr" });
       expect(await runQuestCli([], environmentRun.dependencies)).toBe(EXIT_USAGE_ERROR);
       expect(environmentRun.stderr[0]).toContain("QUEST_THEME=ledgr");
+    } finally {
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("resolves viewer mouse tracking from environment, config, then the enabled default", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-cli-mouse-"));
+    const store = createSqliteStore(join(directory, "quest.db"));
+    const ports = {
+      blobStore: new LocalBlobStore(join(directory, "evidence")),
+      clock,
+      questStore: store,
+    } satisfies CliApplicationPorts;
+    const mouseFor = async (options: {
+      readonly configMouse?: boolean;
+      readonly environmentMouse?: string;
+    }) => {
+      let viewerContext: FutureTuiContext | undefined;
+      const { dependencies } = harness({
+        ...(options.configMouse === undefined
+          ? {}
+          : { config: { ...config, tui: { mouse: options.configMouse } } }),
+        ...(options.environmentMouse === undefined
+          ? {}
+          : { environment: { QUEST_TUI_MOUSE: options.environmentMouse } }),
+        isTty: true,
+        launchTui: async (context) => {
+          viewerContext = context;
+        },
+        openApplicationPorts: () => Promise.resolve(ports),
+        viewer: { openEvidence: () => Promise.resolve(), openUrl: () => Promise.resolve() },
+      });
+      expect(await runQuestCli([], dependencies)).toBe(EXIT_SUCCESS);
+      return viewerContext?.mouse;
+    };
+
+    try {
+      expect(await mouseFor({})).toBe(true);
+      expect(await mouseFor({ configMouse: false })).toBe(false);
+      expect(await mouseFor({ configMouse: true, environmentMouse: "false" })).toBe(false);
+      expect(await mouseFor({ configMouse: false, environmentMouse: "true" })).toBe(true);
+    } finally {
+      store.close();
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("reports an invalid QUEST_TUI_MOUSE only when opening the viewer", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-cli-mouse-invalid-"));
+    const store = createSqliteStore(join(directory, "quest.db"));
+    const ports = {
+      blobStore: new LocalBlobStore(join(directory, "evidence")),
+      clock,
+      questStore: store,
+    } satisfies CliApplicationPorts;
+    const run = harness({
+      environment: { QUEST_TUI_MOUSE: "off" },
+      isTty: true,
+      launchTui: () => Promise.reject(new Error("the viewer must not launch")),
+      openApplicationPorts: () => Promise.resolve(ports),
+      viewer: { openEvidence: () => Promise.resolve(), openUrl: () => Promise.resolve() },
+    });
+
+    try {
+      expect(await runQuestCli([], run.dependencies)).toBe(EXIT_USAGE_ERROR);
+      expect(run.stderr[0]).toContain("[QUEST_INVALID_TUI_MOUSE]");
+      expect(run.stderr[0]).toContain("QUEST_TUI_MOUSE=false");
+
+      const nonViewer = harness({ environment: { QUEST_TUI_MOUSE: "off" }, isTty: false });
+      expect(await runQuestCli(["--format", "json", "list"], nonViewer.dependencies)).not.toBe(
+        EXIT_USAGE_ERROR,
+      );
     } finally {
       store.close();
       await rm(directory, { force: true, recursive: true });

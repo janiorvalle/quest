@@ -77,7 +77,30 @@ export interface UpgradeLookupResult {
 export interface UpgradeResult extends UpgradeLookupResult {
   readonly checksum: string | null;
   readonly installed: boolean;
+  readonly skill_refresh_failures: readonly SkillRefreshFailure[];
+  readonly skill_refreshes: readonly SkillRefreshReceipt[];
 }
+
+export interface SkillRefreshReceipt {
+  readonly agent: string;
+  readonly previous_version: string;
+}
+
+export interface SkillRefreshFailure {
+  readonly agent: string;
+  readonly message: string;
+  readonly remedy: "quest skill install --force";
+}
+
+export interface SkillRefreshResult {
+  readonly failures: readonly SkillRefreshFailure[];
+  readonly refreshed: readonly SkillRefreshReceipt[];
+}
+
+export type InstalledSkillRefresher = (
+  newExecutablePath: string,
+  previousVersion: string,
+) => Promise<SkillRefreshResult>;
 
 export interface UpgradeOperations {
   readonly check: (currentVersion: string) => Promise<UpgradeLookupResult>;
@@ -90,6 +113,7 @@ export interface CreateUpgradeOperationsOptions {
   readonly fileSystem?: UpgradeFileSystem;
   readonly httpClient?: UpgradeHttpClient;
   readonly platform?: NodeJS.Platform;
+  readonly refreshInstalledSkills?: InstalledSkillRefresher;
   readonly replaceExecutable?: ExecutableReplacer;
   readonly repository?: string;
   readonly token?: string;
@@ -489,7 +513,10 @@ export async function replaceInstalledExecutable(options: {
   readonly executablePath: string;
   readonly fileSystem: UpgradeFileSystem;
   readonly replaceExecutable?: ExecutableReplacer;
-}): Promise<void> {
+}): Promise<{
+  readonly newExecutablePath: string;
+  readonly outcome: ExecutableReplacementOutcome;
+}> {
   const installDirectory = dirname(options.executablePath);
   let temporaryDirectory: string | undefined;
   let stagedExecutable: string | undefined;
@@ -515,6 +542,11 @@ export async function replaceInstalledExecutable(options: {
       stagedExecutable,
       temporaryDirectory,
     });
+    return {
+      // A deferred Windows swap leaves the downloaded binary staged until this process exits.
+      newExecutablePath: outcome === "scheduled" ? stagedExecutable : options.executablePath,
+      outcome,
+    };
   } catch (error) {
     throw new UpgradeError(
       "UPGRADE_INSTALL_FAILED",
@@ -566,6 +598,8 @@ export function createUpgradeOperations(
           ...resolved.lookup,
           checksum: null,
           installed: false,
+          skill_refresh_failures: [],
+          skill_refreshes: [],
         };
       }
 
@@ -583,7 +617,7 @@ export function createUpgradeOperations(
         );
       }
 
-      await replaceInstalledExecutable({
+      const replacement = await replaceInstalledExecutable({
         artifact,
         executablePath: options.executablePath,
         fileSystem,
@@ -591,10 +625,32 @@ export function createUpgradeOperations(
           ? {}
           : { replaceExecutable: options.replaceExecutable }),
       });
+      let skillRefresh: SkillRefreshResult = { failures: [], refreshed: [] };
+      if (options.refreshInstalledSkills !== undefined) {
+        try {
+          skillRefresh = await options.refreshInstalledSkills(
+            replacement.newExecutablePath,
+            currentVersion,
+          );
+        } catch (error) {
+          skillRefresh = {
+            failures: [
+              {
+                agent: "Claude Code and Codex",
+                message: errorDetail(error),
+                remedy: "quest skill install --force",
+              },
+            ],
+            refreshed: [],
+          };
+        }
+      }
       return {
         ...resolved.lookup,
         checksum: actualChecksum,
         installed: true,
+        skill_refresh_failures: skillRefresh.failures,
+        skill_refreshes: skillRefresh.refreshed,
       };
     },
   };

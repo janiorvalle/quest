@@ -12,6 +12,7 @@ export async function launchQuestLog(
   options: {
     readonly branch?: string | undefined;
     readonly identity?: string | undefined;
+    readonly mouse: boolean;
     readonly theme: ViewerTheme;
   },
 ): Promise<void> {
@@ -36,11 +37,13 @@ export async function launchQuestLog(
     unsubscribeTitle = runtime.subscribe(terminalTitle.update);
     renderer = await createCliRenderer({
       clearOnShutdown: true,
+      enableMouseMovement: false,
       exitOnCtrlC: true,
       onDestroy: () => {
         finish?.();
       },
       screenMode: "alternate-screen",
+      useMouse: options.mouse,
     });
     createRoot(renderer).render(
       <QuestLogApp

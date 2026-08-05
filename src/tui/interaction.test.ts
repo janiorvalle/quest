@@ -5,6 +5,7 @@ import {
   type QuestLogInteractionContext,
   type QuestLogInteractionState,
   reduceReadOnlyInteraction,
+  reduceReadOnlyScroll,
 } from "./interaction";
 
 const context: QuestLogInteractionContext = {
@@ -249,6 +250,39 @@ describe("read-only quest log keymap", () => {
 
     const moved = reduceReadOnlyInteraction(state, key("j"), scrollingContext).state;
     expect(moved).toMatchObject({ detailScrollOffset: 0, selectedIndex: 1, selectedQuestId: 73 });
+  });
+
+  test("maps one vertical wheel event to the hovered region's keyboard action", () => {
+    const scrollingContext = {
+      ...context,
+      detailContentRows: 10,
+      detailViewportRows: 4,
+      visibleQuestIds: [72, 73, 74, 75],
+    };
+
+    const detail = reduceReadOnlyScroll(
+      INITIAL_QUEST_LOG_INTERACTION,
+      "detail",
+      "down",
+      scrollingContext,
+    );
+    expect(detail.state).toMatchObject({ detailScrollOffset: 1, selectedIndex: 0 });
+
+    const list = reduceReadOnlyScroll(detail.state, "list", "down", scrollingContext);
+    expect(list.state).toMatchObject({
+      detailScrollOffset: 0,
+      selectedIndex: 1,
+      selectedQuestId: 73,
+    });
+
+    expect(reduceReadOnlyScroll(list.state, "list", "up", scrollingContext).state).toMatchObject({
+      selectedIndex: 0,
+      selectedQuestId: 72,
+    });
+    expect(
+      reduceReadOnlyScroll(INITIAL_QUEST_LOG_INTERACTION, "detail", "up", scrollingContext).state
+        .detailScrollOffset,
+    ).toBe(0);
   });
 });
 
