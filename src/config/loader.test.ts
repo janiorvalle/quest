@@ -366,14 +366,14 @@ deployment = "https://happy-fox-123.convex.cloud"
     }
   });
 
-  test("reads the theme preference the viewer writes", async () => {
+  test("reads viewer preferences from the shared tui section", async () => {
     const config = await loadConfig({
       platform,
       environment: {},
-      readFile: textReader('[tui]\ntheme = "dense"'),
+      readFile: textReader('[tui]\nmouse = false\ntheme = "dense"'),
     });
 
-    expect(config.tui).toEqual({ theme: "dense" });
+    expect(config.tui).toEqual({ mouse: false, theme: "dense" });
   });
 });
 

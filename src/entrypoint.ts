@@ -69,6 +69,7 @@ const launchReadOnlyViewer = async (context: FutureTuiContext): Promise<void> =>
   await launchQuestLog(runtime, {
     ...(branch === undefined ? {} : { branch }),
     ...(context.identity === undefined ? {} : { identity: context.identity }),
+    mouse: context.mouse,
     theme: context.theme,
   });
 };
