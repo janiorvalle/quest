@@ -2,13 +2,15 @@ import { expect, test } from "bun:test";
 
 import { convexApi, createConvexHttpClient } from "./client";
 
-function convexErrorResponse(): Response {
+function convexErrorResponse(
+  code = "QUEST_INVITE_INVALID",
+  message = "invite token is invalid",
+): Response {
   return new Response(
     JSON.stringify({
       status: "error",
-      errorMessage:
-        'Server Error Uncaught ConvexError: {"code":"QUEST_INVITE_INVALID","message":"invite token is invalid"} at failMember (convex/members.ts:38:9) at handler (convex/members.ts:200:3)',
-      errorData: { code: "QUEST_INVITE_INVALID", message: "invite token is invalid" },
+      errorMessage: `Server Error Uncaught ConvexError: ${JSON.stringify({ code, message })} at failMember (convex/members.ts:38:9) at handler (convex/members.ts:200:3)`,
+      errorData: { code, message },
     }),
     { headers: { "Content-Type": "application/json" }, status: 560 },
   );
@@ -56,6 +58,23 @@ test("normalizes ConvexError data for queries and mutations", async () => {
   expect(mutationError.message).toBe("[QUEST_INVITE_INVALID] invite token is invalid");
   expect(mutationError.message).not.toContain("Request ID");
   expect(mutationError.message).not.toContain("at handler");
+});
+
+test("preserves stable lifecycle error codes from Convex", async () => {
+  const message =
+    "quest 384 is open; completion requires turned_in. Run `quest accept 384`, finish the work, and turn it in before retrying. No state changed.";
+  const client = createConvexHttpClient("https://example.convex.cloud", {
+    fetch: fetchResponses([convexErrorResponse("COMPLETE_INVALID_STATE", message)]),
+  });
+
+  const error = await captureFailure(() =>
+    client.mutation(convexApi.transition, {
+      id: 384,
+      transition: { action: "complete", actor: "tester", session_guild: null },
+    }),
+  );
+  expect(error.message).toBe(`[COMPLETE_INVALID_STATE] ${message}`);
+  expect(error.message).not.toContain("Request ID");
 });
 
 test("leaves non-Convex request failures unchanged", async () => {

@@ -2,20 +2,27 @@ import { describe, expect, test } from "bun:test";
 import {
   type QuestKind,
   type QuestStatus,
+  type QuestTransition,
   questStatusSchema,
   type Verdict,
   verdictSchema,
 } from "../schema";
 import {
+  assertLifecycleActionAllowed,
   canApplyVerdict,
   initialStatusForKind,
   isDispatchableQuest,
   isLegalStatusTransition,
   isValidBackfill,
+  LifecycleInvalidStateError,
   statusAfterClaimRelease,
   statusForRetestVerdict,
   statusForVerdict,
 } from ".";
+
+function lifecycleQuest(kind: QuestKind, status: QuestStatus) {
+  return { id: 42, kind, status };
+}
 
 const expectedTransitions = new Set([
   "open:ready",
@@ -79,6 +86,63 @@ describe("status and kind rules", () => {
       expect(isDispatchableQuest({ kind, status })).toBe(expected);
     },
   );
+});
+
+describe("lifecycle action validation", () => {
+  test.each([
+    ["abandon", "accepted"],
+    ["verdict", "open"],
+    ["turnin", "accepted"],
+    ["complete", "turned_in"],
+    ["signoff", "complete"],
+    ["cancel", "ready"],
+    ["reopen", "dropped"],
+    ["update", "complete"],
+  ] satisfies ReadonlyArray<readonly [QuestTransition["action"], QuestStatus]>)(
+    "%s accepts %s",
+    (action, status) => {
+      expect(() =>
+        assertLifecycleActionAllowed(lifecycleQuest("bug", status), action),
+      ).not.toThrow();
+    },
+  );
+
+  test.each([
+    ["abandon", "bug", "ready", "ABANDON_INVALID_STATE"],
+    ["verdict", "task", "ready", "VERDICT_INVALID_STATE"],
+    ["turnin", "bug", "open", "TURNIN_INVALID_STATE"],
+    ["complete", "bug", "open", "COMPLETE_INVALID_STATE"],
+    ["cancel", "bug", "complete", "CANCEL_INVALID_STATE"],
+    ["reopen", "bug", "open", "REOPEN_INVALID_STATE"],
+  ] satisfies ReadonlyArray<
+    readonly [QuestTransition["action"], QuestKind, QuestStatus, LifecycleInvalidStateError["code"]]
+  >)("%s rejects %s/%s with %s", (action, kind, status, code) => {
+    let rejection: unknown;
+    try {
+      assertLifecycleActionAllowed(lifecycleQuest(kind, status), action);
+    } catch (error: unknown) {
+      rejection = error;
+    }
+
+    expect(rejection).toBeInstanceOf(LifecycleInvalidStateError);
+    expect(rejection).toMatchObject({ code });
+    expect((rejection as Error).message).toContain(`quest 42 is ${status}`);
+    expect((rejection as Error).message).toContain("No state changed");
+  });
+
+  test("complete tells the receiver how and when to retry", () => {
+    expect(() => assertLifecycleActionAllowed(lifecycleQuest("bug", "open"), "complete")).toThrow(
+      "[COMPLETE_INVALID_STATE] quest 42 is open; completion requires turned_in. If it is open or ready, run `quest accept 42`; if it is complete or dropped, reopen it before accepting.",
+    );
+  });
+
+  test("signoff keeps its existing stable error contract", () => {
+    expect(() =>
+      assertLifecycleActionAllowed(lifecycleQuest("bug", "turned_in"), "signoff"),
+    ).toThrow(
+      "[SIGNOFF_NOT_COMPLETE] quest 42 is turned_in; sign-off applies only after review, merge, and completion.",
+    );
+  });
 });
 
 describe("verdict routing", () => {

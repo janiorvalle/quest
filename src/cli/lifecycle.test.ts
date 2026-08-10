@@ -644,6 +644,53 @@ describe("lifecycle CLI behavior", () => {
     }
   });
 
+  test("returns stable invalid-state errors before lifecycle mutations", async () => {
+    const harness = await createHarness();
+    try {
+      await harness.runJson(["add", "Invalid lifecycle state", "--kind", "bug"]);
+
+      for (const [argumentsWithoutRuntime, code] of [
+        [["turnin", "1"], "TURNIN_INVALID_STATE"],
+        [["complete", "1"], "COMPLETE_INVALID_STATE"],
+        [["reopen", "1", "--notes", "not terminal"], "REOPEN_INVALID_STATE"],
+      ] satisfies ReadonlyArray<readonly [readonly string[], string]>) {
+        const result = await harness.runJson(argumentsWithoutRuntime);
+        expect(result.code).toBe(EXIT_DOMAIN_ERROR);
+        expect(result.report).toBeNull();
+        expect(result.stderr).toHaveLength(1);
+        expect(result.stderr[0]).toContain(`quest: domain: [${code}] quest 1 is open;`);
+      }
+
+      expect(await harness.store.getQuest(1)).toMatchObject({ status: "open" });
+      expect((await harness.store.events(1)).map(({ action }) => action)).toEqual(["add"]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  test("rejects invalid completion state before checking a historical PR", async () => {
+    let mergeChecks = 0;
+    const harness = await createHarness([], config, undefined, undefined, async () => {
+      mergeChecks += 1;
+      return { state: "OPEN", url: "https://github.com/example/quest/pull/42" };
+    });
+    try {
+      await harness.runJson(["add", "Reopened PR-backed quest", "--kind", "task"]);
+      await harness.runJson(["accept", "1"]);
+      await harness.runJson(["turnin", "1", "--pr", "42"]);
+      await harness.runJson(["reopen", "1", "--notes", "needs another attempt"]);
+
+      const result = await harness.runJson(["complete", "1"]);
+      expect(result.code).toBe(EXIT_DOMAIN_ERROR);
+      expect(result.stderr[0]).toContain("[COMPLETE_INVALID_STATE] quest 1 is ready;");
+      expect(result.stderr[0]).not.toContain("COMPLETE_PR_UNMERGED");
+      expect(mergeChecks).toBe(0);
+      expect(await harness.store.getQuest(1)).toMatchObject({ status: "ready" });
+    } finally {
+      await harness.stop();
+    }
+  });
+
   test("signs off multiple completed quests without changing their status rows", async () => {
     const harness = await createHarness();
     await writeFile(join(harness.directory, "qa-signoff.txt"), "QA passed");

@@ -9,6 +9,7 @@ import type {
   QuestDump,
   QuestStatus,
   QuestStore,
+  QuestTransition,
   Sha256,
 } from "../index";
 import { eventSchema, questDumpSchema, questSchema, sha256Schema } from "../schema";
@@ -210,13 +211,53 @@ async function verifyIllegalTransition(factory: QuestStoreFactory): Promise<void
     const quest = await store.addQuest(taskInput("illegal transition"));
     const questBefore = snapshotQuest(quest);
     const eventsBefore = snapshotEvents(await store.events(quest.id));
+    const actor = resolveActor("contract/tester");
 
-    await requireRejection(
-      store.transition(quest.id, { action: "complete", actor: resolveActor(actor) }),
-      "ready-to-complete transition must reject",
-    );
+    for (const [transition, code] of [
+      [{ action: "turnin", actor, pr: null, session_guild: null }, "TURNIN_INVALID_STATE"],
+      [{ action: "complete", actor }, "COMPLETE_INVALID_STATE"],
+      [{ action: "reopen", actor, notes: "invalid state" }, "REOPEN_INVALID_STATE"],
+    ] satisfies ReadonlyArray<readonly [QuestTransition, string]>) {
+      let rejection: unknown;
+      try {
+        await store.transition(quest.id, transition);
+      } catch (error: unknown) {
+        rejection = error;
+      }
+      requireContract(
+        rejection instanceof Error &&
+          rejection.message.includes(`[${code}] quest ${quest.id} is ready;`),
+        `${transition.action} from ready must reject with ${code}`,
+      );
+    }
     expect(await store.getQuest(quest.id)).toEqual(questBefore);
     expect(await store.events(quest.id)).toEqual(eventsBefore);
+
+    const accepted = await store.acceptQuest({ id: quest.id, owner: actor });
+    requireContract(accepted.outcome === "accepted", "illegal transition fixture must be accepted");
+    const acceptedBefore = snapshotQuest(accepted.quest);
+    const acceptedEventsBefore = snapshotEvents(await store.events(quest.id));
+    for (const [transition, code] of [
+      [{ action: "complete", actor: resolveActor("contract/other") }, "COMPLETE_INVALID_STATE"],
+      [
+        { action: "reopen", actor: resolveActor("contract/other"), notes: "invalid state" },
+        "REOPEN_INVALID_STATE",
+      ],
+    ] satisfies ReadonlyArray<readonly [QuestTransition, string]>) {
+      let rejection: unknown;
+      try {
+        await store.transition(quest.id, transition);
+      } catch (error: unknown) {
+        rejection = error;
+      }
+      requireContract(
+        rejection instanceof Error &&
+          rejection.message.includes(`[${code}] quest ${quest.id} is accepted;`),
+        `${transition.action} from accepted must reject with ${code} before lease validation`,
+      );
+    }
+    expect(await store.getQuest(quest.id)).toEqual(acceptedBefore);
+    expect(await store.events(quest.id)).toEqual(acceptedEventsBefore);
   });
 }
 

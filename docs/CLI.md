@@ -322,6 +322,13 @@ visible record of work that is not landing. This merge gate is accountability,
 not security; a fully trusted agent can fake its inputs, so the event ledger
 records what the tool actually observed.
 
+Lifecycle commands reject the wrong current state before writing. Their stable
+codes follow `<ACTION>_INVALID_STATE` for abandon, verdict, turn-in, complete,
+cancel, and reopen; each error names the current state, the required path, and
+when retrying is valid. `SIGNOFF_NOT_COMPLETE` keeps the same contract for
+premature sign-off. Convex transports these expected failures as domain data so
+production deployments do not replace them with request-ID-only server errors.
+
 ```
 quest cancel <id> --reason <text> Cancel any non-terminal quest; bugs become
                                   `wont-do`, tasks keep no verdict.
@@ -527,7 +534,7 @@ This is deliberate.)
 
 ## JSON envelope
 
-Every `--format json` response:
+Every report-producing `--format json` response:
 
 ```json
 {
@@ -541,6 +548,11 @@ Every `--format json` response:
 ```
 
 Zod schemas define every `data` shape; agents parse these, never table output.
+Reportable domain outcomes can exit nonzero while still returning an envelope,
+such as blocked duplicate creation or a guild mismatch. Thrown domain and usage
+errors write one stable, single-line error to stderr instead. Callers check the
+exit code, parse a non-empty stdout envelope, and otherwise handle the stderr
+error.
 
 ## Identity resolution
 

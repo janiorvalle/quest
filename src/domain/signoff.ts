@@ -1,7 +1,11 @@
 import type { Event, Quest, QuestStatus } from "../schema";
 
+export function signoffNotCompleteInstruction(id: number, status: QuestStatus): string {
+  return `quest ${id} is ${status}; sign-off applies only after review, merge, and completion. Wait for the quest to reach complete, then retry \`quest signoff ${id}\`.`;
+}
+
 export function signoffNotCompleteMessage(id: number, status: QuestStatus): string {
-  return `[SIGNOFF_NOT_COMPLETE] quest ${id} is ${status}; sign-off applies only after review, merge, and completion. Wait for the quest to reach complete, then retry \`quest signoff ${id}\`.`;
+  return `[SIGNOFF_NOT_COMPLETE] ${signoffNotCompleteInstruction(id, status)}`;
 }
 
 export function hasSignoffEvent(events: readonly Pick<Event, "action">[]): boolean {

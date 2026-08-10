@@ -5,9 +5,10 @@ import {
   mutationGeneric,
   queryGeneric,
 } from "convex/server";
-import { v } from "convex/values";
+import { ConvexError, v } from "convex/values";
 import {
   allocateDisplayId,
+  assertLifecycleActionAllowed,
   canApplyVerdict,
   computeQuestPlan,
   findChainCyclePath,
@@ -15,6 +16,7 @@ import {
   isLeaseExpired,
   isLegalStatusTransition,
   isValidBackfill,
+  LifecycleInvalidStateError,
   leaseExpiry,
   materializeExpiredLease,
   signoffNotCompleteMessage,
@@ -453,6 +455,7 @@ function applyUpdate(
 }
 
 function applyTransition(current: Quest, transition: QuestTransition, timestamp: string): Quest {
+  assertLifecycleActionAllowed(current, transition.action);
   switch (transition.action) {
     case "abandon": {
       const releasedStatus = statusAfterClaimRelease(current);
@@ -495,6 +498,21 @@ function applyTransition(current: Quest, transition: QuestTransition, timestamp:
       return applyReopen(current, transition, timestamp);
     case "update":
       return applyUpdate(current, transition, timestamp);
+  }
+}
+
+function applyTransitionForMutation(
+  current: Quest,
+  transition: QuestTransition,
+  timestamp: string,
+): Quest {
+  try {
+    return applyTransition(current, transition, timestamp);
+  } catch (error: unknown) {
+    if (error instanceof LifecycleInvalidStateError) {
+      throw new ConvexError({ code: error.code, message: error.receiverMessage });
+    }
+    throw error;
   }
 }
 
@@ -1412,10 +1430,10 @@ export const transition = mutationGeneric({
     await requireRepositoryNotFenced(ctx, current.repo);
     const timestamp = now();
     const events = await readQuestEvents(ctx, current.id);
+    const updated = applyTransitionForMutation(current, transitionInput, timestamp);
     if (transitionInput.action !== "signoff") {
       requireLeaseOwner(current, events, transitionInput.actor, timestamp);
     }
-    const updated = applyTransition(current, transitionInput, timestamp);
     if (transitionInput.action !== "signoff") {
       await ctx.db.replace(record._id, updated);
     }
@@ -1465,7 +1483,7 @@ async function loadSignoffBatchQuests(
   );
   for (const quest of questsById.values()) {
     await requireRepositoryNotFenced(ctx, quest.repo);
-    applyTransition(quest, transition, now());
+    applyTransitionForMutation(quest, transition, now());
   }
   return questsById;
 }
