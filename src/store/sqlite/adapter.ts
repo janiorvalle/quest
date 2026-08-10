@@ -99,6 +99,14 @@ type JournalModeRow = {
   journal_mode: string;
 };
 
+type DataVersionRow = {
+  data_version: number;
+};
+
+type LeaseExpiryRow = {
+  lease_expires_at: string;
+};
+
 type UserVersionRow = {
   user_version: number;
 };
@@ -349,6 +357,8 @@ export class SqliteStore implements QuestStore {
   readonly #watchPollIntervalMs: number;
   readonly #watchers = new Map<number, Watcher>();
   #nextWatcherId = 1;
+  #nextWatchLeaseExpiryMs: number | null = null;
+  #observedDataVersion: number | null = null;
   #watchTimer: ReturnType<typeof setInterval> | null = null;
   #closed = false;
   #backupRestoreActive = false;
@@ -1259,6 +1269,10 @@ export class SqliteStore implements QuestStore {
 
   async watch(filter: QuestFilter, listener: QuestWatchListener): Promise<WatchSubscription> {
     const parsed = questFilterSchema.parse(filter);
+    if (this.#watchers.size === 0) {
+      this.#observedDataVersion = this.#readDataVersion();
+      this.#refreshNextWatchLeaseExpiry();
+    }
     const snapshot = this.#readTransaction(() => this.#listQuests(parsed));
     const watcherId = this.#nextWatcherId;
     this.#nextWatcherId += 1;
@@ -1280,6 +1294,8 @@ export class SqliteStore implements QuestStore {
         this.#watchers.delete(watcherId);
         if (this.#watchers.size === 0) {
           this.#stopWatchTimer();
+          this.#nextWatchLeaseExpiryMs = null;
+          this.#observedDataVersion = null;
         }
       },
     };
@@ -1298,6 +1314,8 @@ export class SqliteStore implements QuestStore {
     this.#closed = true;
     this.#stopWatchTimer();
     this.#watchers.clear();
+    this.#nextWatchLeaseExpiryMs = null;
+    this.#observedDataVersion = null;
     this.#database.close();
     this.#ownership.release();
   }
@@ -2229,6 +2247,41 @@ export class SqliteStore implements QuestStore {
       this.#watchers.set(id, { ...watcher, signature });
       this.#callListener(watcher.listener, snapshot);
     }
+    this.#refreshNextWatchLeaseExpiry();
+  }
+
+  #readDataVersion(): number {
+    const row = getRow<DataVersionRow, []>(this.#database, "PRAGMA data_version");
+    if (row === null) {
+      throw new Error("SQLite did not return PRAGMA data_version");
+    }
+    return row.data_version;
+  }
+
+  #pollWatchers(): void {
+    if (this.#closed || this.#backupRestoreActive || this.#watchers.size === 0) {
+      return;
+    }
+    const dataVersion = this.#readDataVersion();
+    const nextLeaseExpired =
+      this.#nextWatchLeaseExpiryMs !== null &&
+      Date.parse(this.#now()) >= this.#nextWatchLeaseExpiryMs;
+    if (dataVersion === this.#observedDataVersion && !nextLeaseExpired) {
+      return;
+    }
+    this.#observedDataVersion = dataVersion;
+    this.#emitWatchers();
+  }
+
+  #refreshNextWatchLeaseExpiry(): void {
+    const nowMs = Date.parse(this.#now());
+    const futureExpiries = getRows<LeaseExpiryRow, []>(
+      this.#database,
+      "SELECT lease_expires_at FROM quests WHERE status = 'accepted' AND lease_expires_at IS NOT NULL",
+    )
+      .map((row) => Date.parse(row.lease_expires_at))
+      .filter((expiryMs) => expiryMs > nowMs);
+    this.#nextWatchLeaseExpiryMs = futureExpiries.length === 0 ? null : Math.min(...futureExpiries);
   }
 
   #callListener(listener: QuestWatchListener, snapshot: readonly Quest[]): void {
@@ -2244,7 +2297,7 @@ export class SqliteStore implements QuestStore {
       return;
     }
     this.#watchTimer = setInterval(() => {
-      this.#emitWatchers();
+      this.#pollWatchers();
     }, this.#watchPollIntervalMs);
     this.#watchTimer.unref();
   }

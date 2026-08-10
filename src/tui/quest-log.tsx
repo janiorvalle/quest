@@ -1,6 +1,6 @@
 import type { MouseEvent } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   EMPTY_QUEST_LOG_SIGNOFF,
@@ -151,24 +151,43 @@ function useQuestDetail(runtime: QuestLogRuntime, current: QuestLogItem | undefi
     null,
   );
   const [detailStale, setDetailStale] = useState(false);
+  const detailStaleRef = useRef(false);
+  const detailSignature = useRef("");
+  const hasLoadedDetail = useRef(false);
+  const loadedDetailIdentity = useRef("");
   const detailKey =
     current === undefined ? "" : `${current.repo}\u0000${current.id}\u0000${current.updatedAt}`;
+  const updateDetailStaleness = useCallback((next: boolean): void => {
+    if (detailStaleRef.current !== next) {
+      detailStaleRef.current = next;
+      setDetailStale(next);
+    }
+  }, []);
 
   useEffect(() => {
     if (detailKey === "") {
+      detailSignature.current = "";
+      hasLoadedDetail.current = false;
+      loadedDetailIdentity.current = "";
       setDetail(null);
-      setDetailStale(false);
+      updateDetailStaleness(false);
       return;
     }
-    setDetail(null);
-    setDetailStale(false);
     const separator = detailKey.indexOf("\u0000");
     const secondSeparator = detailKey.indexOf("\u0000", separator + 1);
+    const detailIdentity = detailKey.slice(0, secondSeparator);
+    const identityChanged = loadedDetailIdentity.current !== detailIdentity;
+    loadedDetailIdentity.current = detailIdentity;
+    if (identityChanged) {
+      detailSignature.current = "";
+      hasLoadedDetail.current = false;
+      setDetail(null);
+      updateDetailStaleness(false);
+    }
     const repository = detailKey.slice(0, separator);
     const id = Number(detailKey.slice(separator + 1, secondSeparator));
     let cancelled = false;
     let inFlight = false;
-    let hasLoaded = false;
     const refresh = (): void => {
       if (cancelled || inFlight) {
         return;
@@ -179,14 +198,18 @@ function useQuestDetail(runtime: QuestLogRuntime, current: QuestLogItem | undefi
         .then(
           (value) => {
             if (!cancelled) {
-              hasLoaded = true;
-              setDetailStale(false);
-              setDetail(value);
+              const signature = JSON.stringify(value);
+              hasLoadedDetail.current = true;
+              updateDetailStaleness(false);
+              if (signature !== detailSignature.current) {
+                detailSignature.current = signature;
+                setDetail(value);
+              }
             }
           },
           () => {
-            if (!cancelled && hasLoaded) {
-              setDetailStale(true);
+            if (!cancelled && hasLoadedDetail.current) {
+              updateDetailStaleness(true);
             }
           },
         )
@@ -200,7 +223,7 @@ function useQuestDetail(runtime: QuestLogRuntime, current: QuestLogItem | undefi
       cancelled = true;
       clearInterval(refreshTimer);
     };
-  }, [detailKey, runtime, runtime.pollIntervalMs]);
+  }, [detailKey, runtime, runtime.pollIntervalMs, updateDetailStaleness]);
 
   return { detail, detailStale };
 }

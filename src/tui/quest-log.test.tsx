@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { testRender } from "@opentui/react/test-utils";
-import { act } from "react";
+import { act, Profiler } from "react";
 
 import {
   EMPTY_QUEST_LOG_SIGNOFF,
+  type QuestLogDetail,
   type QuestLogItem,
   type QuestLogRuntime,
   type QuestLogSnapshot,
@@ -82,6 +83,92 @@ function paneText(frame: string, startColumn: number): string {
     .join("\n");
 }
 
+const EMPTY_DETAIL: QuestLogDetail = {
+  duplicateOf: [],
+  events: [],
+  evidence: [],
+  questId: ALPHA.id,
+  requiredBy: [],
+  requires: [],
+  sessionAttribution: null,
+};
+
+test("polls detail without committing unchanged snapshots and reloads quest revisions", async () => {
+  const selectedSnapshot = { ...SNAPSHOT, items: [ALPHA] };
+  let commits = 0;
+  let detailLoads = 0;
+  const resolveDetailLoads: Array<(detail?: QuestLogDetail) => void> = [];
+  let emitSnapshot: ((snapshot: QuestLogSnapshot) => void) | undefined;
+  const runtime: QuestLogRuntime = {
+    ...runtimeFor(selectedSnapshot),
+    loadDetail: (id) => {
+      detailLoads += 1;
+      return new Promise((resolve) => {
+        resolveDetailLoads.push((detail = EMPTY_DETAIL) => resolve({ ...detail, questId: id }));
+      });
+    },
+    pollIntervalMs: 1,
+    subscribe: (listener) => {
+      emitSnapshot = listener;
+      listener(selectedSnapshot);
+      return () => {
+        emitSnapshot = undefined;
+      };
+    },
+  };
+  const setup = await testRender(
+    <Profiler
+      id="quest-log"
+      onRender={() => {
+        commits += 1;
+      }}
+    >
+      <QuestLogApp
+        runtime={runtime}
+        theme={{ name: "dense", save: () => Promise.resolve(), warnings: [] }}
+      />
+    </Profiler>,
+    { height: 32, width: 120 },
+  );
+
+  try {
+    await waitFor(() => resolveDetailLoads.length === 1);
+    await act(async () => resolveDetailLoads.shift()?.());
+    const commitsAfterInitialDetail = commits;
+
+    await waitFor(() => resolveDetailLoads.length === 1);
+    await act(async () => resolveDetailLoads.shift()?.());
+    expect(detailLoads).toBe(2);
+    expect(commits).toBe(commitsAfterInitialDetail);
+
+    await act(async () => {
+      emitSnapshot?.({
+        ...selectedSnapshot,
+        items: [{ ...ALPHA, updatedAt: "2026-08-05T20:00:01.000Z" }],
+      });
+    });
+    await waitFor(() => resolveDetailLoads.length === 1);
+    await act(async () =>
+      resolveDetailLoads.shift()?.({
+        ...EMPTY_DETAIL,
+        events: [
+          {
+            action: "signoff",
+            actor: "reviewer",
+            at: "2026-08-05T20:00:01.000Z",
+            detailSummary: "detail changed",
+            id: 1,
+          },
+        ],
+      }),
+    );
+    expect(detailLoads).toBe(3);
+    expect(commits).toBeGreaterThan(commitsAfterInitialDetail);
+  } finally {
+    act(() => setup.renderer.destroy());
+  }
+});
+
 test("routes wheel events by hovered pane and ignores clicks", async () => {
   const width = 120;
   const listWidth = Math.floor(width * 0.57);
@@ -151,3 +238,13 @@ test("ignores injected wheel events when terminal mouse tracking is disabled", a
     act(() => setup.renderer.destroy());
   }
 });
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!condition()) {
+    if (Date.now() > deadline) {
+      throw new Error("timed out waiting for viewer state");
+    }
+    await Bun.sleep(5);
+  }
+}

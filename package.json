@@ -15,7 +15,7 @@
     "dist:smoke": "bun run dist && bun run scripts/install-smoke.ts"
   },
   "dependencies": {
-    "@opentui/react": "0.4.5",
+    "@opentui/react": "0.5.1",
     "@vllnt/convex-api-keys": "0.2.0",
     "commander": "15.0.0",
     "convex": "1.42.3",
