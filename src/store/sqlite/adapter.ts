@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 
 import {
   allocateDisplayId,
+  assertLifecycleActionAllowed,
   canApplyVerdict,
   computeQuestPlan,
   findChainCyclePath,
@@ -581,10 +582,10 @@ export class SqliteStore implements QuestStore {
       const current = this.#requireStoredQuest(parsedId);
       this.#requireRepositoryUnfenced(current.repo);
       const timestamp = this.#now();
+      const updated = this.#applyTransition(current, parsedTransition, timestamp);
       if (parsedTransition.action !== "signoff") {
         this.#requireLeaseOwner(current, parsedTransition.actor, timestamp);
       }
-      const updated = this.#applyTransition(current, parsedTransition, timestamp);
       if (parsedTransition.action !== "signoff") {
         this.#updateQuest(updated);
       }
@@ -1747,6 +1748,7 @@ export class SqliteStore implements QuestStore {
   }
 
   #applyTransition(current: Quest, transition: QuestTransition, timestamp: string): Quest {
+    assertLifecycleActionAllowed(current, transition.action);
     switch (transition.action) {
       case "abandon": {
         const releasedStatus = statusAfterClaimRelease(current);

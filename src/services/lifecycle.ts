@@ -2,7 +2,11 @@ import { extname } from "node:path";
 
 import { z } from "zod";
 
-import { scoreDedupCandidate, signoffNotCompleteMessage } from "../domain";
+import {
+  assertLifecycleActionAllowed,
+  scoreDedupCandidate,
+  signoffNotCompleteMessage,
+} from "../domain";
 import type { EvidenceFile, EvidenceFileReader } from "../evidence";
 import type {
   AcceptQuestInput,
@@ -857,6 +861,7 @@ export async function transitionLifecycleQuest(
     ) {
       warnings.push(`quest ${id} already recorded ${transition.action}; no change was made`);
     } else {
+      assertLifecycleActionAllowed(current, transition.action);
       const effectiveTransition =
         transition.action === "complete"
           ? await completionTransitionWithMergeGate(ports.questStore, id, transition, options)

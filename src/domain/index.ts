@@ -10,11 +10,14 @@ export {
   normalizeLeaseTtlMinutes,
 } from "./leases";
 export {
+  assertLifecycleActionAllowed,
   canApplyVerdict,
   initialStatusForKind,
   isDispatchableQuest,
   isLegalStatusTransition,
   isValidBackfill,
+  type LifecycleInvalidStateCode,
+  LifecycleInvalidStateError,
   statusAfterClaimRelease,
   statusForRetestVerdict,
   statusForVerdict,
@@ -43,4 +46,9 @@ export {
   qaGroupingReasonValues,
   qaShellValues,
 } from "./qa";
-export { hasSignoffEvent, isQuestSigned, signoffNotCompleteMessage } from "./signoff";
+export {
+  hasSignoffEvent,
+  isQuestSigned,
+  signoffNotCompleteInstruction,
+  signoffNotCompleteMessage,
+} from "./signoff";
