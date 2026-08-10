@@ -1089,6 +1089,32 @@ describe("SqliteStore", () => {
     await removeDirectory(directory);
   });
 
+  test("emits passive lease expiry without waiting for a database write", async () => {
+    const { databasePath, directory } = await createDatabasePath();
+    let now = "2026-08-10T12:00:00.000Z";
+    const store = new SqliteStore(databasePath, {
+      now: () => now,
+      watchPollIntervalMs: 5,
+    });
+    const quest = await store.addQuest(taskInput("passive lease expiry"));
+    await store.acceptQuest({ id: quest.id, lease_ttl_minutes: 1, owner: actor });
+    const statuses: string[] = [];
+    const subscription = await store.watch({ repo: "sqlite" }, (quests) => {
+      const watched = quests.find(({ id }) => id === quest.id);
+      if (watched !== undefined) {
+        statuses.push(watched.status);
+      }
+    });
+
+    expect(statuses.at(-1)).toBe("accepted");
+    now = "2026-08-10T12:01:01.000Z";
+    await waitFor(() => statuses.at(-1) === "ready");
+
+    await subscription.unsubscribe();
+    store.close();
+    await removeDirectory(directory);
+  });
+
   test("database constraints reject event rewrites and invalid enum storage", async () => {
     const { databasePath, directory } = await createDatabasePath();
     const store = new SqliteStore(databasePath);
