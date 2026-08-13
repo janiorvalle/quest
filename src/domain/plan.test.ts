@@ -16,7 +16,7 @@ function quest(id: number, title: string, options: Partial<Quest> = {}): Quest {
     opened_by: "fixture",
     guild: null,
     assignee: null,
-    status: "ready",
+    status: "open",
     verdict: null,
     verdict_notes: null,
     priority: 2,
@@ -35,7 +35,7 @@ function plan(quests: readonly Quest[], chains: readonly Chain[] = []) {
 }
 
 describe("computed quest plan", () => {
-  test("includes open bugs alongside ready work and preserves their blockers", () => {
+  test("includes open work and preserves its blockers", () => {
     const result = plan(
       [
         quest(1, "Ready task", { predicted_files: ["src/shared.ts"] }),
@@ -90,7 +90,7 @@ describe("computed quest plan", () => {
     expect(result.quests.map((item) => item.id)).toEqual([87, 103, 100, 101]);
     expect(result.quests.find((item) => item.id === 87)).toMatchObject({
       computed_state: "dispatchable",
-      status: "ready",
+      status: "open",
     });
     expect(result.quests.find((item) => item.id === 100)).toMatchObject({
       blockers: [87],
@@ -109,7 +109,7 @@ describe("computed quest plan", () => {
     expect(result.quests.find((item) => item.id === 103)).toMatchObject({
       computed_state: "dispatchable",
     });
-    expect(result.quests.find((item) => item.id === 100)?.status).toBe("ready");
+    expect(result.quests.find((item) => item.id === 100)?.status).toBe("open");
   });
 
   test("uses every root path when a quest has multiple incomplete requirements", () => {

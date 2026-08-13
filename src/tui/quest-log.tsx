@@ -127,11 +127,11 @@ function headerCounts(items: readonly QuestLogItem[]): HeaderCounts {
       active: counts.active + (item.status === "accepted" ? 1 : 0),
       blocked: counts.blocked + (item.blocked ? 1 : 0),
       complete: counts.complete + (item.status === "complete" ? 1 : 0),
-      ready: counts.ready + (item.status === "ready" ? 1 : 0),
+      open: counts.open + (item.status === "open" ? 1 : 0),
       review: counts.review + (item.status === "turned_in" ? 1 : 0),
       total: counts.total + 1,
     }),
-    { active: 0, blocked: 0, complete: 0, ready: 0, review: 0, total: 0 },
+    { active: 0, blocked: 0, complete: 0, open: 0, review: 0, total: 0 },
   );
 }
 

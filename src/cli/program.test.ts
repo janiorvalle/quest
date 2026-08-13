@@ -265,7 +265,7 @@ describe("Commander CLI wiring", () => {
         data: {
           repo: "other-app",
           total: 0,
-          status_counts: { ready: 0, complete: 0 },
+          status_counts: { open: 0, complete: 0 },
         },
       });
     } finally {

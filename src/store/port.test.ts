@@ -27,7 +27,7 @@ describe("store port boundary schemas", () => {
       description: "Keep adapters replaceable.",
       opened_by: "janior",
       assignee: null,
-      status: "ready",
+      status: "open",
       verdict: null,
       verdict_notes: null,
       priority: 1,

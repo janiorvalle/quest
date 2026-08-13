@@ -56,7 +56,7 @@ function task(changes: Partial<Quest> = {}): Quest {
     priority: 2,
     reopen_count: 0,
     repo: "quest",
-    status: "ready",
+    status: "open",
     title: "doctor fixture",
     updated_at: "2026-07-31T17:00:00.000Z",
     verdict: null,
@@ -69,7 +69,7 @@ function healthyDump(quest: Quest = task()): QuestDump {
   return {
     ...emptyBackupDump,
     evidence:
-      quest.id === 1 && quest.status === "ready"
+      quest.id === 1 && quest.status === "open"
         ? [
             {
               added_by: "fixture",

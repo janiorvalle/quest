@@ -114,6 +114,32 @@ members. A missing, empty, or wrong secret fails with a stable
 `QUEST_ADMIN_SECRET_*` error and says what to fix; the mutation must not be
 retried until the deployment secret and supplied value agree.
 
+## Migrate deployments from ready to open
+
+Wire contract v10 removes `ready`: every unclaimed quest is `open`. Upgrade each
+deployment in this order so old rows remain readable throughout the rollout:
+
+1. Deploy the v10 Convex functions. Their storage validator temporarily accepts
+   legacy `ready` rows, and every read translates them to `open`.
+2. Run the admin-gated conversion against that deployment:
+
+   ```sh
+   QUEST_ADMIN_SECRET="..." quest migrate --ready-statuses \
+     --deployment <deployment-url>
+   ```
+
+3. Record the returned `converted`, `unchanged`, and `total` counts. Run the same
+   command once more; `converted` must be `0`, proving the conversion is
+   idempotent.
+4. Release the v10 Quest binary only after every target deployment has completed
+   the conversion.
+
+When `QUEST_ADMIN_SECRET` is unset, Quest asks for it without echoing. It is sent
+in the Convex request body and never appears in command arguments. The mutation
+changes only quest rows. Historical events are append-only and remain
+byte-for-byte unchanged. A v9 binary rejects v10 logical dumps; do not reverse
+the release order.
+
 ## First invite
 
 The deployment admin runs the invite command with the deployment selected in

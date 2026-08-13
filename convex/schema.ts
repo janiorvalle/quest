@@ -16,6 +16,7 @@ const questFields = {
   assignee: v.union(v.string(), v.null()),
   status: v.union(
     v.literal("open"),
+    // Kept on the storage boundary so v10 functions can deploy before the admin conversion runs.
     v.literal("ready"),
     v.literal("accepted"),
     v.literal("turned_in"),

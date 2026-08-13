@@ -23,7 +23,7 @@ export interface HeaderCounts {
   readonly active: number;
   readonly blocked: number;
   readonly complete: number;
-  readonly ready: number;
+  readonly open: number;
   readonly review: number;
   readonly total: number;
 }
@@ -105,8 +105,8 @@ function Counts({ counts, compact }: { readonly counts: HeaderCounts; readonly c
             fg={theme.status.complete.color}
           >{` ${counts.complete}${theme.glyphs.chainComplete}`}</span>
         )}
-        {counts.ready === 0 ? null : (
-          <span fg={theme.status.ready.color}>{` ${counts.ready}${theme.glyphs.watching}`}</span>
+        {counts.open === 0 ? null : (
+          <span fg={theme.status.open.color}>{` ${counts.open}${theme.glyphs.watching}`}</span>
         )}
       </StaticText>
     );
@@ -122,8 +122,8 @@ function Counts({ counts, compact }: { readonly counts: HeaderCounts; readonly c
           fg={theme.status.complete.color}
         >{`  ${counts.complete} ${theme.glyphs.chainComplete}`}</span>
       )}
-      {counts.ready === 0 ? null : (
-        <span fg={theme.status.ready.color}>{`  ${counts.ready} ready`}</span>
+      {counts.open === 0 ? null : (
+        <span fg={theme.status.open.color}>{`  ${counts.open} open`}</span>
       )}
       {counts.active === 0 ? null : (
         <span fg={theme.palette.textMuted}>{`  ${counts.active} active`}</span>

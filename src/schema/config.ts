@@ -5,6 +5,13 @@ import { MAX_LEASE_TTL_MINUTES } from "./operations";
 import { nonEmptyTextSchema } from "./primitives";
 
 const labelMapSchema = z.record(nonEmptyTextSchema, nonEmptyTextSchema);
+const legacyStatusMapSchema = z
+  .record(z.string(), nonEmptyTextSchema)
+  .transform((values) => {
+    const { ready, ...current } = values;
+    return { ...(ready === undefined ? {} : { open: ready }), ...current };
+  })
+  .pipe(z.partialRecord(questStatusSchema, nonEmptyTextSchema));
 const objectInputSchema = z.record(z.string(), z.unknown());
 const retentionSchema = objectInputSchema
   .pipe(
@@ -58,12 +65,12 @@ export const configSchema = objectInputSchema.pipe(
     repos: z.record(nonEmptyTextSchema, repoConfigEntrySchema).default({}),
     convex: convexConfigSchema.optional(),
     areas: z.record(nonEmptyTextSchema, z.array(nonEmptyTextSchema)).default({}),
-    colors: z.partialRecord(questStatusSchema, nonEmptyTextSchema).default({}),
+    colors: legacyStatusMapSchema.default({}),
     labels: objectInputSchema
       .pipe(
         z.object({
           areas: z.record(nonEmptyTextSchema, labelMapSchema).default({}),
-          statuses: z.partialRecord(questStatusSchema, nonEmptyTextSchema).default({}),
+          statuses: legacyStatusMapSchema.default({}),
           verdicts: z.partialRecord(verdictSchema, nonEmptyTextSchema).default({}),
         }),
       )

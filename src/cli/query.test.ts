@@ -26,7 +26,7 @@ const config = {
   colors: {},
   labels: {
     areas: { alpha: { cli: "Command line" } },
-    statuses: { ready: "Ready" },
+    statuses: { open: "Open" },
     verdicts: { actionable: "Actionable" },
   },
   backup: {
@@ -119,7 +119,7 @@ function task(title: string, changes: Partial<NewQuest> = {}): NewQuest {
     description: `${title} description`,
     opened_by: "fixture",
     assignee: null,
-    status: "ready",
+    status: "open",
     verdict: null,
     verdict_notes: null,
     priority: 2,
@@ -133,7 +133,7 @@ function task(title: string, changes: Partial<NewQuest> = {}): NewQuest {
 }
 
 async function seedFixture(store: SqliteStore): Promise<void> {
-  const blockedReady = await store.addQuest(task("Blocked ready"));
+  const blockedOpen = await store.addQuest(task("Blocked open"));
   const accepted = await store.addQuest(
     task("Accepted work", { assignee: "amy", status: "accepted", priority: 1 }),
   );
@@ -184,18 +184,18 @@ async function seedFixture(store: SqliteStore): Promise<void> {
 
   await store.addChainLink({
     actor: "fixture",
-    link: { quest_id: blockedReady.id, target_id: accepted.id, type: "requires" },
+    link: { quest_id: blockedOpen.id, target_id: accepted.id, type: "requires" },
   });
   await store.addChainLink({
     actor: "fixture",
-    link: { quest_id: complete.id, target_id: blockedReady.id, type: "requires" },
+    link: { quest_id: complete.id, target_id: blockedOpen.id, type: "requires" },
   });
   await store.addChainLink({
     actor: "fixture",
-    link: { quest_id: duplicate.id, target_id: blockedReady.id, type: "duplicate-of" },
+    link: { quest_id: duplicate.id, target_id: blockedOpen.id, type: "duplicate-of" },
   });
   await store.addEvidence({
-    quest_id: blockedReady.id,
+    quest_id: blockedOpen.id,
     sha256,
     filename: "failure.log",
     kind: "log",
@@ -213,7 +213,7 @@ describe("query CLI behavior", () => {
       const filtered = await harness.run([
         "list",
         "--status",
-        "ready",
+        "open",
         "--area",
         "cli",
         "--kind",
@@ -232,7 +232,7 @@ describe("query CLI behavior", () => {
         generated_at: generatedAt,
         filters: {
           repo: "alpha",
-          status: "ready",
+          status: "open",
           area: "cli",
           kind: "task",
           mine: false,
@@ -241,7 +241,7 @@ describe("query CLI behavior", () => {
         },
         warnings: [],
         data: {
-          quests: [{ id: 1, title: "Blocked ready" }],
+          quests: [{ id: 1, title: "Blocked open" }],
           total: 1,
         },
       });
@@ -283,11 +283,11 @@ describe("query CLI behavior", () => {
             repo: "alpha",
             area: "cli",
             kind: "task",
-            title: "Blocked ready",
-            description: "Blocked ready description",
+            title: "Blocked open",
+            description: "Blocked open description",
             opened_by: "fixture",
             assignee: null,
-            status: "ready",
+            status: "open",
             verdict: null,
             verdict_notes: null,
             priority: 2,
@@ -363,7 +363,7 @@ describe("query CLI behavior", () => {
             {
               repo: "alpha",
               total: 5,
-              status_counts: { ready: 1, accepted: 1, complete: 1, dropped: 2 },
+              status_counts: { open: 1, accepted: 1, complete: 1, dropped: 2 },
               verdict_counts: { actionable: 1, invalid: 1, duplicate: 1 },
               reopen_count: 2,
               assignee_load: { amy: 2 },
@@ -386,7 +386,7 @@ describe("query CLI behavior", () => {
           {
             repo: "alpha",
             total: 5,
-            status_counts: { ready: 1, accepted: 1, complete: 1, dropped: 2 },
+            status_counts: { open: 1, accepted: 1, complete: 1, dropped: 2 },
             verdict_counts: { actionable: 1, invalid: 1, duplicate: 1 },
             reopen_count: 2,
             assignee_load: { amy: 2 },
@@ -406,7 +406,7 @@ describe("query CLI behavior", () => {
       const list = await harness.run(["list", "--repo", "alpha"]);
       expect(list.code).toBe(EXIT_SUCCESS);
       expect(list.stdout.join("")).toContain("ID  STATUS");
-      expect(list.stdout.join("")).toContain("Ready");
+      expect(list.stdout.join("")).toContain("Open");
       expect(list.stdout.join("")).toContain("Command line");
 
       const show = await harness.run(["show", "1", "--repo", "alpha"]);
@@ -562,7 +562,7 @@ describe("brief CLI behavior", () => {
         materialized: null;
         quest: { id: number; title: string };
       };
-      expect(data.quest).toMatchObject({ id: 1, title: "Blocked ready" });
+      expect(data.quest).toMatchObject({ id: 1, title: "Blocked open" });
       expect(data.materialized).toBeNull();
       expect(data.chain_position.requires.map(({ id }) => id)).toEqual([2]);
       expect(data.chain_position.required_by.map(({ id }) => id)).toEqual([3]);
@@ -582,10 +582,10 @@ describe("brief CLI behavior", () => {
       const result = await harness.run(["brief", "1", "--repo", "alpha"]);
       expect(result.code).toBe(EXIT_SUCCESS);
       const markdown = result.stdout.join("");
-      expect(markdown).toContain("# quest 1 — Blocked ready");
+      expect(markdown).toContain("# quest 1 — Blocked open");
       expect(markdown).toContain("⛓ BLOCKED — incomplete requirements: 2");
       expect(markdown).toContain("## Mission");
-      expect(markdown).toContain("Blocked ready description");
+      expect(markdown).toContain("Blocked open description");
       expect(markdown).not.toContain("## Verdict");
       expect(markdown).toContain("- requires 2 [accepted] Accepted work ← incomplete, blocks this");
       expect(markdown).toContain("- unlocks 3 [complete] Completed bug");

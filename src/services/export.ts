@@ -13,6 +13,16 @@ import {
 } from "../schema";
 import type { QuestStore } from "../store";
 
+const legacyQuestStatusSchema = z.enum([
+  "open",
+  "ready",
+  "accepted",
+  "turned_in",
+  "complete",
+  "dropped",
+]);
+const legacyQuestSchema = questSchema.extend({ status: legacyQuestStatusSchema });
+
 const preCancelEventSchema = eventBaseSchema.extend({
   action: z.enum([
     "add",
@@ -42,11 +52,11 @@ const preLeaseEventSchema = eventBaseSchema.extend({
   ]),
 });
 
-const preLeaseQuestSchema = questSchema.omit({ lease_expires_at: true });
+const preLeaseQuestSchema = legacyQuestSchema.omit({ lease_expires_at: true });
 
 const preSessionAttributionQuestDumpSchema = z.strictObject({
   schema_version: z.literal(4),
-  quests: z.array(questSchema),
+  quests: z.array(legacyQuestSchema),
   evidence: z.array(evidenceSchema),
   chains: z.array(chainSchema),
   events: z.array(eventBaseSchema),
@@ -54,7 +64,7 @@ const preSessionAttributionQuestDumpSchema = z.strictObject({
 
 const preOpenBugDispatchQuestDumpSchema = z.strictObject({
   schema_version: z.literal(5),
-  quests: z.array(questSchema),
+  quests: z.array(legacyQuestSchema),
   evidence: z.array(evidenceSchema),
   chains: z.array(chainSchema),
   events: z.array(eventSchema),
@@ -62,7 +72,7 @@ const preOpenBugDispatchQuestDumpSchema = z.strictObject({
 
 const preLeaseTtlQuestDumpSchema = z.strictObject({
   schema_version: z.literal(6),
-  quests: z.array(questSchema),
+  quests: z.array(legacyQuestSchema),
   evidence: z.array(evidenceSchema),
   chains: z.array(chainSchema),
   events: z.array(eventSchema),
@@ -70,7 +80,7 @@ const preLeaseTtlQuestDumpSchema = z.strictObject({
 
 const preSignoffQuestDumpSchema = z.strictObject({
   schema_version: z.literal(7),
-  quests: z.array(questSchema),
+  quests: z.array(legacyQuestSchema),
   evidence: z.array(evidenceSchema),
   chains: z.array(chainSchema),
   events: z.array(eventSchema),
@@ -78,7 +88,15 @@ const preSignoffQuestDumpSchema = z.strictObject({
 
 const preActualFilesQuestDumpSchema = z.strictObject({
   schema_version: z.literal(8),
-  quests: z.array(questSchema),
+  quests: z.array(legacyQuestSchema),
+  evidence: z.array(evidenceSchema),
+  chains: z.array(chainSchema),
+  events: z.array(eventSchema),
+});
+
+const preUnifiedOpenQuestDumpSchema = z.strictObject({
+  schema_version: z.literal(9),
+  quests: z.array(legacyQuestSchema),
   evidence: z.array(evidenceSchema),
   chains: z.array(chainSchema),
   events: z.array(eventSchema),
@@ -103,7 +121,7 @@ const preCancelQuestDumpSchema = z.strictObject({
 const legacyQuestDumpSchema = z.strictObject({
   schema_version: z.literal(1),
   quests: z.array(
-    questSchema.omit({ guild: true, lease_expires_at: true }).extend({
+    legacyQuestSchema.omit({ guild: true, lease_expires_at: true }).extend({
       branch: questSchema.shape.pr,
     }),
   ),
@@ -113,18 +131,26 @@ const legacyQuestDumpSchema = z.strictObject({
 });
 
 function leaseForImportedQuest(
-  status: QuestDump["quests"][number]["status"],
+  status: z.infer<typeof legacyQuestStatusSchema>,
   assignee: string | null,
   updatedAt: string,
 ): string | null {
   return status === "accepted" && assignee !== null ? leaseExpiry(updatedAt) : null;
 }
 
-function addLeases(quests: readonly z.infer<typeof preLeaseQuestSchema>[]): QuestDump["quests"] {
+function addLeases(quests: readonly z.infer<typeof preLeaseQuestSchema>[]) {
   return quests.map((quest) => ({
     ...quest,
     lease_expires_at: leaseForImportedQuest(quest.status, quest.assignee, quest.updated_at),
   }));
+}
+
+function normalizeImportedQuests(
+  quests: readonly z.infer<typeof legacyQuestSchema>[],
+): QuestDump["quests"] {
+  return quests.map((quest) =>
+    questSchema.parse({ ...quest, status: quest.status === "ready" ? "open" : quest.status }),
+  );
 }
 
 export async function createLogicalQuestExport(store: QuestStore): Promise<QuestDump> {
@@ -142,11 +168,21 @@ export function parseQuestBackupExport(serialized: string): QuestDump {
     return current.data;
   }
 
+  const preUnifiedOpen = preUnifiedOpenQuestDumpSchema.safeParse(value);
+  if (preUnifiedOpen.success) {
+    return questDumpSchema.parse({
+      ...preUnifiedOpen.data,
+      schema_version: STORE_SCHEMA_VERSION,
+      quests: normalizeImportedQuests(preUnifiedOpen.data.quests),
+    });
+  }
+
   const preActualFiles = preActualFilesQuestDumpSchema.safeParse(value);
   if (preActualFiles.success) {
     return questDumpSchema.parse({
       ...preActualFiles.data,
       schema_version: STORE_SCHEMA_VERSION,
+      quests: normalizeImportedQuests(preActualFiles.data.quests),
     });
   }
 
@@ -155,6 +191,7 @@ export function parseQuestBackupExport(serialized: string): QuestDump {
     return questDumpSchema.parse({
       ...preSignoff.data,
       schema_version: STORE_SCHEMA_VERSION,
+      quests: normalizeImportedQuests(preSignoff.data.quests),
     });
   }
 
@@ -163,6 +200,7 @@ export function parseQuestBackupExport(serialized: string): QuestDump {
     return questDumpSchema.parse({
       ...preLeaseTtl.data,
       schema_version: STORE_SCHEMA_VERSION,
+      quests: normalizeImportedQuests(preLeaseTtl.data.quests),
     });
   }
 
@@ -171,6 +209,7 @@ export function parseQuestBackupExport(serialized: string): QuestDump {
     return questDumpSchema.parse({
       ...preOpenBugDispatch.data,
       schema_version: STORE_SCHEMA_VERSION,
+      quests: normalizeImportedQuests(preOpenBugDispatch.data.quests),
     });
   }
 
@@ -179,6 +218,7 @@ export function parseQuestBackupExport(serialized: string): QuestDump {
     return questDumpSchema.parse({
       ...preSessionAttribution.data,
       schema_version: STORE_SCHEMA_VERSION,
+      quests: normalizeImportedQuests(preSessionAttribution.data.quests),
     });
   }
 
@@ -187,7 +227,7 @@ export function parseQuestBackupExport(serialized: string): QuestDump {
     return questDumpSchema.parse({
       ...preLease.data,
       schema_version: STORE_SCHEMA_VERSION,
-      quests: addLeases(preLease.data.quests),
+      quests: normalizeImportedQuests(addLeases(preLease.data.quests)),
     });
   }
 
@@ -196,8 +236,19 @@ export function parseQuestBackupExport(serialized: string): QuestDump {
     return questDumpSchema.parse({
       ...preCancel.data,
       schema_version: STORE_SCHEMA_VERSION,
-      quests: addLeases(preCancel.data.quests),
+      quests: normalizeImportedQuests(addLeases(preCancel.data.quests)),
     });
+  }
+
+  const inputVersion =
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)["schema_version"]
+      : undefined;
+  if (typeof inputVersion === "number" && inputVersion > STORE_SCHEMA_VERSION) {
+    const version = inputVersion;
+    throw new Error(
+      `[BACKUP_SCHEMA_NEWER] logical backup uses schema ${version}; this binary supports through ${STORE_SCHEMA_VERSION}. Upgrade Quest to a version that supports schema ${version}, then retry the restore. No data was changed.`,
+    );
   }
 
   const legacy = legacyQuestDumpSchema.parse(value);
@@ -210,6 +261,7 @@ export function parseQuestBackupExport(serialized: string): QuestDump {
         ...quest,
         guild: null,
         lease_expires_at: leaseForImportedQuest(quest.status, quest.assignee, quest.updated_at),
+        status: quest.status === "ready" ? "open" : quest.status,
       };
     }),
   });

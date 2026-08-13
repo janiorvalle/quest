@@ -42,7 +42,6 @@ describe("entity schemas", () => {
   test("accepts each specified quest status and verdict", () => {
     expect(questStatusSchema.options).toEqual([
       "open",
-      "ready",
       "accepted",
       "turned_in",
       "complete",

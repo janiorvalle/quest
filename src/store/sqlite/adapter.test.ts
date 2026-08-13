@@ -153,7 +153,7 @@ describe("SqliteStore", () => {
           `INSERT INTO quests (
             repo, area, kind, title, description, opened_by, status, priority,
             predicted_files, reopen_count, created_at, updated_at
-          ) VALUES (?, ?, 'task', ?, '', ?, 'ready', 2, '[]', 0, ?, ?)`,
+          ) VALUES (?, ?, 'task', ?, '', ?, 'open', 2, '[]', 0, ?, ?)`,
           "fenced repository",
           "store",
           "stale writer",
@@ -190,7 +190,7 @@ describe("SqliteStore", () => {
             `INSERT INTO quests (
               repo, area, kind, title, description, opened_by, status, priority,
               predicted_files, reopen_count, created_at, updated_at
-            ) VALUES (?, ?, 'task', ?, '', ?, 'ready', 2, '[]', 0, ?, ?)`,
+            ) VALUES (?, ?, 'task', ?, '', ?, 'open', 2, '[]', 0, ?, ?)`,
             "after-release",
             "store",
             "retryable release",
@@ -579,7 +579,7 @@ describe("SqliteStore", () => {
         action: "abandon",
         actor,
       });
-      expect(abandoned).toMatchObject({ assignee: null, status: "ready" });
+      expect(abandoned).toMatchObject({ assignee: null, status: "open" });
 
       await store.acceptQuest({ id: quest.id, owner: actor });
       await store.transition(quest.id, {
@@ -595,7 +595,7 @@ describe("SqliteStore", () => {
       });
       expect(reopened).toMatchObject({
         assignee: null,
-        status: "ready",
+        status: "open",
         reopen_count: 1,
         verdict_notes: "verification failed",
       });
@@ -620,7 +620,7 @@ describe("SqliteStore", () => {
       expect(reopenedComplete).toMatchObject({
         assignee: null,
         reopen_count: 2,
-        status: "ready",
+        status: "open",
       });
 
       const events = await store.events(quest.id);
@@ -719,7 +719,7 @@ describe("SqliteStore", () => {
         actor,
         notes: "scope restored",
       });
-      expect(reopened).toMatchObject({ reopen_count: 1, status: "ready" });
+      expect(reopened).toMatchObject({ reopen_count: 1, status: "open" });
 
       await store.acceptQuest({ id: task.id, owner: actor });
       await store.transition(task.id, { action: "turnin", actor, pr: null });
@@ -729,7 +729,7 @@ describe("SqliteStore", () => {
         actor,
         notes: "verification was premature",
       });
-      expect(corrected).toMatchObject({ reopen_count: 2, status: "ready" });
+      expect(corrected).toMatchObject({ reopen_count: 2, status: "open" });
       expect((await store.events(task.id)).map(({ action }) => action)).toEqual([
         "add",
         "cancel",
@@ -846,7 +846,7 @@ describe("SqliteStore", () => {
       expect(refused).toMatchObject({
         outcome: "lane-conflict",
         lane_conflicts: [{ files: ["src/shared.ts"], quest_id: inFlight.id }],
-        quest: { assignee: null, status: "ready" },
+        quest: { assignee: null, status: "open" },
       });
       expect((await store.events(candidate.id)).map(({ action }) => action)).toEqual(["add"]);
 
@@ -874,9 +874,9 @@ describe("SqliteStore", () => {
       });
       expect(blocked).toMatchObject({
         outcome: "guild-mismatch",
-        quest: { assignee: null, guild: "claude", status: "ready" },
+        quest: { assignee: null, guild: "claude", status: "open" },
       });
-      expect(await store.getQuest(quest.id)).toMatchObject({ assignee: null, status: "ready" });
+      expect(await store.getQuest(quest.id)).toMatchObject({ assignee: null, status: "open" });
 
       const forced = await store.acceptQuest({
         force: true,
@@ -922,7 +922,7 @@ describe("SqliteStore", () => {
       expect(await store.getQuest(quest.id)).toMatchObject({
         assignee: null,
         lease_expires_at: null,
-        status: "ready",
+        status: "open",
       });
       await expect(store.touchQuest({ id: quest.id, owner: "ryan" })).rejects.toThrow(
         "re-accept to continue",
@@ -1042,7 +1042,7 @@ describe("SqliteStore", () => {
           {
             repo: "alpha",
             total: 2,
-            status_counts: { ready: 1, accepted: 1 },
+            status_counts: { open: 1, accepted: 1 },
             verdict_counts: {},
             reopen_count: 0,
             assignee_load: { [actor]: 1 },
@@ -1108,7 +1108,7 @@ describe("SqliteStore", () => {
 
     expect(statuses.at(-1)).toBe("accepted");
     now = "2026-08-10T12:01:01.000Z";
-    await waitFor(() => statuses.at(-1) === "ready");
+    await waitFor(() => statuses.at(-1) === "open");
 
     await subscription.unsubscribe();
     store.close();
@@ -1203,7 +1203,7 @@ function taskInput(title: string): NewQuest {
     description: "",
     opened_by: actor,
     assignee: null,
-    status: "ready",
+    status: "open",
     verdict: null,
     verdict_notes: null,
     priority: 2,

@@ -354,6 +354,7 @@ function normalizeNewQuestReplay(value: unknown): NewQuestReplay | undefined {
   );
   const parsed = newQuestReplaySchema.safeParse({
     ...withoutReplayMetadata,
+    status: withoutReplayMetadata["status"] === "ready" ? "open" : withoutReplayMetadata["status"],
     ...(hasGuild ? {} : { guild: null }),
   });
   return parsed.success ? parsed.data : undefined;

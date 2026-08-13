@@ -446,7 +446,7 @@ describe("lifecycle CLI behavior", () => {
           { filename: "report.txt", kind: "doc", stage: "report" },
           { filename: "report-two.md", kind: "doc", stage: "report" },
         ],
-        quest: { id: 1, status: "ready" },
+        quest: { id: 1, status: "open" },
       });
       const evidenceOnly = await harness.runJson([
         "update",
@@ -594,7 +594,7 @@ describe("lifecycle CLI behavior", () => {
       const reopened = await harness.runJson(["reopen", "1", "--notes", "verification failed"]);
       expect(reportData(reopened.report)).toMatchObject({
         changed: true,
-        quest: { reopen_count: 1, status: "ready" },
+        quest: { reopen_count: 1, status: "open" },
       });
       const reopenReplay = await harness.runJson(["reopen", "1", "--notes", "verification failed"]);
       expect(reportData(reopenReplay.report)).toMatchObject({ changed: false });
@@ -682,10 +682,10 @@ describe("lifecycle CLI behavior", () => {
 
       const result = await harness.runJson(["complete", "1"]);
       expect(result.code).toBe(EXIT_DOMAIN_ERROR);
-      expect(result.stderr[0]).toContain("[COMPLETE_INVALID_STATE] quest 1 is ready;");
+      expect(result.stderr[0]).toContain("[COMPLETE_INVALID_STATE] quest 1 is open;");
       expect(result.stderr[0]).not.toContain("COMPLETE_PR_UNMERGED");
       expect(mergeChecks).toBe(0);
-      expect(await harness.store.getQuest(1)).toMatchObject({ status: "ready" });
+      expect(await harness.store.getQuest(1)).toMatchObject({ status: "open" });
     } finally {
       await harness.stop();
     }
@@ -956,7 +956,7 @@ describe("lifecycle CLI behavior", () => {
 
       const actionable = await harness.runJson(["verdict", "2", "actionable"]);
       expect(reportData(actionable.report)).toMatchObject({
-        quest: { status: "ready", verdict: "actionable" },
+        quest: { status: "open", verdict: "actionable" },
       });
 
       await harness.runJson(["add", "Duplicate bug", "--kind", "bug", "--area", "cli"]);
@@ -1056,7 +1056,7 @@ describe("lifecycle CLI behavior", () => {
       });
       const reopenedTask = await harness.runJson(["reopen", "2", "--notes", "scope restored"]);
       expect(reportData(reopenedTask.report)).toMatchObject({
-        quest: { reopen_count: 1, status: "ready", verdict: null },
+        quest: { reopen_count: 1, status: "open", verdict: null },
       });
 
       await harness.runJson(["add", "Completed task", "--kind", "task", "--area", "cli"]);
@@ -1070,7 +1070,7 @@ describe("lifecycle CLI behavior", () => {
         "verification was premature",
       ]);
       expect(reportData(reopenedComplete.report)).toMatchObject({
-        quest: { reopen_count: 1, status: "ready" },
+        quest: { reopen_count: 1, status: "open" },
       });
 
       expect((await harness.store.events(1)).map(({ action }) => action)).toEqual([
@@ -1102,7 +1102,7 @@ describe("lifecycle CLI behavior", () => {
       ]);
       expect(reportData(added.report)).toMatchObject({
         outcome: "created",
-        quest: { guild: "claude", status: "ready" },
+        quest: { guild: "claude", status: "open" },
       });
 
       const blockedHuman = await harness.runHuman(["accept", "1", "--as", "janior/codex-1"]);
@@ -1117,7 +1117,7 @@ describe("lifecycle CLI behavior", () => {
         warnings: [
           "quest 1 is assigned to guild claude; session guild is undeclared; use --force to override",
         ],
-        data: { changed: false, quest: { status: "ready", assignee: null } },
+        data: { changed: false, quest: { status: "open", assignee: null } },
       });
 
       const forced = await harness.runJson(["accept", "1", "--as", "janior", "--force"]);

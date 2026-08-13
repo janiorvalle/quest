@@ -6,9 +6,9 @@ import { nonEmptyTextSchema } from "./primitives";
 
 const displayIdSchema = z.int().positive();
 
-// Turn-in file signals are part of the Convex wire contract; deploy the matching backend before
-// a client that records actual changed files writes to it.
-export const STORE_SCHEMA_VERSION = 9;
+// Unified open status is part of the Convex wire contract; deploy and migrate the matching backend
+// before releasing a client that no longer understands ready.
+export const STORE_SCHEMA_VERSION = 10;
 export const MAX_LEASE_TTL_MINUTES = 100_000_000;
 const leaseTtlMinutesSchema = z.int().positive().max(MAX_LEASE_TTL_MINUTES);
 

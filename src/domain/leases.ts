@@ -35,6 +35,6 @@ export function materializeExpiredLease(quest: Quest, now: string): Quest {
     ...quest,
     assignee: null,
     lease_expires_at: null,
-    status: statusAfterClaimRelease(quest),
+    status: statusAfterClaimRelease(),
   };
 }

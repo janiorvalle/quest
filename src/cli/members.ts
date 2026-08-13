@@ -69,6 +69,10 @@ export interface MembersRequestCapture {
 }
 
 export interface ConvexOnboardingOperations {
+  readonly migrateReadyStatuses?: (
+    deployment: string,
+    adminSecret: string,
+  ) => Promise<{ readonly converted: number; readonly total: number; readonly unchanged: number }>;
   readonly invite: (
     deployment: string,
     name: string,
@@ -522,6 +526,10 @@ export function isMembersCliRequest(
 
 export function createConvexOnboardingOperations(): ConvexOnboardingOperations {
   return {
+    migrateReadyStatuses: (deployment, adminSecret) =>
+      createConvexHttpClient(deployment).mutation(convexApi.migrateReadyStatuses, {
+        admin_secret: adminSecret,
+      }),
     invite: (deployment, name, adminSecret) =>
       createConvexHttpClient(deployment).mutation(convexApi.membersInvite, {
         admin_secret: adminSecret,

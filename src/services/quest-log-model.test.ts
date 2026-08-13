@@ -28,7 +28,7 @@ const questInput = (repo: string, title: string): NewQuest => ({
   description: "A dense viewer quest",
   opened_by: "test",
   assignee: null,
-  status: "ready",
+  status: "open",
   verdict: null,
   verdict_notes: null,
   priority: 2,
@@ -941,8 +941,8 @@ describe("read-only quest log runtime", () => {
 
 test("summarizes event details without leaking object syntax into the viewer", () => {
   expect(summarizeEventDetail(null)).toBeNull();
-  expect(summarizeEventDetail("ready")).toBe("ready");
-  expect(summarizeEventDetail({ status: { from: "open", to: "ready" }, actor: "janior" })).toBe(
-    'status {"from":"open","to":"ready"} · actor janior',
+  expect(summarizeEventDetail("open")).toBe("open");
+  expect(summarizeEventDetail({ status: { from: "open", to: "open" }, actor: "janior" })).toBe(
+    'status {"from":"open","to":"open"} · actor janior',
   );
 });

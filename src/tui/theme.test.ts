@@ -76,8 +76,7 @@ describe("dense theme", () => {
       accepted: { color: "#7fa3b8", glyph: "◐", label: "active" },
       complete: { color: "#7bc96f", glyph: "✓", label: "complete" },
       dropped: { color: "#37444b", glyph: "✕", label: "dropped" },
-      open: { color: "#d1706b", glyph: "○", label: "open" },
-      ready: { color: "#62c4c9", glyph: "●", label: "ready" },
+      open: { color: "#62c4c9", glyph: "●", label: "open" },
       turned_in: { color: "#e3c05c", glyph: "◆", label: "review" },
     });
     expect(DENSE_THEME.blockedStatus).toEqual({ glyph: "○", label: "blocked" });
@@ -86,8 +85,7 @@ describe("dense theme", () => {
       accepted: "in progress",
       complete: "verified",
       dropped: "closed",
-      open: "needs triage",
-      ready: "unclaimed",
+      open: "unclaimed",
       turned_in: "awaiting verification",
     });
   });
@@ -114,8 +112,7 @@ describe("dense survives the theme-token refactor unchanged", () => {
     expect(questStatusText(DENSE_THEME.status.accepted)).toBe("◐ active");
     expect(questStatusText(DENSE_THEME.status.complete)).toBe("✓ complete");
     expect(questStatusText(DENSE_THEME.status.dropped)).toBe("✕ dropped");
-    expect(questStatusText(DENSE_THEME.status.open)).toBe("○ open");
-    expect(questStatusText(DENSE_THEME.status.ready)).toBe("● ready");
+    expect(questStatusText(DENSE_THEME.status.open)).toBe("● open");
     expect(questStatusText(DENSE_THEME.status.turned_in)).toBe("◆ review");
   });
 
@@ -125,8 +122,8 @@ describe("dense survives the theme-token refactor unchanged", () => {
     );
   });
 
-  test("reproduces the old priority coloring: p1 the open color, p2 and p3 muted", () => {
-    expect(questPriorityInk(DENSE_THEME, 1)).toBe(DENSE_THEME.status.open.color);
+  test("preserves the independent priority colors", () => {
+    expect(questPriorityInk(DENSE_THEME, 1)).toBe("#d1706b");
     expect(questPriorityInk(DENSE_THEME, 2)).toBe(DENSE_THEME.palette.textMuted);
     expect(questPriorityInk(DENSE_THEME, 3)).toBe(DENSE_THEME.palette.textMuted);
   });
@@ -165,7 +162,7 @@ describe("tavern theme", () => {
   });
 
   test("speaks quest-log grammar: ! available, ⚔ out on the job, ? returned, ! dimmed for blocked", () => {
-    expect(TAVERN_THEME.status.ready).toEqual({ color: "#ffd100", glyph: "!", label: "ready" });
+    expect(TAVERN_THEME.status.open).toEqual({ color: "#ffd100", glyph: "!", label: "open" });
     expect(TAVERN_THEME.status.accepted).toEqual({
       color: "#e8b04a",
       glyph: "⚔",
@@ -193,7 +190,7 @@ describe("tavern theme", () => {
       ...Object.values(TAVERN_THEME.status).map((status) => status.glyph),
       TAVERN_THEME.blockedStatus.glyph,
     ];
-    // ready and blocked share ! on purpose — same quest, dimmed because you cannot take it yet.
+    // Open and blocked share ! on purpose: blocked is the same quest, dimmed until claimable.
     const distinct = glyphs.filter((glyph) => glyph !== "!");
     expect(new Set(distinct).size).toBe(distinct.length);
   });
@@ -315,9 +312,9 @@ describe("ledger theme", () => {
     expect(new Set(colors).size).toBe(colors.length);
   });
 
-  test("paints the PR marker and the blocker id in one ochre, as the mockup does", () => {
+  test("keeps the PR marker ochre and makes open dispatchable green", () => {
     expect(LEDGER_THEME.palette.pullRequest).toBe(LEDGER_THEME.palette.warn);
-    expect(LEDGER_THEME.status.open.color).toBe(LEDGER_THEME.palette.warn);
+    expect(LEDGER_THEME.status.open.color).toBe("#1f5c3d");
   });
 });
 

@@ -65,7 +65,7 @@ function questInput(title: string, repo: string, status: QuestStatus): NewQuest 
     guild: null,
     predicted_files: [],
     reopen_count: 0,
-    backfill: status !== "ready",
+    backfill: status !== "open",
   };
 }
 
@@ -116,7 +116,7 @@ async function createHarness(): Promise<ChainCliHarness> {
   return {
     async addQuest(title, options = {}) {
       const quest = await store.addQuest(
-        questInput(title, options.repo ?? "quest", options.status ?? "ready"),
+        questInput(title, options.repo ?? "quest", options.status ?? "open"),
       );
       return quest.id;
     },
@@ -259,7 +259,7 @@ describe("chain CLI behavior", () => {
                 blocked: false,
                 depth: 1,
                 link_type: "requires",
-                quest: { id: 3, status: "ready" },
+                quest: { id: 3, status: "open" },
               },
               {
                 blocked: false,
@@ -275,10 +275,10 @@ describe("chain CLI behavior", () => {
       const human = await harness.runHuman(["chain", "show", "1"]);
       expect(human.stdout.join("")).toBe(
         [
-          "1 Root [ready, blocked]",
+          "1 Root [open, blocked]",
           "- requires: 2 Complete requirement [complete]",
-          "- requires: 3 Open requirement [ready]",
-          "- duplicate-of: 4 Duplicate target [ready]",
+          "- requires: 3 Open requirement [open]",
+          "- duplicate-of: 4 Duplicate target [open]",
           "",
         ].join("\n"),
       );

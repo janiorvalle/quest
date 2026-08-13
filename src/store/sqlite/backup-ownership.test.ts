@@ -26,7 +26,7 @@ function task(title: string): NewQuest {
     description: "",
     opened_by: "ownership-test",
     assignee: null,
-    status: "ready",
+    status: "open",
     verdict: null,
     verdict_notes: null,
     priority: 2,

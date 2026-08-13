@@ -106,7 +106,7 @@ across sessions.
 Events record which guild, model, and effort level touched each quest, so
 `quest brief` can tell attempt two exactly what attempt one was and did.
 
-There's also a dispatcher (`scripts/dispatch.ts`) that walks the ready queue
+There's also a dispatcher (`scripts/dispatch.ts`) that walks the open queue
 and spawns real worker agents in isolated git worktrees, on your existing
 Claude or Codex login. It only runs when you run it:
 

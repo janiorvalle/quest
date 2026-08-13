@@ -23,13 +23,13 @@ backend enforces the same invariant its own way. All access via the
 | `id` | integer, autoincrement per backend | Display id; stable and never reused within its backend |
 | `repo` | text | Repo identity; indexed. The primary scope boundary |
 | `area` | text nullable | Free-form grouping within a repo (a subsystem, feature, module…). Optional per-repo allowlist in config |
-| `kind` | text enum | `bug` \| `task`. Determines lifecycle entry: bugs start at `open` (need triage); tasks are born `ready` (no verdict phase). That's the whole difference — no issue-type schemes |
+| `kind` | text enum | `bug` \| `task`. Both start at `open`; bugs may also carry a triage verdict. No issue-type schemes |
 | `title` | text | Short summary |
 | `description` | text | Full detail; steps/expected/actual for bugs, definition-of-done for tasks |
 | `opened_by` | text | Identity that filed it (human or agent) |
 | `guild` | text nullable | Agent class requested for the work; null = shared. A manual accept from another guild requires `--force` |
 | `assignee` | text nullable | Owner identity; null = unclaimed |
-| `lease_expires_at` | timestamp nullable | Passive claim expiry; reads materialize an expired accepted quest back to its dispatch state (`open` for an untriaged bug, otherwise `ready`), and assignee writes renew the lease |
+| `lease_expires_at` | timestamp nullable | Passive claim expiry; reads materialize an expired accepted quest back to `open`, and assignee writes renew the lease |
 | `status` | text enum | See lifecycle |
 | `verdict` | text enum nullable | Triage outcome for bugs; null for tasks. See verdicts |
 | `verdict_notes` | text nullable | Why the verdict; investigation findings |
@@ -93,22 +93,21 @@ stored for the derived value.
 ## Lifecycle (status enum)
 
 ```
-            (bugs start here)          (tasks start here)
-open ──claim─────────────────────────▶ accepted ──▶ turned_in ──▶ complete
-  └──verdict:actionable──▶ ready ────────┘
-  │                            ▲                        │
-  │                            └────── reopen ◀─────────┘  (reopen_count++)
-  │
-  └──verdict:anything else──▶ dropped
+                         turn in          verify
+open ─────── claim ─────▶ accepted ─────▶ turned_in ─────▶ complete
+  ▲                          │                 │                 │
+  └── abandon / expiry ──────┘                 └──── reopen ─────┘
+  └──────────────────────────── reopen ◀────────────── dropped
+
+bug verdict: actionable keeps open; every other verdict drops the quest
 ```
 
-- `open` — filed, not yet triaged (bugs only); open bugs are still dispatchable
-  and may be claimed directly.
-- `ready` — actionable and unclaimed. Tasks are born here.
+- `open` — unclaimed and dispatchable. Every quest starts and every released
+  claim or reopened terminal quest returns here. Bug triage nuance lives in the
+  nullable verdict, not in status.
 - `accepted` — claimed for a 24-hour lease by default. Claiming is atomic; every write
   by the assignee renews it. A read observes an expired lease and returns the
-  quest to its dispatch state (`open` for an untriaged bug, otherwise `ready`)
-  without a daemon. `quest touch <id>` renews a long-running claim. Zero rows
+  quest to `open` without a daemon. `quest touch <id>` renews a long-running claim. Zero rows
   updated = claim conflict.
   Configure `[store] lease_ttl_minutes` or use `accept --lease` / `touch --lease`
   for a one-off duration. Existing recorded expiry timestamps are never
@@ -119,9 +118,8 @@ open ──claim─────────────────────�
 - `dropped` — closed without a change; verdict says why.
 - `cancel` — any non-terminal quest moves to `dropped`; bugs receive `wont-do`,
   while tasks keep a null verdict and record the reason in notes.
-- `reopen` — forward correction with notes and a bumped count: `turned_in` and
-  `complete` return to `ready`, unless an untriaged bug returns to `open`;
-  dropped bugs return to `open`; dropped tasks return to `ready`.
+- `reopen` — forward correction with notes and a bumped count: `turned_in`,
+  `complete`, and `dropped` all return to `open`.
 
 Verification is whatever the project means by it (QA retest, code review,
 stakeholder check) — the model only insists the step exists.
@@ -132,7 +130,7 @@ Generic, hardcoded, small:
 
 | Verdict | Meaning |
 |---|---|
-| `actionable` | Real; work will happen → `ready` |
+| `actionable` | Real; work will happen; the quest remains `open` and claimable |
 | `not-reproduced` | Couldn't reproduce (`--retest` keeps it `open` for another attempt; otherwise → `dropped`) |
 | `works-as-intended` | Behaving as designed → `dropped` |
 | `invalid` | Report's premise is wrong → `dropped` |
@@ -157,12 +155,14 @@ not quest's business. Config `identity` supplies the default; agents pass
 `--as`. Config `guild` or `QUEST_GUILD` supplies the session guild. No user
 accounts in v0. Team phase maps identities to Convex auth.
 
-The SQLite store is schema version 4. Ordinary commands refuse older stores;
+The SQLite store is schema version 8. Ordinary commands refuse older stores;
 `quest migrate` creates a physical backup under the configured backup root and
 then runs the compatibility migration. Migrations preserve existing quests as
 shared (`guild = null`), remove the legacy `branch` column, rebuild the
 append-only events table when adding a new action, and derive leases for
-already accepted quests from their last update timestamp.
+already accepted quests from their last update timestamp. The v8 migration
+rewrites persisted `ready` quest rows to `open` while leaving append-only event
+bytes unchanged.
 
 ## Backend routing
 

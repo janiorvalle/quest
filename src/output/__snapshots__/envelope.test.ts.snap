@@ -14,7 +14,7 @@ exports[`quest.report/v1 envelope builds and serializes a schema-validated repor
   },
   "filters": {
     "repo": "quest",
-    "status": "ready",
+    "status": "open",
   },
   "generated_at": "2026-07-29T12:34:56Z",
   "schema": "quest.report/v1",
@@ -25,6 +25,6 @@ exports[`quest.report/v1 envelope builds and serializes a schema-validated repor
 `;
 
 exports[`quest.report/v1 envelope builds and serializes a schema-validated report 2`] = `
-"{"schema":"quest.report/v1","command":"list","generated_at":"2026-07-29T12:34:56Z","filters":{"repo":"quest","status":"ready"},"warnings":["quest 12 skipped: blocked by 11"],"data":{"quests":[{"id":10,"title":"Output layer: envelopes + tables"}],"total":1}}
+"{"schema":"quest.report/v1","command":"list","generated_at":"2026-07-29T12:34:56Z","filters":{"repo":"quest","status":"open"},"warnings":["quest 12 skipped: blocked by 11"],"data":{"quests":[{"id":10,"title":"Output layer: envelopes + tables"}],"total":1}}
 "
 `;

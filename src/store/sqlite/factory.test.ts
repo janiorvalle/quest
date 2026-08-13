@@ -26,7 +26,7 @@ describe("public SQLite composition factories", () => {
         description: "",
         opened_by: "factory/test",
         assignee: null,
-        status: "ready",
+        status: "open",
         verdict: null,
         verdict_notes: null,
         priority: 1,

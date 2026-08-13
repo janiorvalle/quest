@@ -228,6 +228,21 @@ describe("config loading", () => {
     });
   });
 
+  test("maps legacy ready colors and labels to open with open taking precedence", async () => {
+    const config = await loadConfig({
+      platform,
+      environment: {},
+      readFile: textReader(`
+colors = { ready = "legacy", open = "current" }
+[labels.statuses]
+ready = "Available"
+`),
+    });
+
+    expect(config.colors).toEqual({ open: "current" });
+    expect(config.labels.statuses).toEqual({ open: "Available" });
+  });
+
   test("reads config.toml from the platform config directory with smol-toml", async () => {
     const homeDirectory = await mkdtemp(join(tmpdir(), "quest-config-"));
     const temporaryPlatform = hostPlatformRootedAt(homeDirectory);

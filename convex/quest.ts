@@ -62,6 +62,8 @@ import {
   stableSerialize,
   touchQuestInputSchema,
 } from "../src/schema";
+import { legacyReadySnapshot } from "../src/store/convex/legacy-fingerprint";
+import { assertAdminSecret } from "./admin";
 import { requireMemberActor, requireMemberQueryActor } from "./auth";
 import type schema from "./schema";
 
@@ -72,7 +74,7 @@ function isRecord(value: unknown): value is Record<string, unknown> & { readonly
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function withoutSystemFields(value: unknown): unknown {
+function withoutSystemFields(value: unknown): Record<string, unknown> {
   if (!isRecord(value)) {
     throw new Error("Convex returned a non-object document");
   }
@@ -85,7 +87,11 @@ function withoutSystemFields(value: unknown): unknown {
 }
 
 function parseQuestDocument(value: unknown): Quest {
-  return questSchema.parse(withoutSystemFields(value));
+  const fields = withoutSystemFields(value);
+  return questSchema.parse({
+    ...fields,
+    status: fields["status"] === "ready" ? "open" : fields["status"],
+  });
 }
 
 function parseEvidenceDocument(value: unknown): Evidence {
@@ -412,10 +418,7 @@ function applyReopen(
   ) {
     throw new Error(`illegal quest transition: ${current.status} -> reopen`);
   }
-  const reopenedStatus =
-    current.status === "dropped" && current.kind === "bug"
-      ? "open"
-      : statusAfterClaimRelease(current);
+  const reopenedStatus = statusAfterClaimRelease();
   requireStatusTransition(current, current.status, reopenedStatus);
   return questSchema.parse({
     ...current,
@@ -458,7 +461,7 @@ function applyTransition(current: Quest, transition: QuestTransition, timestamp:
   assertLifecycleActionAllowed(current, transition.action);
   switch (transition.action) {
     case "abandon": {
-      const releasedStatus = statusAfterClaimRelease(current);
+      const releasedStatus = statusAfterClaimRelease();
       requireStatusTransition(current, "accepted", releasedStatus);
       return questSchema.parse({
         ...current,
@@ -899,7 +902,7 @@ function restoreLeaseExpiry(timestamp: string): string {
   return new Date(parsed + RESTORE_LEASE_DURATION_MS).toISOString();
 }
 
-async function snapshotFingerprint(snapshot: QuestDump): Promise<string> {
+async function snapshotFingerprint(snapshot: unknown): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(stableSerialize(snapshot)),
@@ -907,7 +910,7 @@ async function snapshotFingerprint(snapshot: QuestDump): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function legacySnapshotFingerprint(snapshot: QuestDump): Promise<string> {
+async function legacySnapshotFingerprint(snapshot: unknown): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(JSON.stringify(snapshot)),
@@ -918,9 +921,16 @@ async function legacySnapshotFingerprint(snapshot: QuestDump): Promise<string> {
 async function matchesSnapshotFingerprint(snapshot: QuestDump, expected: string): Promise<boolean> {
   // Existing leases and fences have no hash-version field. Both hashes cover the
   // complete dump; the legacy form differs only in key ordering.
-  return (
+  if (
     (await snapshotFingerprint(snapshot)) === expected ||
     (await legacySnapshotFingerprint(snapshot)) === expected
+  ) {
+    return true;
+  }
+  const legacyReady = legacyReadySnapshot(snapshot);
+  return (
+    (await snapshotFingerprint(legacyReady)) === expected ||
+    (await legacySnapshotFingerprint(legacyReady)) === expected
   );
 }
 
@@ -1236,6 +1246,24 @@ async function recoverCommittedMigrationFence(
 export const schemaVersion = queryGeneric({
   args: emptyArgs,
   handler: async () => STORE_SCHEMA_VERSION,
+});
+
+export const migrateReadyStatuses = mutationGeneric({
+  args: { admin_secret: v.string() },
+  handler: async (ctx, args) => {
+    await assertAdminSecret(args.admin_secret);
+    await requireNoRestoreLease(ctx);
+    const quests = await ctx.db.query("quests").collect();
+    let converted = 0;
+    for (const quest of quests) {
+      if (quest.status !== "ready") {
+        continue;
+      }
+      await ctx.db.patch(quest._id, { status: "open" });
+      converted += 1;
+    }
+    return { converted, unchanged: quests.length - converted, total: quests.length };
+  },
 });
 
 // Quest 83 deliberately leaves authorization to Quest 86; this provider is tested against an anonymous local deployment.

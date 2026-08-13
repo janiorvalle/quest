@@ -69,7 +69,7 @@ function questInput(
     status?: QuestStatus;
   },
 ): NewQuest {
-  const status = options.status ?? "ready";
+  const status = options.status ?? "open";
   return {
     repo: options.repo ?? "quest",
     area: "cli",
@@ -87,7 +87,7 @@ function questInput(
     predicted_files: [...(options.predictedFiles ?? [])],
     reopen_count: options.reopenCount ?? 0,
     lease_expires_at: status === "accepted" ? "2026-08-01T00:00:00Z" : null,
-    backfill: status !== "ready",
+    backfill: status !== "open",
   };
 }
 
@@ -297,7 +297,7 @@ describe("next CLI behavior", () => {
       expect(await harness.store.getQuest(conflicted)).toMatchObject({
         assignee: null,
         id: conflicted,
-        status: "ready",
+        status: "open",
       });
       expect(await harness.store.getQuest(inFlight)).toMatchObject({
         id: inFlight,
@@ -540,7 +540,7 @@ describe("next CLI behavior", () => {
         ],
         data: {
           claimed: false,
-          quest: { id: selected, status: "ready" },
+          quest: { id: selected, status: "open" },
         },
       });
     } finally {
@@ -732,7 +732,7 @@ describe("next CLI behavior", () => {
       const result = await getNextQuest(racingStore, { repo: "quest" }, identity, undefined, null);
 
       expect(result.claimed).toBeFalse();
-      expect(result.quest).toMatchObject({ guild: "claude", id: selected, status: "ready" });
+      expect(result.quest).toMatchObject({ guild: "claude", id: selected, status: "open" });
       expect(result.warnings).toEqual([
         `quest ${selected} is assigned to guild claude; session guild is undeclared; use --force to override`,
       ]);
@@ -784,7 +784,7 @@ describe("next CLI behavior", () => {
       expect(await harness.store.getQuest(humanReview)).toMatchObject({
         assignee: null,
         id: humanReview,
-        status: "ready",
+        status: "open",
       });
     } finally {
       await harness.stop();
