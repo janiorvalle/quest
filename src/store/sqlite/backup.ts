@@ -39,6 +39,7 @@ const PRE_LEASE_SCHEMA_VERSION = 3;
 const PRE_FENCE_SCHEMA_VERSION = 4;
 const PRE_GLOBAL_GUARD_SCHEMA_VERSION = 5;
 const PRE_SIGNOFF_SCHEMA_VERSION = 6;
+const PRE_UNIFIED_OPEN_SCHEMA_VERSION = 7;
 
 interface PreparedRestoreSource {
   readonly cleanup: () => Promise<void>;
@@ -170,7 +171,8 @@ async function prepareRestoreSource(source: string): Promise<PreparedRestoreSour
     sourceVersion !== PRE_LEASE_SCHEMA_VERSION &&
     sourceVersion !== PRE_FENCE_SCHEMA_VERSION &&
     sourceVersion !== PRE_GLOBAL_GUARD_SCHEMA_VERSION &&
-    sourceVersion !== PRE_SIGNOFF_SCHEMA_VERSION
+    sourceVersion !== PRE_SIGNOFF_SCHEMA_VERSION &&
+    sourceVersion !== PRE_UNIFIED_OPEN_SCHEMA_VERSION
   ) {
     throw new Error(
       `unsupported restore schema version ${String(sourceVersion)}; expected ${SQLITE_SCHEMA_VERSION}`,

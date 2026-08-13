@@ -49,7 +49,7 @@ function task(title: string, changes: Partial<NewQuest> = {}): NewQuest {
     description: `${title} description`,
     opened_by: "fixture",
     assignee: null,
-    status: "ready",
+    status: "open",
     verdict: null,
     verdict_notes: null,
     priority: 2,

@@ -123,4 +123,73 @@ describe("repository migration CLI", () => {
     }
     expect(stderr[0]).toContain("must not be empty");
   });
+
+  test("converts Convex ready rows without putting the admin secret in argv", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const received: string[] = [];
+    const base = dependencies(stdout, stderr);
+    const exitCode = await runQuestCli(
+      ["migrate", "--ready-statuses", "--deployment", "https://example.convex.cloud"],
+      {
+        ...base,
+        environment: { QUEST_ADMIN_SECRET: "admin-secret" },
+        onboarding: {
+          migrateReadyStatuses: async (deployment, secret) => {
+            received.push(deployment, secret);
+            return { converted: 3, total: 5, unchanged: 2 };
+          },
+          invite: async () => ({ member: "unused", token: "unused" }),
+          join: async () => ({ member: "unused", token: "unused" }),
+          list: async () => [],
+          remove: async () => ({ member: "unused", revoked_keys: 0 }),
+          repositories: async () => [],
+          rotate: async () => ({ member: "unused", old_key_expires_at: 0, token: "unused" }),
+          whoami: async () => ({ member: "unused" }),
+        },
+      },
+    );
+
+    expect(exitCode).toBe(EXIT_SUCCESS);
+    expect(stderr).toEqual([]);
+    expect(received).toEqual(["https://example.convex.cloud", "admin-secret"]);
+    expect(stdout.join("")).toContain("Converted 3 ready quests to open");
+  });
+
+  test("uses the injected clock in ready-status migration reports", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const base = dependencies(stdout, stderr);
+    const exitCode = await runQuestCli(
+      [
+        "--format",
+        "json",
+        "migrate",
+        "--ready-statuses",
+        "--deployment",
+        "https://example.convex.cloud",
+      ],
+      {
+        ...base,
+        environment: { QUEST_ADMIN_SECRET: "admin-secret" },
+        onboarding: {
+          migrateReadyStatuses: async () => ({ converted: 0, total: 2, unchanged: 2 }),
+          invite: async () => ({ member: "unused", token: "unused" }),
+          join: async () => ({ member: "unused", token: "unused" }),
+          list: async () => [],
+          remove: async () => ({ member: "unused", revoked_keys: 0 }),
+          repositories: async () => [],
+          rotate: async () => ({ member: "unused", old_key_expires_at: 0, token: "unused" }),
+          whoami: async () => ({ member: "unused" }),
+        },
+      },
+    );
+
+    expect(exitCode).toBe(EXIT_SUCCESS);
+    expect(stderr).toEqual([]);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      generated_at: "2026-07-31T12:00:00Z",
+      data: { converted: 0, total: 2, unchanged: 2 },
+    });
+  });
 });

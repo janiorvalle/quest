@@ -62,11 +62,22 @@ export interface ConvexMember {
   readonly updated_at: string;
 }
 
+export interface ConvexReadyStatusMigrationResult {
+  readonly converted: number;
+  readonly total: number;
+  readonly unchanged: number;
+}
+
 export const convexApi = {
   schemaVersion: makeFunctionReference<"query", Record<string, never>, number>(
     "quest:schemaVersion",
   ),
   serverTime: makeFunctionReference<"query", Record<string, never>, string>("quest:serverTime"),
+  migrateReadyStatuses: makeFunctionReference<
+    "mutation",
+    { readonly admin_secret: string },
+    ConvexReadyStatusMigrationResult
+  >("quest:migrateReadyStatuses"),
   addQuest: makeFunctionReference<"mutation", AuthenticatedMutation<NewQuest>, Quest>(
     "quest:addQuest",
   ),

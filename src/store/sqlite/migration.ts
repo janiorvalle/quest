@@ -20,6 +20,7 @@ const PRE_LEASE_SCHEMA_VERSION = 3;
 const PRE_FENCE_SCHEMA_VERSION = 4;
 const PRE_GLOBAL_GUARD_SCHEMA_VERSION = 5;
 const PRE_SIGNOFF_SCHEMA_VERSION = 6;
+const PRE_UNIFIED_OPEN_SCHEMA_VERSION = 7;
 
 type SqliteSchemaDefinition = {
   readonly name: string;
@@ -35,6 +36,18 @@ function withoutSignoffEnumValues(
     ...definition,
     sql:
       definition.type === "table" ? definition.sql.replaceAll(", 'signoff'", "") : definition.sql,
+  }));
+}
+
+function withReadyStatusEnum(
+  definitions: readonly SqliteSchemaDefinition[],
+): SqliteSchemaDefinition[] {
+  return definitions.map((definition) => ({
+    ...definition,
+    sql:
+      definition.name === "quests"
+        ? definition.sql.replace("'open', 'accepted'", "'open', 'ready', 'accepted'")
+        : definition.sql,
   }));
 }
 
@@ -128,18 +141,25 @@ const PRE_LEASE_SCHEMA_DEFINITIONS = withoutSignoffEnumValues(
   ),
 );
 
-const PRE_FENCE_SCHEMA_DEFINITIONS = withoutSignoffEnumValues(SQLITE_CORE_SCHEMA_DEFINITIONS);
+const PRE_FENCE_SCHEMA_DEFINITIONS = withReadyStatusEnum(
+  withoutSignoffEnumValues(SQLITE_CORE_SCHEMA_DEFINITIONS),
+);
 const PRE_GLOBAL_GUARD_SCHEMA_DEFINITIONS = [
-  ...withoutSignoffEnumValues(SQLITE_CORE_SCHEMA_DEFINITIONS),
+  ...withReadyStatusEnum(withoutSignoffEnumValues(SQLITE_CORE_SCHEMA_DEFINITIONS)),
   ...SQLITE_PRE_GLOBAL_GUARD_MIGRATION_SCHEMA_DEFINITIONS,
 ] as const;
 
 const PRE_SIGNOFF_CORE_SCHEMA_DEFINITIONS = withoutSignoffEnumValues(
-  SQLITE_CORE_SCHEMA_DEFINITIONS,
+  withReadyStatusEnum(SQLITE_CORE_SCHEMA_DEFINITIONS),
 );
 
 const PRE_SIGNOFF_SCHEMA_DEFINITIONS = [
   ...PRE_SIGNOFF_CORE_SCHEMA_DEFINITIONS,
+  ...SQLITE_MIGRATION_SCHEMA_DEFINITIONS,
+] as const;
+
+const PRE_UNIFIED_OPEN_SCHEMA_DEFINITIONS = [
+  ...withReadyStatusEnum(SQLITE_CORE_SCHEMA_DEFINITIONS),
   ...SQLITE_MIGRATION_SCHEMA_DEFINITIONS,
 ] as const;
 
@@ -207,7 +227,7 @@ type SqliteSequenceRow = {
 
 function readSequenceFloor(
   database: Database,
-  tableName: "evidence" | "events",
+  tableName: "evidence" | "events" | "quests",
 ): number | undefined {
   const row = database
     .query<SqliteSequenceRow, [string]>("SELECT seq FROM sqlite_sequence WHERE name = ? LIMIT 1")
@@ -217,7 +237,7 @@ function readSequenceFloor(
 
 function restoreSequenceFloor(
   database: Database,
-  tableName: "evidence" | "events",
+  tableName: "evidence" | "events" | "quests",
   floor: number | undefined,
 ): void {
   if (floor === undefined) {
@@ -276,6 +296,33 @@ function evidenceSupportSql(): readonly string[] {
   ).map(({ sql }) => sql);
 }
 
+function rebuildQuestTable(database: Database): void {
+  const sequenceFloor = readSequenceFloor(database, "quests");
+  database.run(tableSql("quests", "quests_v8"));
+  database.run(`
+    INSERT INTO quests_v8 (
+      id, repo, area, kind, title, description, opened_by, guild, assignee, status, verdict,
+      verdict_notes, priority, pr, predicted_files, reopen_count, lease_expires_at,
+      created_at, updated_at
+    )
+    SELECT
+      id, repo, area, kind, title, description, opened_by, guild, assignee,
+      CASE WHEN status = 'ready' THEN 'open' ELSE status END,
+      verdict, verdict_notes, priority, pr, predicted_files, reopen_count, lease_expires_at,
+      created_at, updated_at
+    FROM quests
+    ORDER BY id
+  `);
+  database.run("DROP TABLE quests");
+  database.run(currentTableSql("quests"));
+  database.run(`INSERT INTO quests SELECT * FROM quests_v8 ORDER BY id`);
+  database.run("DROP TABLE quests_v8");
+  for (const statement of questsIndexSql()) {
+    database.run(statement);
+  }
+  restoreSequenceFloor(database, "quests", sequenceFloor);
+}
+
 function readUserVersion(database: Database): number {
   const row = database.query<UserVersionRow, []>("PRAGMA user_version").get();
   if (row === null) {
@@ -310,6 +357,9 @@ function sourceDefinitions(version: number) {
   if (version === PRE_SIGNOFF_SCHEMA_VERSION) {
     return PRE_SIGNOFF_SCHEMA_DEFINITIONS;
   }
+  if (version === PRE_UNIFIED_OPEN_SCHEMA_VERSION) {
+    return PRE_UNIFIED_OPEN_SCHEMA_DEFINITIONS;
+  }
   throw new Error(`unsupported source schema version ${version}`);
 }
 
@@ -338,7 +388,7 @@ function verifySchema(
       .map((schemaObject) => [`${schemaObject.type}:${schemaObject.name}`, schemaObject]),
   );
   const expectedObjects = new Set(definitions.map(({ name, type }) => `${type}:${name}`));
-  for (const stagingName of ["quests_v4", "evidence_v7", "events_v4"]) {
+  for (const stagingName of ["quests_v4", "quests_v8", "evidence_v7", "events_v4"]) {
     const stagingCollision = database
       .query<SchemaNameRow, [string]>("SELECT name, type FROM sqlite_schema WHERE name = ? LIMIT 1")
       .get(stagingName);
@@ -395,7 +445,8 @@ function copyQuestRowsSql(version: number): string {
           created_at, updated_at
         )
         SELECT
-          id, repo, area, kind, title, description, opened_by, ${guild}, assignee, status, verdict,
+          id, repo, area, kind, title, description, opened_by, ${guild}, assignee,
+          CASE WHEN status = 'ready' THEN 'open' ELSE status END, verdict,
           verdict_notes, priority, pr, predicted_files, reopen_count, ${leaseFromUpdatedAtSql},
           created_at, updated_at
         FROM quests
@@ -407,6 +458,7 @@ function runFenceSchemaMigration(database: Database): void {
   database.run("BEGIN IMMEDIATE");
   try {
     dropAllTriggers(database);
+    rebuildQuestTable(database);
     rebuildEnumTable(database, "evidence", "evidence_v7");
     rebuildEnumTable(database, "events", "events_v4");
     for (const { sql } of SQLITE_MIGRATION_SCHEMA_DEFINITIONS) {
@@ -423,9 +475,11 @@ function runFenceSchemaMigration(database: Database): void {
 }
 
 function runGlobalGuardSchemaMigration(database: Database): void {
+  database.run("PRAGMA foreign_keys = OFF");
   database.run("BEGIN IMMEDIATE");
   try {
     dropAllTriggers(database);
+    rebuildQuestTable(database);
     rebuildEnumTable(database, "evidence", "evidence_v7");
     rebuildEnumTable(database, "events", "events_v4");
     for (const { sql } of SQLITE_MIGRATION_FENCE_TRIGGER_DEFINITIONS) {
@@ -446,12 +500,32 @@ function runSignoffSchemaMigration(database: Database): void {
   database.run("BEGIN IMMEDIATE");
   try {
     dropAllTriggers(database);
+    rebuildQuestTable(database);
     rebuildEnumTable(database, "evidence", "evidence_v7");
     rebuildEnumTable(database, "events", "events_v4");
     for (const { sql } of SQLITE_MIGRATION_SCHEMA_DEFINITIONS) {
       database.run(sql);
     }
 
+    database.run(`PRAGMA user_version = ${SQLITE_SCHEMA_VERSION}`);
+    database.run("COMMIT");
+  } catch (error: unknown) {
+    if (database.inTransaction) {
+      database.run("ROLLBACK");
+    }
+    throw error;
+  }
+}
+
+function runUnifiedOpenSchemaMigration(database: Database): void {
+  database.run("PRAGMA foreign_keys = OFF");
+  database.run("BEGIN IMMEDIATE");
+  try {
+    dropAllTriggers(database);
+    rebuildQuestTable(database);
+    for (const { sql } of SQLITE_TRIGGER_DEFINITIONS) {
+      database.run(sql);
+    }
     database.run(`PRAGMA user_version = ${SQLITE_SCHEMA_VERSION}`);
     database.run("COMMIT");
   } catch (error: unknown) {
@@ -523,17 +597,20 @@ export async function migrateSqliteStore(options: SqliteMigrationOptions): Promi
       version !== PRE_LEASE_SCHEMA_VERSION &&
       version !== PRE_FENCE_SCHEMA_VERSION &&
       version !== PRE_GLOBAL_GUARD_SCHEMA_VERSION &&
-      version !== PRE_SIGNOFF_SCHEMA_VERSION
+      version !== PRE_SIGNOFF_SCHEMA_VERSION &&
+      version !== PRE_UNIFIED_OPEN_SCHEMA_VERSION
     ) {
       throw new Error(
-        `SQLite migration requires schema ${LEGACY_SCHEMA_VERSION}, ${PRE_CANCEL_SCHEMA_VERSION}, ${PRE_LEASE_SCHEMA_VERSION}, ${PRE_FENCE_SCHEMA_VERSION}, ${PRE_GLOBAL_GUARD_SCHEMA_VERSION}, or ${PRE_SIGNOFF_SCHEMA_VERSION}; found ${version}`,
+        `SQLite migration requires schema ${LEGACY_SCHEMA_VERSION}, ${PRE_CANCEL_SCHEMA_VERSION}, ${PRE_LEASE_SCHEMA_VERSION}, ${PRE_FENCE_SCHEMA_VERSION}, ${PRE_GLOBAL_GUARD_SCHEMA_VERSION}, ${PRE_SIGNOFF_SCHEMA_VERSION}, or ${PRE_UNIFIED_OPEN_SCHEMA_VERSION}; found ${version}`,
       );
     }
     verifySchema(
       database,
       sourceDefinitions(version),
       `v${version}`,
-      version === PRE_GLOBAL_GUARD_SCHEMA_VERSION || version === PRE_SIGNOFF_SCHEMA_VERSION
+      version === PRE_GLOBAL_GUARD_SCHEMA_VERSION ||
+        version === PRE_SIGNOFF_SCHEMA_VERSION ||
+        version === PRE_UNIFIED_OPEN_SCHEMA_VERSION
         ? []
         : SQLITE_MIGRATION_SCHEMA_DEFINITIONS,
     );
@@ -549,6 +626,10 @@ export async function migrateSqliteStore(options: SqliteMigrationOptions): Promi
     }
     if (version === PRE_SIGNOFF_SCHEMA_VERSION) {
       runSignoffSchemaMigration(database);
+      return;
+    }
+    if (version === PRE_UNIFIED_OPEN_SCHEMA_VERSION) {
+      runUnifiedOpenSchemaMigration(database);
       return;
     }
     runLegacySchemaMigration(database, version);

@@ -25,7 +25,7 @@ function item(id: number, title: string): QuestLogItem {
     prState: null,
     priority: 2,
     repo: "quest",
-    status: "ready",
+    status: "open",
     title,
     updatedAt: "2026-08-05T20:00:00.000Z",
   };

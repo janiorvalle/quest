@@ -226,8 +226,8 @@ async function verifyIllegalTransition(factory: QuestStoreFactory): Promise<void
       }
       requireContract(
         rejection instanceof Error &&
-          rejection.message.includes(`[${code}] quest ${quest.id} is ready;`),
-        `${transition.action} from ready must reject with ${code}`,
+          rejection.message.includes(`[${code}] quest ${quest.id} is open;`),
+        `${transition.action} from open must reject with ${code}`,
       );
     }
     expect(await store.getQuest(quest.id)).toEqual(questBefore);
@@ -278,7 +278,7 @@ async function verifySignoff(factory: QuestStoreFactory): Promise<void> {
     requireContract(
       rejection instanceof Error &&
         rejection.message.includes(
-          `[SIGNOFF_NOT_COMPLETE] quest ${quest.id} is ready; sign-off applies only after review, merge, and completion`,
+          `[SIGNOFF_NOT_COMPLETE] quest ${quest.id} is open; sign-off applies only after review, merge, and completion`,
         ),
       "sign-off on a non-complete quest must reject with its stable next-step message",
     );
@@ -538,17 +538,17 @@ async function verifyBackfilledAdds(factory: QuestStoreFactory): Promise<void> {
     const beforeRejections = snapshotDump(await store.exportAll());
 
     await requireRejection(
-      store.addQuest({ ...taskInput("invalid historical task"), status: "open" }),
-      "task backfill at open must reject",
+      store.addQuest({ ...taskInput("invalid historical task"), verdict: "actionable" }),
+      "task backfill with a verdict must reject",
     );
     expect(await store.exportAll()).toEqual(beforeRejections);
     await requireRejection(
       store.addQuest({
         ...bugInput("invalid historical verdict"),
-        status: "ready",
-        verdict: "not-reproduced",
+        status: "dropped",
+        verdict: "actionable",
       }),
-      "ready bug backfill with a non-actionable verdict must reject",
+      "dropped bug backfill with an actionable verdict must reject",
     );
     expect(await store.exportAll()).toEqual(beforeRejections);
     const next = await store.addQuest(taskInput("after invalid backfill"));
@@ -567,7 +567,7 @@ async function verifyEventStateAtomicity(factory: QuestStoreFactory): Promise<vo
     const { store } = harness;
     const resolveActor = harness.resolveActor ?? identityActor;
     const baseline = await store.addQuest(taskInput("atomicity baseline"));
-    await requireEventState(store, baseline.id, "ready", ["add"]);
+    await requireEventState(store, baseline.id, "open", ["add"]);
     await requireEventRollback(
       harness,
       () => store.addQuest(taskInput("failed atomic add")),
@@ -579,7 +579,7 @@ async function verifyEventStateAtomicity(factory: QuestStoreFactory): Promise<vo
       added.id === baseline.id + 1,
       "failed addQuest must not consume the display ID before the next successful add",
     );
-    await requireEventState(store, added.id, "ready", ["add"]);
+    await requireEventState(store, added.id, "open", ["add"]);
 
     await requireEventRollback(
       harness,
@@ -614,13 +614,13 @@ async function verifyEventStateAtomicity(factory: QuestStoreFactory): Promise<vo
       "an injected addChainLink event failure must reject the mutation",
     );
     await requireAdded(store, link, resolveActor);
-    await requireEventState(store, target.id, "ready", ["add", "chain"]);
+    await requireEventState(store, target.id, "open", ["add", "chain"]);
     await requireEventRollback(
       harness,
       () => store.removeChainLink({ link, actor: resolveActor(actor) }),
       "an injected removeChainLink event failure must reject the mutation",
     );
-    await requireEventState(store, target.id, "ready", ["add", "chain"]);
+    await requireEventState(store, target.id, "open", ["add", "chain"]);
 
     const evidence: NewEvidence = {
       quest_id: added.id,
@@ -1056,7 +1056,7 @@ function taskInput(title: string): NewQuest {
     description: "",
     opened_by: actor,
     assignee: null,
-    status: "ready",
+    status: "open",
     verdict: null,
     verdict_notes: null,
     priority: 2,

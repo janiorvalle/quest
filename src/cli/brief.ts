@@ -42,7 +42,7 @@ function blockingRequires(brief: QuestBrief): readonly ChainQuestReference[] {
   return brief.chain_position.requires.filter((reference) => reference.status !== "complete");
 }
 
-const CLAIMABLE_STATUSES = new Set(["open", "ready"]);
+const CLAIMABLE_STATUSES = new Set(["open", "open"]);
 
 function blockedBanner(brief: QuestBrief): readonly string[] {
   if (!CLAIMABLE_STATUSES.has(brief.quest.status)) {

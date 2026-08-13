@@ -24,7 +24,7 @@ function task(repo: string, title: string) {
     description: title,
     opened_by: "test",
     assignee: null,
-    status: "ready",
+    status: "open",
     verdict: null,
     verdict_notes: null,
     priority: 2,

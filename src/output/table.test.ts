@@ -15,7 +15,7 @@ describe("human table formatter", () => {
         rows: [
           [3, "complete", "Schema source of truth", true],
           [10, "accepted", "Résumé ✅\nproof", false],
-          [11, "ready", null, false],
+          [11, "open", null, false],
         ],
       }),
     ).toMatchInlineSnapshot(`
@@ -23,7 +23,7 @@ describe("human table formatter", () => {
       --  --------  ----------------------  -----
        3  complete  Schema source of truth  true
       10  accepted  Résumé ✅ proof         false
-      11  ready     -                       false"
+      11  open      -                       false"
     `);
   });
 

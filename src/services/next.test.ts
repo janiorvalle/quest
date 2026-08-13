@@ -20,7 +20,7 @@ function quest(id: number, title: string, options: Partial<Quest> = {}): Quest {
     description: "",
     opened_by: "janior",
     assignee: null,
-    status: "ready",
+    status: "open",
     verdict: null,
     verdict_notes: null,
     priority: 2,
@@ -64,7 +64,7 @@ describe("next selection policy", () => {
     expect(selectNextQuest(backlog(quests), { repo: "quest" }).quest?.id).toBe(3);
   });
 
-  test("skips ready quests with incomplete requirements and reports each blocker", () => {
+  test("skips open quests with incomplete requirements and reports each blocker", () => {
     const quests = [
       quest(1, "Blocked high priority", { priority: 1 }),
       quest(2, "Accepted requirement", {

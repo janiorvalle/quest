@@ -48,6 +48,14 @@ export {
   registerMembersCommands,
 } from "./members";
 export {
+  type ExecuteReadyStatusMigrationCliOptions,
+  executeReadyStatusMigrationCli,
+  type MigrateCliRequest,
+  MigrateCliUsageError,
+  type RepositoryMigrationOperations,
+  registerMigrateCommand,
+} from "./migrate";
+export {
   type ExecutePlanCliOptions,
   executePlanCli,
   isPlanCliRequest,

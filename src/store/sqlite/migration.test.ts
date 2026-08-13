@@ -77,6 +77,23 @@ const PRE_SIGNOFF_CORE_SCHEMA_DEFINITIONS = SQLITE_CORE_SCHEMA_DEFINITIONS.map((
   sql: definition.type === "table" ? definition.sql.replaceAll(", 'signoff'", "") : definition.sql,
 }));
 
+function replaceQuestTableWithReadySchema(database: Database): void {
+  const questTable = SQLITE_CORE_SCHEMA_DEFINITIONS.find(
+    ({ name, type }) => name === "quests" && type === "table",
+  );
+  if (questTable === undefined) {
+    throw new Error("missing quests table fixture");
+  }
+  database.run("PRAGMA foreign_keys = OFF");
+  database.run("DROP TABLE quests");
+  database.run(questTable.sql.replace("'open', 'accepted'", "'open', 'ready', 'accepted'"));
+  for (const definition of SQLITE_CORE_SCHEMA_DEFINITIONS.filter(
+    ({ target, type }) => target === "quests" && type === "index",
+  )) {
+    database.run(definition.sql);
+  }
+}
+
 function preSignoffTableSql(name: "evidence" | "events", tableName: string): string {
   const definition = PRE_SIGNOFF_CORE_SCHEMA_DEFINITIONS.find(
     (candidate) => candidate.type === "table" && candidate.name === name,
@@ -156,7 +173,7 @@ async function createPreCancelStore(databasePath: string): Promise<void> {
     description: "",
     opened_by: "migration-test",
     assignee: null,
-    status: "ready",
+    status: "open",
     verdict: null,
     verdict_notes: null,
     priority: 2,
@@ -275,6 +292,7 @@ async function createPreSignoffStore(databasePath: string): Promise<void> {
     for (const { name } of SQLITE_TRIGGER_DEFINITIONS) {
       database.run(`DROP TRIGGER IF EXISTS ${name}`);
     }
+    replaceQuestTableWithReadySchema(database);
     for (const definition of SQLITE_CORE_SCHEMA_DEFINITIONS.filter(
       ({ target, type }) => (target === "evidence" || target === "events") && type === "index",
     )) {
@@ -331,7 +349,103 @@ async function createPreSignoffStore(databasePath: string): Promise<void> {
   }
 }
 
-describe("SQLite migrations to v7", () => {
+async function createPreUnifiedOpenStore(databasePath: string): Promise<string> {
+  const current = new SqliteStore(databasePath);
+  current.close();
+  const eventDetail = JSON.stringify({ backfill: false, status: "ready", title: "Ready work" });
+  const database = new Database(databasePath, { readwrite: true, strict: true });
+  try {
+    for (const { name } of SQLITE_TRIGGER_DEFINITIONS) {
+      database.run(`DROP TRIGGER IF EXISTS ${name}`);
+    }
+    replaceQuestTableWithReadySchema(database);
+    for (const { sql } of SQLITE_TRIGGER_DEFINITIONS) {
+      database.run(sql);
+    }
+    database.run(
+      `INSERT INTO quests (
+        id, repo, area, kind, title, description, opened_by, guild, assignee, status, verdict,
+        verdict_notes, priority, pr, predicted_files, reopen_count, lease_expires_at,
+        created_at, updated_at
+      ) VALUES (1, 'quest', 'store', 'task', 'Ready work', '', 'migration-test', NULL, NULL,
+        'ready', NULL, NULL, 2, NULL, '[]', 0, NULL, ?, ?)`,
+      ["2026-08-12T12:00:00.000Z", "2026-08-12T12:00:00.000Z"],
+    );
+    database.run(
+      `INSERT INTO events (id, quest_id, at, actor, action, detail)
+       VALUES (1, 1, ?, 'migration-test', 'add', ?)`,
+      ["2026-08-12T12:00:00.000Z", eventDetail],
+    );
+    database.run("PRAGMA user_version = 7");
+    return eventDetail;
+  } finally {
+    database.close();
+  }
+}
+
+describe("SQLite migrations to v8", () => {
+  test("converts v7 ready rows to open without rewriting event history", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-sqlite-migration-v7-open-"));
+    const databasePath = join(root, "quest.db");
+    const backupRoot = join(root, "backups");
+    try {
+      const eventDetail = await createPreUnifiedOpenStore(databasePath);
+      await migrateSqliteStore({ backupRoot, databasePath });
+
+      const migrated = new SqliteStore(databasePath);
+      try {
+        expect(await migrated.getQuest(1)).toMatchObject({ status: "open", title: "Ready work" });
+        expect((await migrated.events(1))[0]?.detail).toEqual(JSON.parse(eventDetail));
+      } finally {
+        migrated.close();
+      }
+      const raw = new Database(databasePath, { readonly: true, strict: true });
+      try {
+        expect(
+          raw.query<{ detail: string }, []>("SELECT detail FROM events WHERE id = 1").get(),
+        ).toEqual({ detail: eventDetail });
+      } finally {
+        raw.close();
+      }
+      expect(await readdir(join(backupRoot, "migrations"))).toHaveLength(1);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("restores a physical v7 snapshot through open-status migration", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-sqlite-migration-restore-v7-"));
+    const sourcePath = join(root, "source.db");
+    const destinationPath = join(root, "restored", "quest.db");
+
+    try {
+      const eventDetail = await createPreUnifiedOpenStore(sourcePath);
+      const restore = await new SqliteBackupDatabase(destinationPath).restoreSnapshot(
+        sourcePath,
+        "v7-ready-physical-backup",
+      );
+      await restore.commit();
+
+      expect(readSqliteSchemaVersion(destinationPath)).toBe(SQLITE_SCHEMA_VERSION);
+      const restored = new SqliteStore(destinationPath);
+      try {
+        expect(await restored.getQuest(1)).toMatchObject({ status: "open", title: "Ready work" });
+      } finally {
+        restored.close();
+      }
+      const raw = new Database(destinationPath, { readonly: true, strict: true });
+      try {
+        expect(
+          raw.query<{ detail: string }, []>("SELECT detail FROM events WHERE id = 1").get(),
+        ).toEqual({ detail: eventDetail });
+      } finally {
+        raw.close();
+      }
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   test("backs up and migrates a live v1 store through the compatibility probe", async () => {
     const root = await mkdtemp(join(tmpdir(), "quest-sqlite-migration-"));
     const databasePath = join(root, "state", "quest.db");
@@ -377,7 +491,7 @@ describe("SQLite migrations to v7", () => {
           opened_by: "janior",
           guild: null,
           assignee: null,
-          status: "ready",
+          status: "open",
           verdict: null,
           verdict_notes: null,
           priority: 2,
@@ -578,7 +692,7 @@ describe("SQLite migrations to v7", () => {
             `INSERT INTO quests (
               repo, kind, title, description, opened_by, status, priority,
               predicted_files, reopen_count, created_at, updated_at
-            ) VALUES ('other', 'task', 'blocked', '', 'test', 'ready', 2, '[]', 0, ?, ?)`,
+            ) VALUES ('other', 'task', 'blocked', '', 'test', 'open', 2, '[]', 0, ?, ?)`,
             ["2026-07-31T12:00:00.000Z", "2026-07-31T12:00:00.000Z"],
           ),
         ).toThrow("MIGRATION_REPOSITORY_FENCED");

@@ -16,7 +16,7 @@ function quest(id: number, changes: Partial<Quest>): Quest {
     description: `Description ${id}`,
     opened_by: "fixture",
     assignee: null,
-    status: "ready",
+    status: "open",
     verdict: null,
     verdict_notes: null,
     priority: 2,
@@ -198,11 +198,33 @@ describe("logical backup export", () => {
     expect(parseQuestBackupExport(JSON.stringify(previous))).toEqual(current);
   });
 
+  test("normalizes v9 ready rows while preserving historical event details", () => {
+    const current = fixtureDump();
+    const previous = {
+      ...current,
+      schema_version: 9,
+      quests: current.quests.map((item) => ({
+        ...item,
+        status: item.status === "open" ? "ready" : item.status,
+      })),
+      events: current.events.map((event, index) =>
+        index === 0 ? { ...event, detail: { backfill: false, status: "ready" } } : event,
+      ),
+    };
+
+    const restored = parseQuestBackupExport(JSON.stringify(previous));
+    expect(restored.schema_version).toBe(STORE_SCHEMA_VERSION);
+    expect(restored.quests.filter(({ status }) => status === "open")).toHaveLength(4);
+    expect(restored.events).toEqual(previous.events);
+  });
+
   test("rejects a logical backup tagged with an unsupported schema version", () => {
     const serialized = JSON.stringify({
       ...fixtureDump(),
       schema_version: STORE_SCHEMA_VERSION + 1,
     });
-    expect(() => parseQuestBackupExport(serialized)).toThrow();
+    expect(() => parseQuestBackupExport(serialized)).toThrow(
+      `[BACKUP_SCHEMA_NEWER] logical backup uses schema ${STORE_SCHEMA_VERSION + 1}; this binary supports through ${STORE_SCHEMA_VERSION}. Upgrade Quest to a version that supports schema ${STORE_SCHEMA_VERSION + 1}, then retry the restore. No data was changed.`,
+    );
   });
 });

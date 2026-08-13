@@ -522,7 +522,7 @@ export class SqliteStore implements QuestStore {
       `UPDATE quests
         SET assignee = ?, status = 'accepted', lease_expires_at = ?, updated_at = ?
         WHERE id = ? AND (
-          (assignee IS NULL AND status IN ('open', 'ready')) OR
+          (assignee IS NULL AND status = 'open') OR
           (status = 'accepted' AND lease_expires_at IS NOT NULL AND julianday(lease_expires_at) <= julianday(?))
         )`,
       parsed.owner,
@@ -1748,10 +1748,7 @@ export class SqliteStore implements QuestStore {
     ) {
       throw new Error(`illegal quest transition: ${current.status} -> reopen`);
     }
-    const reopenedStatus =
-      current.status === "dropped" && current.kind === "bug"
-        ? "open"
-        : statusAfterClaimRelease(current);
+    const reopenedStatus = statusAfterClaimRelease();
     this.#requireStatusTransition(current, current.status, reopenedStatus);
     return questSchema.parse({
       ...current,
@@ -1769,7 +1766,7 @@ export class SqliteStore implements QuestStore {
     assertLifecycleActionAllowed(current, transition.action);
     switch (transition.action) {
       case "abandon": {
-        const releasedStatus = statusAfterClaimRelease(current);
+        const releasedStatus = statusAfterClaimRelease();
         this.#requireStatusTransition(current, "accepted", releasedStatus);
         return questSchema.parse({
           ...current,

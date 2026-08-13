@@ -18,7 +18,7 @@ const quest = newQuestSchema.parse({
   pr: null,
   repo: "quest",
   reopen_count: 0,
-  status: "ready",
+  status: "open",
   title: "Reactive watch fixture",
   verdict: null,
   verdict_notes: null,

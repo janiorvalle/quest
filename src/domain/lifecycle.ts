@@ -63,17 +63,17 @@ function invalidStateError(
     case "verdict":
       return new LifecycleInvalidStateError(
         "VERDICT_INVALID_STATE",
-        `quest ${quest.id} is ${quest.status} (${quest.kind}); verdict applies only to bugs in open or accepted. For a task, use update or cancel. If this bug is ready, accept it before retrying; if it is turned_in, complete, or dropped, reopen it first. No state changed.`,
+        `quest ${quest.id} is ${quest.status} (${quest.kind}); verdict applies only to bugs in open or accepted. For a task, use update or cancel. If this bug is open, accept it before retrying; if it is turned_in, complete, or dropped, reopen it first. No state changed.`,
       );
     case "turnin":
       return new LifecycleInvalidStateError(
         "TURNIN_INVALID_STATE",
-        `quest ${quest.id} is ${quest.status}; turn-in requires accepted. If it is open or ready, run \`quest accept ${quest.id}\`; if it is turned_in, complete, or dropped, reopen it before accepting. Finish the work, then retry \`quest turnin ${quest.id}\` with the PR, summary, actual files, and evidence. No state changed.`,
+        `quest ${quest.id} is ${quest.status}; turn-in requires accepted. If it is open, run \`quest accept ${quest.id}\`; if it is turned_in, complete, or dropped, reopen it before accepting. Finish the work, then retry \`quest turnin ${quest.id}\` with the PR, summary, actual files, and evidence. No state changed.`,
       );
     case "complete":
       return new LifecycleInvalidStateError(
         "COMPLETE_INVALID_STATE",
-        `quest ${quest.id} is ${quest.status}; completion requires turned_in. If it is open or ready, run \`quest accept ${quest.id}\`; if it is complete or dropped, reopen it before accepting. Finish the work and \`quest turnin ${quest.id}\` with a PR, summary, actual files, and evidence before retrying \`quest complete ${quest.id}\`. No state changed.`,
+        `quest ${quest.id} is ${quest.status}; completion requires turned_in. If it is open, run \`quest accept ${quest.id}\`; if it is complete or dropped, reopen it before accepting. Finish the work and \`quest turnin ${quest.id}\` with a PR, summary, actual files, and evidence before retrying \`quest complete ${quest.id}\`. No state changed.`,
       );
     case "signoff":
       return new LifecycleInvalidStateError(
@@ -109,9 +109,8 @@ export function assertLifecycleActionAllowed(
 export function initialStatusForKind(kind: QuestKind): QuestStatus {
   switch (kind) {
     case "bug":
-      return "open";
     case "task":
-      return "ready";
+      return "open";
     default:
       return assertNever(kind);
   }
@@ -120,24 +119,21 @@ export function initialStatusForKind(kind: QuestKind): QuestStatus {
 export function isLegalStatusTransition(from: QuestStatus, to: QuestStatus): boolean {
   switch (from) {
     case "open":
-      return to === "ready" || to === "accepted" || to === "dropped";
-    case "ready":
       return to === "accepted" || to === "dropped";
     case "accepted":
-      return to === "open" || to === "ready" || to === "turned_in" || to === "dropped";
+      return to === "open" || to === "turned_in" || to === "dropped";
     case "turned_in":
-      return to === "open" || to === "ready" || to === "complete" || to === "dropped";
+      return to === "open" || to === "complete" || to === "dropped";
     case "complete":
-      return to === "open" || to === "ready";
     case "dropped":
-      return to === "open" || to === "ready";
+      return to === "open";
     default:
       return assertNever(from);
   }
 }
 
 export function isDispatchableQuest(value: Pick<Quest, "kind" | "status">): boolean {
-  return value.status === "ready" || (value.kind === "bug" && value.status === "open");
+  return value.status === "open";
 }
 
 export function canApplyVerdict(kind: QuestKind, status: QuestStatus): boolean {
@@ -147,7 +143,7 @@ export function canApplyVerdict(kind: QuestKind, status: QuestStatus): boolean {
 export function statusForVerdict(verdict: Verdict): QuestStatus {
   switch (verdict) {
     case "actionable":
-      return "ready";
+      return "open";
     case "not-reproduced":
       return "dropped";
     case "works-as-intended":
@@ -165,20 +161,22 @@ export function statusForRetestVerdict(verdict: Verdict): QuestStatus {
   return verdict === "not-reproduced" ? "open" : statusForVerdict(verdict);
 }
 
-export function statusAfterClaimRelease(value: Pick<Quest, "kind" | "verdict">): QuestStatus {
-  return value.kind === "bug" && value.verdict !== "actionable" ? "open" : "ready";
+export function statusAfterClaimRelease(): QuestStatus {
+  return "open";
 }
 
 export function isValidBackfill(value: Pick<Quest, "kind" | "status" | "verdict">): boolean {
   if (value.kind === "task") {
-    return value.verdict === null && value.status !== "open";
+    return value.verdict === null;
   }
 
   switch (value.status) {
     case "open":
-      return value.verdict === null || value.verdict === "not-reproduced";
-    case "ready":
-      return value.verdict === "actionable";
+      return (
+        value.verdict === null ||
+        value.verdict === "actionable" ||
+        value.verdict === "not-reproduced"
+      );
     case "accepted":
     case "turned_in":
     case "complete":

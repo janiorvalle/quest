@@ -10,6 +10,7 @@ import {
 } from "../output";
 import { type MigrationResult, migrationBackendSchema, migrationResultSchema } from "../schema";
 import type { Clock } from "../store";
+import type { CliPrompter } from "./prompt";
 import type { CliFormat } from "./scope";
 
 const nonEmptyTextSchema = z.string().trim().min(1);
@@ -23,6 +24,11 @@ export type RepositoryMigrationRequest = {
 export type MigrateCliRequest =
   | {
       readonly command: "migrate";
+    }
+  | {
+      readonly command: "migrate";
+      readonly deployment: string;
+      readonly readyStatuses: true;
     }
   | {
       readonly command: "migrate";
@@ -45,6 +51,19 @@ export interface ExecuteRepositoryMigrationCliOptions {
   readonly migration: RepositoryMigrationOperations;
   readonly output: CliOutputBoundary;
   readonly request: Extract<MigrateCliRequest, { readonly repository: string }>;
+}
+
+export interface ExecuteReadyStatusMigrationCliOptions {
+  readonly clock: Clock;
+  readonly deployment: string;
+  readonly environment: Readonly<Record<string, string | undefined>>;
+  readonly format: CliFormat;
+  readonly migrate: (
+    deployment: string,
+    adminSecret: string,
+  ) => Promise<{ readonly converted: number; readonly total: number; readonly unchanged: number }>;
+  readonly output: CliOutputBoundary;
+  readonly prompter: CliPrompter;
 }
 
 export class MigrateCliUsageError extends Error {
@@ -90,7 +109,17 @@ function captureSchemaMigration(
   capture: MigrateRequestCapture,
   repository: string | undefined,
   deployment: string | undefined,
+  readyStatuses: boolean,
 ): void {
+  if (readyStatuses) {
+    if (repository !== undefined || deployment === undefined) {
+      throw new MigrateCliUsageError(
+        "ready-status migration requires `quest migrate --ready-statuses --deployment <url>`",
+      );
+    }
+    capture.set({ command: "migrate", deployment, readyStatuses: true });
+    return;
+  }
   if (repository !== undefined || deployment !== undefined) {
     throw new MigrateCliUsageError(
       "schema migration is `quest migrate`; repository replay is `quest migrate --to <sqlite|convex> <repo>`",
@@ -132,18 +161,73 @@ export function registerMigrateCommand(program: Command, capture: MigrateRequest
       ]),
     )
     .addOption(new Option("--deployment <url>", "Convex deployment for --to convex"))
+    .option("--ready-statuses", "convert legacy Convex ready rows to open")
     .action(function (this: Command, repository: string | undefined) {
       const target = optionalTarget(this);
       const normalizedRepository =
         repository === undefined ? undefined : requiredRepository(repository);
       const deployment = optionalString(this, "deployment");
+      const readyStatuses = this.getOptionValue("readyStatuses") === true;
 
       if (target === undefined) {
-        captureSchemaMigration(capture, normalizedRepository, deployment);
+        captureSchemaMigration(capture, normalizedRepository, deployment, readyStatuses);
         return;
+      }
+      if (readyStatuses) {
+        throw new MigrateCliUsageError("--ready-statuses cannot be combined with --to");
       }
       captureRepositoryMigration(capture, normalizedRepository, target, deployment);
     });
+}
+
+async function adminSecret(options: ExecuteReadyStatusMigrationCliOptions): Promise<string> {
+  const configured = options.environment["QUEST_ADMIN_SECRET"]?.trim();
+  if (configured !== undefined && configured !== "") {
+    return configured;
+  }
+  const answer =
+    options.prompter.askSecret === undefined
+      ? await options.prompter.ask("Admin secret: ")
+      : await options.prompter.askSecret("Admin secret: ");
+  const secret = answer.trim();
+  if (secret === "") {
+    throw new MigrateCliUsageError(
+      "[QUEST_SECRET_REQUIRED] enter a non-empty secret and retry; no Convex request was sent",
+    );
+  }
+  return secret;
+}
+
+const readyStatusMigrationSchema = z.strictObject({
+  converted: z.int().nonnegative(),
+  total: z.int().nonnegative(),
+  unchanged: z.int().nonnegative(),
+});
+
+export async function executeReadyStatusMigrationCli(
+  options: ExecuteReadyStatusMigrationCliOptions,
+): Promise<ExitCode> {
+  const result = readyStatusMigrationSchema.parse(
+    await options.migrate(options.deployment, await adminSecret(options)),
+  );
+  if (options.format === "json") {
+    options.output.write(
+      formatQuestReport(
+        buildQuestReport(readyStatusMigrationSchema, {
+          command: "migrate",
+          generated_at: await options.clock.now(),
+          filters: {},
+          warnings: [],
+          data: result,
+        }),
+      ),
+    );
+  } else {
+    options.output.write(
+      `Converted ${result.converted} ready quests to open; ${result.unchanged} unchanged (${result.total} total)\n`,
+    );
+  }
+  return EXIT_SUCCESS;
 }
 
 function renderMigration(result: MigrationResult): string {

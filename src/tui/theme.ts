@@ -145,8 +145,7 @@ export const DENSE_THEME: QuestTheme = {
       accepted: "in progress",
       complete: "verified",
       dropped: "closed",
-      open: "needs triage",
-      ready: "unclaimed",
+      open: "unclaimed",
       turned_in: "awaiting verification",
     },
     statsTitle: "quest · stats",
@@ -178,8 +177,7 @@ export const DENSE_THEME: QuestTheme = {
     accepted: { color: "#7fa3b8", glyph: "◐", label: "active" },
     complete: { color: "#7bc96f", glyph: "✓", label: "complete" },
     dropped: { color: "#37444b", glyph: "✕", label: "dropped" },
-    open: { color: "#d1706b", glyph: "○", label: "open" },
-    ready: { color: "#62c4c9", glyph: "●", label: "ready" },
+    open: { color: "#62c4c9", glyph: "●", label: "open" },
     turned_in: { color: "#e3c05c", glyph: "◆", label: "review" },
   },
 };
@@ -220,8 +218,7 @@ export const TAVERN_THEME: QuestTheme = {
     // ⊘ rather than dense's ✕: at terminal sizes a text-presentation ⚔ reads as a small crossed x,
     // and two states must never share a mark.
     dropped: { color: "#8a7d68", glyph: "⊘", label: "dropped" },
-    open: { color: "#c9973f", glyph: "○", label: "open" },
-    ready: { color: "#ffd100", glyph: "!", label: "ready" },
+    open: { color: "#ffd100", glyph: "!", label: "open" },
     turned_in: { color: "#ffd100", glyph: "?", label: "review" },
   },
 };
@@ -267,8 +264,7 @@ export const LEDGER_THEME: QuestTheme = {
     accepted: { ...DENSE_THEME.status.accepted, color: "#2f6f4f" },
     complete: { ...DENSE_THEME.status.complete, color: "#605c51" },
     dropped: { ...DENSE_THEME.status.dropped, color: "#6f695c" },
-    open: { ...DENSE_THEME.status.open, color: "#935e13" },
-    ready: { ...DENSE_THEME.status.ready, color: "#1f5c3d" },
+    open: { ...DENSE_THEME.status.open, color: "#1f5c3d" },
     turned_in: { ...DENSE_THEME.status.turned_in, color: "#81661d" },
   },
 };

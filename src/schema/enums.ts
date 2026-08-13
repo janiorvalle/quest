@@ -1,13 +1,6 @@
 import { z } from "zod";
 
-export const questStatusSchema = z.enum([
-  "open",
-  "ready",
-  "accepted",
-  "turned_in",
-  "complete",
-  "dropped",
-]);
+export const questStatusSchema = z.enum(["open", "accepted", "turned_in", "complete", "dropped"]);
 export type QuestStatus = z.infer<typeof questStatusSchema>;
 
 export const questKindSchema = z.enum(["bug", "task"]);

@@ -18,7 +18,7 @@ describe("quest.report/v1 envelope", () => {
     const report = buildQuestReport(listDataSchema, {
       command: "list",
       generated_at: "2026-07-29T12:34:56Z",
-      filters: { repo: "quest", status: "ready" },
+      filters: { repo: "quest", status: "open" },
       warnings: ["quest 12 skipped: blocked by 11"],
       data: {
         quests: [{ id: 10, title: "Output layer: envelopes + tables" }],

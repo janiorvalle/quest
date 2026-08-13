@@ -45,7 +45,7 @@ function quest(id: number, repo: string): QuestDump["quests"][number] {
     opened_by: "test",
     guild: null,
     assignee: null,
-    status: "ready",
+    status: "open",
     verdict: null,
     verdict_notes: null,
     priority: 2,

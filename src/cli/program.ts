@@ -86,6 +86,7 @@ import {
 } from "./members";
 import {
   type ExecuteRepositoryMigrationCliOptions,
+  executeReadyStatusMigrationCli,
   executeRepositoryMigrationCli,
   type MigrateCliRequest,
   MigrateCliUsageError,
@@ -603,6 +604,23 @@ async function executeMigrateRequest(
 ): Promise<ExitCode> {
   if ("repository" in request) {
     return executeRepositoryMigrationRequest(flags, request, dependencies);
+  }
+  if ("readyStatuses" in request) {
+    const onboarding = dependencies.onboarding;
+    if (onboarding?.migrateReadyStatuses === undefined) {
+      throw new MigrateCliUsageError(
+        "Convex ready-status migration is unavailable in this runtime; run the installed Quest binary and retry",
+      );
+    }
+    return executeReadyStatusMigrationCli({
+      clock: dependencies.clock,
+      deployment: request.deployment,
+      environment: dependencies.environment ?? process.env,
+      format: flags.format,
+      migrate: onboarding.migrateReadyStatuses,
+      output: dependencies.output,
+      prompter: dependencies.prompter,
+    });
   }
   return executeStoreMigration(
     dependencies,

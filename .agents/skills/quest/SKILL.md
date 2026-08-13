@@ -209,8 +209,7 @@ writes renew the lease; use `quest --format json touch <id>` for long-running
 work. Existing recorded expiry timestamps are never recalculated. The tradeoff
 is that a crashed manual lane can hold its claim for up to a day: `abandon`
 releases it and `doctor` still reports stale claims. Expiry is passive: reads
-return the quest to its dispatch state (`open` for an untriaged bug, otherwise
-`ready`), so re-accept before continuing. If another owner
+return the quest to `open`, so re-accept before continuing. If another owner
 reclaims it, stop and use the new owner's handoff instead of writing to the
 quest.
 
@@ -247,7 +246,7 @@ printf '%s' '{"title":"Short title","kind":"task","area":"<area>","description":
   quest --format json add --json -
 ```
 
-Tasks start `ready`; bugs start `open`. `add` performs fuzzy duplicate
+Tasks and bugs both start `open`. `add` performs fuzzy duplicate
 detection before creating. Inspect candidates on `outcome: duplicates`; use
 `--force` only after deciding they are not duplicates. `--status` and
 `--verdict` are backfill options for historical migration, not normal intake.
@@ -303,9 +302,8 @@ update <id> [--title title] [--area area] [--priority 1|2|3] [--guild guild]
 
 `cancel` moves any non-terminal quest to `dropped`; bugs receive `wont-do`,
 while tasks keep a null verdict and record the reason in notes. `reopen` is a
-forward correction: `complete` returns to `ready` (or an untriaged bug to
-`open`), dropped bugs return to `open`, and dropped tasks return to `ready`;
-notes are required and the count increments.
+forward correction: `complete` and `dropped` return to `open`; notes are
+required and the count increments.
 
 `signoff` is the QA attestation verb. It accepts one or more IDs, validates that
 every quest is already `complete` before writing any of them, records the notes
