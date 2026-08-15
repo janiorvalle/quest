@@ -15,7 +15,11 @@ import {
   questStatusSchema,
   verdictSchema,
 } from "../../schema";
-import { defineQuestStoreContract, type QuestStoreFactory } from "../contract";
+import {
+  defineQuestStoreContract,
+  defineReviewerHandoffContract,
+  type QuestStoreFactory,
+} from "../contract";
 import { SqliteStore } from "./adapter";
 import { SQLITE_SCHEMA_STATEMENTS, SQLITE_SCHEMA_VERSION } from "./ddl";
 
@@ -88,6 +92,7 @@ const sqliteContractFactory: QuestStoreFactory = async () => {
 };
 
 defineQuestStoreContract("SqliteStore contract", sqliteContractFactory);
+defineReviewerHandoffContract("SqliteStore reviewer handoff contract", sqliteContractFactory);
 
 describe("SqliteStore", () => {
   test("enables WAL, installs the schema, persists rows, and writes schema-valid timestamps", async () => {
@@ -960,7 +965,7 @@ describe("SqliteStore", () => {
           actor: "ryan",
           changes: { title: "stale" },
         }),
-      ).rejects.toThrow("stop, amy has it");
+      ).rejects.toThrow("[QUEST_LEASE_HELD] quest 1 lease owned by amy; stop, amy has it");
       expect((await store.events(quest.id)).map(({ action }) => action)).toEqual([
         "add",
         "accept",

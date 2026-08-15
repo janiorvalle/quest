@@ -2,12 +2,17 @@ export { findChainCyclePath, wouldCreateChainCycle } from "./chains";
 export { scoreDedupCandidate } from "./dedup";
 export { allocateDisplayId } from "./display-id";
 export {
+  assertActiveLeaseOwner,
+  assertLeaseOwner,
   DEFAULT_LEASE_TTL_MINUTES,
   isLeaseExpired,
   LEASE_TTL_MS,
+  type LeaseInvalidStateCode,
+  LeaseInvalidStateError,
   leaseExpiry,
   materializeExpiredLease,
   normalizeLeaseTtlMinutes,
+  transitionRequiresLeaseOwner,
 } from "./leases";
 export {
   assertLifecycleActionAllowed,

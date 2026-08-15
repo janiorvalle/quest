@@ -8,21 +8,24 @@ import {
 import { ConvexError, v } from "convex/values";
 import {
   allocateDisplayId,
+  assertActiveLeaseOwner,
+  assertLeaseOwner,
   assertLifecycleActionAllowed,
-  canApplyVerdict,
   computeQuestPlan,
   findChainCyclePath,
   isDispatchableQuest,
   isLeaseExpired,
   isLegalStatusTransition,
   isValidBackfill,
+  LeaseInvalidStateError,
   LifecycleInvalidStateError,
   leaseExpiry,
   materializeExpiredLease,
-  signoffNotCompleteMessage,
+  signoffNotCompleteInstruction,
   statusAfterClaimRelease,
   statusForRetestVerdict,
   statusForVerdict,
+  transitionRequiresLeaseOwner,
 } from "../src/domain";
 import {
   type AcceptQuestInput,
@@ -70,6 +73,33 @@ import type schema from "./schema";
 
 const emptyArgs = {};
 const failureArgs = { test_failure: v.optional(v.boolean()) };
+
+type QuestDomainErrorCode =
+  | "BACKUP_FULL_RESTORE_FENCED"
+  | "CONVEX_RESTORE_IN_PROGRESS"
+  | "CONVEX_RESTORE_PRECONDITION_FAILED"
+  | "CONVEX_RESTORE_SESSION_MISSING"
+  | "CONVEX_RESTORE_STAGE_CHANGED"
+  | "CONVEX_RESTORE_TOKEN_REQUIRED"
+  | "MIGRATION_COMMITTED"
+  | "MIGRATION_COMMITTED_STATE_CHANGED"
+  | "MIGRATION_CONCURRENT_WRITE"
+  | "MIGRATION_FENCE_OWNER_MISMATCH"
+  | "MIGRATION_FENCE_RECOVERY_BLOCKED"
+  | "MIGRATION_FENCE_STATUS_UNKNOWN"
+  | "MIGRATION_REPOSITORY_FENCED"
+  | "MIGRATION_REPOSITORY_REQUIRED"
+  | "MIGRATION_RESTORE_TOKEN_REQUIRED"
+  | "QUEST_BACKFILL_INVALID"
+  | "QUEST_NOT_FOUND"
+  | "SIGNOFF_EVIDENCE_OUTSIDE_BATCH"
+  | "SIGNOFF_EVIDENCE_STAGE_REQUIRED"
+  | "SIGNOFF_NOT_COMPLETE"
+  | "SIGNOFF_TRANSITION_REQUIRED";
+
+function failQuestDomain(code: QuestDomainErrorCode, message: string): never {
+  throw new ConvexError({ code, message });
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> & { readonly id?: unknown } {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -203,7 +233,10 @@ async function findQuestRecord(ctx: QueryContext, id: number) {
 async function requireQuestRecord(ctx: QueryContext, id: number) {
   const document = await findQuestRecord(ctx, id);
   if (document === null) {
-    throw new Error(`quest ${id} does not exist; check the display ID and retry`);
+    return failQuestDomain(
+      "QUEST_NOT_FOUND",
+      `quest ${id} does not exist; check the display ID and retry`,
+    );
   }
   return document;
 }
@@ -278,7 +311,10 @@ function findQuestInSnapshot(quests: readonly Quest[], id: number): Quest | unde
 function requireQuestInSnapshot(quests: readonly Quest[], id: number): Quest {
   const quest = findQuestInSnapshot(quests, id);
   if (quest === undefined) {
-    throw new Error(`quest ${id} does not exist; check the display ID and retry`);
+    return failQuestDomain(
+      "QUEST_NOT_FOUND",
+      `quest ${id} does not exist; check the display ID and retry`,
+    );
   }
   return quest;
 }
@@ -319,63 +355,11 @@ function hasAcceptedEvent(events: readonly Event[], id: number, actor: string): 
   );
 }
 
-function requireLeaseOwner(
-  quest: Quest,
-  events: readonly Event[],
-  actor: string,
-  timestamp: string,
-): void {
-  if (quest.status !== "accepted") {
-    return;
-  }
-  if (quest.lease_expires_at === null || isLeaseExpired(quest.lease_expires_at, timestamp)) {
-    if (quest.assignee === actor) {
-      throw new Error(`quest ${quest.id} lease expired; re-accept to continue`);
-    }
-    if (hasAcceptedEvent(events, quest.id, actor)) {
-      throw new Error(`quest ${quest.id} lease expired; stop, ${quest.assignee} has it`);
-    }
-    throw new Error(`quest ${quest.id} lease expired; re-accept to continue`);
-  }
-  if (quest.assignee === actor) {
-    return;
-  }
-  if (hasAcceptedEvent(events, quest.id, actor)) {
-    throw new Error(`quest ${quest.id} lease expired; stop, ${quest.assignee} has it`);
-  }
-  if (quest.assignee === null) {
-    throw new Error(`quest ${quest.id} has no active lease; re-accept to continue`);
-  }
-  throw new Error(
-    `quest ${quest.id} lease owned by ${quest.assignee}; stop, ${quest.assignee} has it`,
-  );
-}
-
-function requireActiveLeaseOwner(quest: Quest, owner: string, timestamp: string): void {
-  if (quest.status !== "accepted") {
-    throw new Error(`quest ${quest.id} is not accepted; re-accept to continue`);
-  }
-  if (quest.assignee !== owner) {
-    if (quest.assignee === null) {
-      throw new Error(`quest ${quest.id} has no active lease; re-accept to continue`);
-    }
-    throw new Error(
-      `quest ${quest.id} lease owned by ${quest.assignee}; stop, ${quest.assignee} has it`,
-    );
-  }
-  if (quest.lease_expires_at === null || isLeaseExpired(quest.lease_expires_at, timestamp)) {
-    throw new Error(`quest ${quest.id} lease expired; re-accept to continue`);
-  }
-}
-
 function applyVerdict(
   current: Quest,
   transition: Extract<QuestTransition, { action: "verdict" }>,
   timestamp: string,
 ): Quest {
-  if (!canApplyVerdict(current.kind, current.status)) {
-    throw new Error(`quest ${current.id} cannot receive a verdict from ${current.status}`);
-  }
   const status = transition.retest
     ? statusForRetestVerdict(transition.verdict)
     : statusForVerdict(transition.verdict);
@@ -412,13 +396,6 @@ function applyReopen(
   transition: Extract<QuestTransition, { action: "reopen" }>,
   timestamp: string,
 ): Quest {
-  if (
-    current.status !== "turned_in" &&
-    current.status !== "complete" &&
-    current.status !== "dropped"
-  ) {
-    throw new Error(`illegal quest transition: ${current.status} -> reopen`);
-  }
   const reopenedStatus = statusAfterClaimRelease();
   requireStatusTransition(current, current.status, reopenedStatus);
   return questSchema.parse({
@@ -492,9 +469,6 @@ function applyTransition(current: Quest, transition: QuestTransition, timestamp:
         updated_at: timestamp,
       });
     case "signoff":
-      if (current.status !== "complete") {
-        throw new Error(signoffNotCompleteMessage(current.id, current.status));
-      }
       return current;
     case "cancel":
       return applyCancel(current, transition, timestamp);
@@ -505,19 +479,23 @@ function applyTransition(current: Quest, transition: QuestTransition, timestamp:
   }
 }
 
+function applyDomainGuardForMutation<Result>(guard: () => Result): Result {
+  try {
+    return guard();
+  } catch (error: unknown) {
+    if (error instanceof LifecycleInvalidStateError || error instanceof LeaseInvalidStateError) {
+      throw new ConvexError({ code: error.code, message: error.receiverMessage });
+    }
+    throw error;
+  }
+}
+
 function applyTransitionForMutation(
   current: Quest,
   transition: QuestTransition,
   timestamp: string,
 ): Quest {
-  try {
-    return applyTransition(current, transition, timestamp);
-  } catch (error: unknown) {
-    if (error instanceof LifecycleInvalidStateError) {
-      throw new ConvexError({ code: error.code, message: error.receiverMessage });
-    }
-    throw error;
-  }
+  return applyDomainGuardForMutation(() => applyTransition(current, transition, timestamp));
 }
 
 function filterQuests(
@@ -1013,7 +991,8 @@ async function requireNoRestoreLease(ctx: MutationContext): Promise<void> {
     await ctx.db.delete(lease._id);
     return;
   }
-  throw new Error(
+  failQuestDomain(
+    "CONVEX_RESTORE_IN_PROGRESS",
     "Convex restore is in progress; retry after the active restore commits or rolls back",
   );
 }
@@ -1021,11 +1000,17 @@ async function requireNoRestoreLease(ctx: MutationContext): Promise<void> {
 async function requireRestoreLease(ctx: MutationContext, token: string) {
   const lease = await findRestoreLease(ctx, token);
   if (lease === null) {
-    throw new Error("Convex restore session is missing or expired; retry the restore");
+    return failQuestDomain(
+      "CONVEX_RESTORE_SESSION_MISSING",
+      "Convex restore session is missing or expired; retry the restore",
+    );
   }
   const expiresAt = Date.parse(lease.expires_at);
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.parse(now())) {
-    throw new Error("Convex restore session is missing or expired; retry the restore");
+    return failQuestDomain(
+      "CONVEX_RESTORE_SESSION_MISSING",
+      "Convex restore session is missing or expired; retry the restore",
+    );
   }
   return lease;
 }
@@ -1036,8 +1021,9 @@ async function requireRepositoryNotFenced(ctx: MutationContext, repository: stri
     .withIndex("by_repo", (query) => query.eq("repo", repository))
     .unique();
   if (fence !== null && fence.unfenced !== true) {
-    throw new Error(
-      `[MIGRATION_REPOSITORY_FENCED] repository ${repository} is fenced after a backend migration; refresh routing before retrying writes`,
+    failQuestDomain(
+      "MIGRATION_REPOSITORY_FENCED",
+      `repository ${repository} is fenced after a backend migration; refresh routing before retrying writes`,
     );
   }
 }
@@ -1148,22 +1134,25 @@ async function clearExpiredFenceRecoveryRestore(
   }
   const pendingLease = await findRestoreLease(ctx, token);
   if (pendingLease === null) {
-    throw new Error(
-      `[MIGRATION_FENCE_STATUS_UNKNOWN] repository ${repo} has a fence recovery restore without a live restore lease; inspect restore state before retrying`,
+    failQuestDomain(
+      "MIGRATION_FENCE_STATUS_UNKNOWN",
+      `repository ${repo} has a fence recovery restore without a live restore lease; inspect restore state before retrying`,
     );
   }
   const current = Date.parse(now());
   const expiresAt = Date.parse(pendingLease.expires_at);
   if (!Number.isFinite(expiresAt) || expiresAt > current) {
-    throw new Error(
-      `[MIGRATION_FENCE_RECOVERY_BLOCKED] repository ${repo} is being restored; retry after the backup restore commits or rolls back`,
+    failQuestDomain(
+      "MIGRATION_FENCE_RECOVERY_BLOCKED",
+      `repository ${repo} is being restored; retry after the backup restore commits or rolls back`,
     );
   }
   if (pendingLease.committed === true) {
     const committed = await exportDump(ctx, parseLeaseCutoff(pendingLease.lease_cutoff));
     if (!(await matchesSnapshotFingerprint(committed, pendingLease.expected_hash))) {
-      throw new Error(
-        "[MIGRATION_COMMITTED_STATE_CHANGED] the committed Convex restore no longer matches its recorded snapshot; inspect the destination before retrying",
+      failQuestDomain(
+        "MIGRATION_COMMITTED_STATE_CHANGED",
+        "the committed Convex restore no longer matches its recorded snapshot; inspect the destination before retrying",
       );
     }
   }
@@ -1203,8 +1192,9 @@ async function verifyCommittedFenceSnapshot(
   }
   const current = await exportDump(ctx, parseLeaseCutoff(recoveryCutoff ?? now()));
   if (!(await matchesRepositorySnapshotFingerprint(current, repo, recoveryHash))) {
-    throw new Error(
-      `[MIGRATION_FENCE_RECOVERY_BLOCKED] repository ${repo} changed after its committed migration; inspect the destination and routing before retrying`,
+    failQuestDomain(
+      "MIGRATION_FENCE_RECOVERY_BLOCKED",
+      `repository ${repo} changed after its committed migration; inspect the destination and routing before retrying`,
     );
   }
 }
@@ -1217,8 +1207,9 @@ async function verifyLegacyFenceSnapshot(
 ): Promise<void> {
   const current = await exportDump(ctx, parseLeaseCutoff(leaseCutoff));
   if (!(await matchesSnapshotFingerprint(current, expectedHash))) {
-    throw new Error(
-      `[MIGRATION_FENCE_RECOVERY_BLOCKED] repository ${repo} changed after its committed migration; inspect the destination and routing before retrying`,
+    failQuestDomain(
+      "MIGRATION_FENCE_RECOVERY_BLOCKED",
+      `repository ${repo} changed after its committed migration; inspect the destination and routing before retrying`,
     );
   }
 }
@@ -1238,20 +1229,23 @@ async function recoverCommittedMigrationFence(
     return undefined;
   }
   if (existing.recovery_hash === undefined) {
-    throw new Error(
-      `[MIGRATION_FENCE_STATUS_UNKNOWN] repository ${repo} has a committed fence without a recovery fingerprint; verify routing and use the owning migration session or a privileged deployment recovery before retrying`,
+    failQuestDomain(
+      "MIGRATION_FENCE_STATUS_UNKNOWN",
+      `repository ${repo} has a committed fence without a recovery fingerprint; verify routing and use the owning migration session or a privileged deployment recovery before retrying`,
     );
   }
   const lease = await findRestoreLease(ctx);
   if (lease !== null) {
     if (lease.committed !== true) {
-      throw new Error(
-        `[MIGRATION_FENCE_STATUS_UNKNOWN] repository ${repo} has a committed fence but its owning lease is not committed; inspect migration state before retrying`,
+      failQuestDomain(
+        "MIGRATION_FENCE_STATUS_UNKNOWN",
+        `repository ${repo} has a committed fence but its owning lease is not committed; inspect migration state before retrying`,
       );
     }
     if (existing.lease_token !== lease.token) {
-      throw new Error(
-        `[MIGRATION_FENCE_OWNER_MISMATCH] repository ${repo} is fenced by another migration; recover or clear the owning migration before retrying`,
+      failQuestDomain(
+        "MIGRATION_FENCE_OWNER_MISMATCH",
+        `repository ${repo} is fenced by another migration; recover or clear the owning migration before retrying`,
       );
     }
     const current = Date.parse(now());
@@ -1260,8 +1254,9 @@ async function recoverCommittedMigrationFence(
       existing.unfenced !== true &&
       (!Number.isFinite(expiresAt) || !Number.isFinite(current) || expiresAt > current)
     ) {
-      throw new Error(
-        "[MIGRATION_FENCE_RECOVERY_BLOCKED] an active committed Convex migration lease still owns the fence; retry with the owning migration or wait for it to expire",
+      failQuestDomain(
+        "MIGRATION_FENCE_RECOVERY_BLOCKED",
+        "an active committed Convex migration lease still owns the fence; retry with the owning migration or wait for it to expire",
       );
     }
   }
@@ -1317,7 +1312,8 @@ export const addQuest = mutationGeneric({
     const parsed = newQuestSchema.parse(args.input);
     await requireRepositoryNotFenced(ctx, parsed.repo);
     if (!isValidBackfill(parsed)) {
-      throw new Error(
+      return failQuestDomain(
+        "QUEST_BACKFILL_INVALID",
         `invalid backfilled state for ${parsed.kind} quest: ${parsed.status}/${String(parsed.verdict)}`,
       );
     }
@@ -1460,7 +1456,7 @@ export const touchQuest = mutationGeneric({
     const current = parseQuestDocument(record);
     await requireRepositoryNotFenced(ctx, current.repo);
     const timestamp = now();
-    requireActiveLeaseOwner(current, input.owner, timestamp);
+    applyDomainGuardForMutation(() => assertActiveLeaseOwner(current, input.owner, timestamp));
     const updated = renewLease(current, timestamp, input.lease_ttl_minutes);
     await ctx.db.replace(record._id, updated);
     await appendEvent(
@@ -1496,8 +1492,15 @@ export const transition = mutationGeneric({
     const timestamp = now();
     const events = await readQuestEvents(ctx, current.id);
     const updated = applyTransitionForMutation(current, transitionInput, timestamp);
-    if (transitionInput.action !== "signoff") {
-      requireLeaseOwner(current, events, transitionInput.actor, timestamp);
+    if (transitionRequiresLeaseOwner(current, transitionInput.action)) {
+      applyDomainGuardForMutation(() =>
+        assertLeaseOwner(
+          current,
+          transitionInput.actor,
+          timestamp,
+          hasAcceptedEvent(events, current.id, transitionInput.actor),
+        ),
+      );
     }
     if (transitionInput.action !== "signoff") {
       await ctx.db.replace(record._id, updated);
@@ -1561,17 +1564,24 @@ function groupSignoffEvidence(
   const evidenceByQuest = new Map<number, NewEvidence[]>();
   for (const parsedEvidence of input.evidence) {
     if (parsedEvidence.stage !== "signoff") {
-      throw new Error("sign-off batches accept only signoff-stage evidence");
+      failQuestDomain(
+        "SIGNOFF_EVIDENCE_STAGE_REQUIRED",
+        "sign-off batches accept only signoff-stage evidence",
+      );
     }
     const evidence = newEvidenceSchema.parse({ ...parsedEvidence, added_by: actor });
     const quest = questsById.get(evidence.quest_id);
     if (quest === undefined) {
-      throw new Error(
+      failQuestDomain(
+        "SIGNOFF_EVIDENCE_OUTSIDE_BATCH",
         `sign-off evidence references quest ${evidence.quest_id} outside the requested batch`,
       );
     }
     if (quest.status !== "complete") {
-      throw new Error(signoffNotCompleteMessage(quest.id, quest.status));
+      failQuestDomain(
+        "SIGNOFF_NOT_COMPLETE",
+        signoffNotCompleteInstruction(quest.id, quest.status),
+      );
     }
     const entries = evidenceByQuest.get(evidence.quest_id) ?? [];
     entries.push(evidence);
@@ -1673,7 +1683,10 @@ async function prepareSignoffBatch(
   const ids = [...new Set(input.ids)];
   const transition = questTransitionSchema.parse({ ...input.transition, actor });
   if (transition.action !== "signoff") {
-    throw new Error("sign-off batch transition must use the signoff action");
+    failQuestDomain(
+      "SIGNOFF_TRANSITION_REQUIRED",
+      "sign-off batch transition must use the signoff action",
+    );
   }
   const questsById = await loadSignoffBatchQuests(ctx, ids, transition);
   return {
@@ -1760,7 +1773,14 @@ export const addChainLink = mutationGeneric({
     const record = await requireQuestRecord(ctx, input.link.quest_id);
     const current = parseQuestDocument(record);
     const events = await readQuestEvents(ctx, current.id);
-    requireLeaseOwner(current, events, input.actor, timestamp);
+    applyDomainGuardForMutation(() =>
+      assertLeaseOwner(
+        current,
+        input.actor,
+        timestamp,
+        hasAcceptedEvent(events, current.id, input.actor),
+      ),
+    );
     if (current.status === "accepted") {
       await ctx.db.replace(record._id, renewLease(current, timestamp, input.lease_ttl_minutes));
     }
@@ -1804,7 +1824,14 @@ export const removeChainLink = mutationGeneric({
     const current = parseQuestDocument(questRecord);
     await requireRepositoryNotFenced(ctx, current.repo);
     const events = await readQuestEvents(ctx, current.id);
-    requireLeaseOwner(current, events, input.actor, timestamp);
+    applyDomainGuardForMutation(() =>
+      assertLeaseOwner(
+        current,
+        input.actor,
+        timestamp,
+        hasAcceptedEvent(events, current.id, input.actor),
+      ),
+    );
     await ctx.db.delete(record._id);
     if (current.status === "accepted") {
       await ctx.db.replace(
@@ -1838,10 +1865,20 @@ export const addEvidence = mutationGeneric({
     const timestamp = now();
     const events = await readQuestEvents(ctx, current.id);
     if (input.stage === "signoff" && current.status !== "complete") {
-      throw new Error(signoffNotCompleteMessage(current.id, current.status));
+      failQuestDomain(
+        "SIGNOFF_NOT_COMPLETE",
+        signoffNotCompleteInstruction(current.id, current.status),
+      );
     }
     if (input.stage !== "signoff") {
-      requireLeaseOwner(current, events, input.added_by, timestamp);
+      applyDomainGuardForMutation(() =>
+        assertLeaseOwner(
+          current,
+          input.added_by,
+          timestamp,
+          hasAcceptedEvent(events, current.id, input.added_by),
+        ),
+      );
     }
     if (current.status === "accepted") {
       await ctx.db.replace(record._id, renewLease(current, timestamp, input.lease_ttl_minutes));
@@ -2054,14 +2091,18 @@ export const beginRestore = mutationGeneric({
     await requireMemberActor(ctx, args.auth_token);
     const token = args.token.trim();
     if (token === "") {
-      throw new Error("Convex restore token is empty; retry with a new restore session");
+      failQuestDomain(
+        "CONVEX_RESTORE_TOKEN_REQUIRED",
+        "Convex restore token is empty; retry with a new restore session",
+      );
     }
     const timestamp = now();
     const existing = await findRestoreLease(ctx);
     if (existing !== null) {
       const expiresAt = Date.parse(existing.expires_at);
       if (!Number.isFinite(expiresAt) || expiresAt > Date.parse(timestamp)) {
-        throw new Error(
+        failQuestDomain(
+          "CONVEX_RESTORE_IN_PROGRESS",
           "Convex restore is already in progress; retry after the active restore commits or rolls back",
         );
       }
@@ -2074,15 +2115,17 @@ export const beginRestore = mutationGeneric({
       stableSerialize(current) !== args.expected_snapshot &&
       JSON.stringify(current) !== args.expected_snapshot
     ) {
-      throw new Error(
+      failQuestDomain(
+        "CONVEX_RESTORE_PRECONDITION_FAILED",
         "Convex restore precondition failed; the store changed, so retry the restore",
       );
     }
     if (args.restore_kind === "full-backup") {
       const fenced = (await ctx.db.query("migration_fences").collect())[0];
       if (fenced !== undefined) {
-        throw new Error(
-          `[BACKUP_FULL_RESTORE_FENCED] full Convex restore would replace repository ${fenced.repo} while a migration fence exists; retry with a repository-scoped restore for ${fenced.repo} or recover the fence before restoring the complete backup`,
+        failQuestDomain(
+          "BACKUP_FULL_RESTORE_FENCED",
+          `full Convex restore would replace repository ${fenced.repo} while a migration fence exists; retry with a repository-scoped restore for ${fenced.repo} or recover the fence before restoring the complete backup`,
         );
       }
     }
@@ -2123,8 +2166,9 @@ export const restoreStatus = queryGeneric({
     }
     const committed = await exportDump(ctx, parseLeaseCutoff(lease.lease_cutoff));
     if (!(await matchesSnapshotFingerprint(committed, lease.expected_hash))) {
-      throw new Error(
-        "[MIGRATION_COMMITTED_STATE_CHANGED] the committed Convex restore no longer matches its recorded snapshot; inspect the destination before retrying",
+      failQuestDomain(
+        "MIGRATION_COMMITTED_STATE_CHANGED",
+        "the committed Convex restore no longer matches its recorded snapshot; inspect the destination before retrying",
       );
     }
     return { status: "committed" as const, dump: committed };
@@ -2139,8 +2183,9 @@ export const activateRestore = mutationGeneric({
     if (lease.committed === true) {
       const committed = await exportDump(ctx, parseLeaseCutoff(lease.lease_cutoff));
       if (!(await matchesSnapshotFingerprint(committed, lease.expected_hash))) {
-        throw new Error(
-          "[MIGRATION_COMMITTED_STATE_CHANGED] the committed Convex restore no longer matches its recorded snapshot; inspect the destination before retrying",
+        failQuestDomain(
+          "MIGRATION_COMMITTED_STATE_CHANGED",
+          "the committed Convex restore no longer matches its recorded snapshot; inspect the destination before retrying",
         );
       }
       return committed;
@@ -2149,13 +2194,17 @@ export const activateRestore = mutationGeneric({
     if (lease.activated && lease.replacement_hash !== null) {
       const staged = await readRestoreStage(ctx, args.token);
       if (!(await matchesSnapshotFingerprint(staged, lease.replacement_hash))) {
-        throw new Error("Convex restore stage is missing or changed; retry the restore");
+        failQuestDomain(
+          "CONVEX_RESTORE_STAGE_CHANGED",
+          "Convex restore stage is missing or changed; retry the restore",
+        );
       }
       return staged;
     }
     const current = await exportDump(ctx, cutoff);
     if (!(await matchesSnapshotFingerprint(current, lease.expected_hash))) {
-      throw new Error(
+      failQuestDomain(
+        "CONVEX_RESTORE_PRECONDITION_FAILED",
         "Convex restore precondition failed; the store changed, so retry the restore",
       );
     }
@@ -2179,20 +2228,22 @@ export const fenceRepository = mutationGeneric({
     const lease = await requireRestoreLease(ctx, args.token);
     const repo = args.repo.trim();
     if (repo === "") {
-      throw new Error("[MIGRATION_REPOSITORY_REQUIRED] fenceRepository needs a repository name");
+      failQuestDomain("MIGRATION_REPOSITORY_REQUIRED", "fenceRepository needs a repository name");
     }
     const existing = await ctx.db
       .query("migration_fences")
       .withIndex("by_repo", (query) => query.eq("repo", repo))
       .unique();
     if (existing !== null && existing.target_backend !== args.target_backend) {
-      throw new Error(
-        `[MIGRATION_REPOSITORY_FENCED] repository ${repo} is already fenced for ${existing.target_backend}; clear the existing migration fence before retrying`,
+      failQuestDomain(
+        "MIGRATION_REPOSITORY_FENCED",
+        `repository ${repo} is already fenced for ${existing.target_backend}; clear the existing migration fence before retrying`,
       );
     }
     if (existing !== null && existing.lease_token !== args.token) {
-      throw new Error(
-        `[MIGRATION_FENCE_OWNER_MISMATCH] repository ${repo} is already fenced by another migration; recover or clear the owning migration before retrying`,
+      failQuestDomain(
+        "MIGRATION_FENCE_OWNER_MISMATCH",
+        `repository ${repo} is already fenced by another migration; recover or clear the owning migration before retrying`,
       );
     }
     if (existing === null) {
@@ -2229,8 +2280,9 @@ export const unfenceRepository = mutationGeneric({
       .unique();
     if (existing !== null) {
       if (existing.lease_token !== args.token) {
-        throw new Error(
-          `[MIGRATION_FENCE_OWNER_MISMATCH] repository ${repo} is fenced by another migration; use the owning migration token or recover it before retrying`,
+        failQuestDomain(
+          "MIGRATION_FENCE_OWNER_MISMATCH",
+          `repository ${repo} is fenced by another migration; use the owning migration token or recover it before retrying`,
         );
       }
       await ctx.db.patch(existing._id, { unfenced: true });
@@ -2245,8 +2297,9 @@ export const recoverRepositoryFence = mutationGeneric({
     await requireMemberActor(ctx, args.auth_token);
     const repo = args.repo.trim();
     if (repo === "") {
-      throw new Error(
-        "[MIGRATION_REPOSITORY_REQUIRED] recoverRepositoryFence needs a repository name",
+      failQuestDomain(
+        "MIGRATION_REPOSITORY_REQUIRED",
+        "recoverRepositoryFence needs a repository name",
       );
     }
 
@@ -2266,21 +2319,24 @@ export const recoverRepositoryFence = mutationGeneric({
         await ctx.db.delete(existing._id);
         return true;
       }
-      throw new Error(
-        `[MIGRATION_FENCE_STATUS_UNKNOWN] repository ${repo} has no owning migration lease; ordinary member recovery cannot prove that the fence is stale, so verify routing and use the owning migration session or a privileged deployment recovery before retrying`,
+      failQuestDomain(
+        "MIGRATION_FENCE_STATUS_UNKNOWN",
+        `repository ${repo} has no owning migration lease; ordinary member recovery cannot prove that the fence is stale, so verify routing and use the owning migration session or a privileged deployment recovery before retrying`,
       );
     }
     if (existing.lease_token !== lease.token) {
-      throw new Error(
-        `[MIGRATION_FENCE_OWNER_MISMATCH] repository ${repo} is fenced by another migration; recover or clear the owning migration before retrying`,
+      failQuestDomain(
+        "MIGRATION_FENCE_OWNER_MISMATCH",
+        `repository ${repo} is fenced by another migration; recover or clear the owning migration before retrying`,
       );
     }
     const timestamp = now();
     const current = Date.parse(timestamp);
     const expiresAt = Date.parse(lease.expires_at);
     if (!Number.isFinite(expiresAt) || !Number.isFinite(current) || expiresAt > current) {
-      throw new Error(
-        "[MIGRATION_FENCE_RECOVERY_BLOCKED] an active Convex migration lease still owns the fence; retry with the owning migration or wait for it to expire",
+      failQuestDomain(
+        "MIGRATION_FENCE_RECOVERY_BLOCKED",
+        "an active Convex migration lease still owns the fence; retry with the owning migration or wait for it to expire",
       );
     }
     if (isLegacyMigrationFence(existing)) {
@@ -2291,8 +2347,9 @@ export const recoverRepositoryFence = mutationGeneric({
       return true;
     }
     if (lease.committed === true || existing.committed !== false) {
-      throw new Error(
-        `[MIGRATION_FENCE_STATUS_UNKNOWN] repository ${repo} has a fence whose commit status cannot be proven; inspect routing and deployment state before retrying`,
+      failQuestDomain(
+        "MIGRATION_FENCE_STATUS_UNKNOWN",
+        `repository ${repo} has a fence whose commit status cannot be proven; inspect routing and deployment state before retrying`,
       );
     }
     await clearRestoreStage(ctx, lease.token);
@@ -2310,13 +2367,15 @@ export const recoverMigrationFenceForRestore = mutationGeneric({
     const token = args.token.trim();
     const repo = args.repo.trim();
     if (token === "") {
-      throw new Error(
-        "[MIGRATION_RESTORE_TOKEN_REQUIRED] recoverMigrationFenceForRestore needs the active restore token",
+      failQuestDomain(
+        "MIGRATION_RESTORE_TOKEN_REQUIRED",
+        "recoverMigrationFenceForRestore needs the active restore token",
       );
     }
     if (repo === "") {
-      throw new Error(
-        "[MIGRATION_REPOSITORY_REQUIRED] recoverMigrationFenceForRestore needs a repository name",
+      failQuestDomain(
+        "MIGRATION_REPOSITORY_REQUIRED",
+        "recoverMigrationFenceForRestore needs a repository name",
       );
     }
     await requireRestoreLease(ctx, token);
@@ -2328,16 +2387,18 @@ export const recoverMigrationFenceForRestore = mutationGeneric({
       existing.recovery_restore_token !== undefined &&
       existing.recovery_restore_token !== token
     ) {
-      throw new Error(
-        `[MIGRATION_FENCE_OWNER_MISMATCH] repository ${repo} is already being recovered by another restore; retry after that restore commits or rolls back`,
+      failQuestDomain(
+        "MIGRATION_FENCE_OWNER_MISMATCH",
+        `repository ${repo} is already being recovered by another restore; retry after that restore commits or rolls back`,
       );
     }
     if (existing.recovery_restore_token === token) {
       return true;
     }
     if (existing.committed !== true || existing.recovery_hash === undefined) {
-      throw new Error(
-        `[MIGRATION_FENCE_STATUS_UNKNOWN] repository ${repo} does not have a committed recovery fingerprint; use the owning migration session or a privileged deployment recovery before retrying`,
+      failQuestDomain(
+        "MIGRATION_FENCE_STATUS_UNKNOWN",
+        `repository ${repo} does not have a committed recovery fingerprint; use the owning migration session or a privileged deployment recovery before retrying`,
       );
     }
     await verifyCommittedFenceSnapshot(
@@ -2363,8 +2424,9 @@ export const commitRestore = mutationGeneric({
     if (lease.committed === true) {
       const committed = await exportDump(ctx, parseLeaseCutoff(lease.lease_cutoff));
       if (!(await matchesSnapshotFingerprint(committed, lease.expected_hash))) {
-        throw new Error(
-          "[MIGRATION_COMMITTED_STATE_CHANGED] the committed Convex restore no longer matches its recorded snapshot; inspect the destination before retrying",
+        failQuestDomain(
+          "MIGRATION_COMMITTED_STATE_CHANGED",
+          "the committed Convex restore no longer matches its recorded snapshot; inspect the destination before retrying",
         );
       }
       return committed;
@@ -2372,8 +2434,9 @@ export const commitRestore = mutationGeneric({
     if (!lease.activated || lease.replacement_hash === null) {
       const current = await exportDump(ctx, parseLeaseCutoff(lease.lease_cutoff));
       if (!(await matchesSnapshotFingerprint(current, lease.expected_hash))) {
-        throw new Error(
-          "[MIGRATION_CONCURRENT_WRITE] the Convex store changed during a fence-only migration commit; retry the migration",
+        failQuestDomain(
+          "MIGRATION_CONCURRENT_WRITE",
+          "the Convex store changed during a fence-only migration commit; retry the migration",
         );
       }
       await clearRestoreStage(ctx, args.token);
@@ -2386,7 +2449,10 @@ export const commitRestore = mutationGeneric({
     }
     const staged = await readRestoreStage(ctx, args.token);
     if (!(await matchesSnapshotFingerprint(staged, lease.replacement_hash))) {
-      throw new Error("Convex restore stage is missing or changed; retry the restore");
+      failQuestDomain(
+        "CONVEX_RESTORE_STAGE_CHANGED",
+        "Convex restore stage is missing or changed; retry the restore",
+      );
     }
     const timestamp = now();
     await restoreDump(ctx, staged);
@@ -2430,13 +2496,15 @@ export const rollbackRestore = mutationGeneric({
     await requireMemberActor(ctx, args.auth_token);
     const lease = await requireRestoreLease(ctx, args.token);
     if (lease.committed === true) {
-      throw new Error(
-        "[MIGRATION_COMMITTED] the Convex restore already committed; release the restore lease instead of rolling it back",
+      failQuestDomain(
+        "MIGRATION_COMMITTED",
+        "the Convex restore already committed; release the restore lease instead of rolling it back",
       );
     }
     const current = await exportDump(ctx, parseLeaseCutoff(lease.lease_cutoff));
     if (!(await matchesSnapshotFingerprint(current, lease.expected_hash))) {
-      throw new Error(
+      failQuestDomain(
+        "CONVEX_RESTORE_PRECONDITION_FAILED",
         "Convex restore rollback precondition failed; the store changed, so retry the rollback",
       );
     }

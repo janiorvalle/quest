@@ -327,6 +327,11 @@ cancel, and reopen; each error names the current state, the required path, and
 when retrying is valid. `SIGNOFF_NOT_COMPLETE` keeps the same contract for
 premature sign-off. Convex transports these expected failures as domain data so
 production deployments do not replace them with request-ID-only server errors.
+Lease refusals use the same transport: `QUEST_LEASE_HELD` names the current
+owner and is a stop signal, not a retry signal. An agent must stop retrying that
+mutation and let the named owner continue. Turn-in clears `lease_expires_at`;
+afterward, complete, reopen, and cancel are reviewer bookkeeping and do not
+require the former implementer's lease.
 
 ```
 quest cancel <id> --reason <text> Cancel any non-terminal quest; bugs become

@@ -7,6 +7,7 @@ import {
   type BlobStoreFactory,
   defineBlobStoreContract,
   defineQuestStoreContract,
+  defineReviewerHandoffContract,
   type QuestStoreFactory,
 } from "../contract";
 import type { BackupDatabaseRestoreSession, StoreMigrationSession } from "../port";
@@ -17,6 +18,7 @@ import { closeConvexClientPair, convexApi, createConvexClientPair } from "./clie
 
 const deployment = process.env["QUEST_CONVEX_TEST_URL"];
 const authToken = process.env["QUEST_CONVEX_TEST_TOKEN"];
+const reviewerAuthToken = process.env["QUEST_CONVEX_TEST_REVIEWER_TOKEN"];
 
 const emptyDump: QuestDump = {
   schema_version: STORE_SCHEMA_VERSION,
@@ -60,6 +62,37 @@ if (deployment === undefined || authToken === undefined) {
   };
 
   defineQuestStoreContract("ConvexStore contract against local deployment", questStoreFactory);
+  if (reviewerAuthToken === undefined) {
+    test.skip("ConvexStore reviewer handoff contract requires QUEST_CONVEX_TEST_REVIEWER_TOKEN", () => {});
+  } else {
+    const reviewerQuestStoreFactory: QuestStoreFactory = async () => {
+      const clients = createConvexClientPair(deployment, { authToken });
+      const reviewerClients = createConvexClientPair(deployment, { authToken: reviewerAuthToken });
+      const store = new ConvexStore(deployment, { clients });
+      const reviewerStore = new ConvexStore(deployment, { clients: reviewerClients });
+      const [member, reviewer] = await Promise.all([
+        clients.http.mutation(convexApi.whoami, { auth_token: authToken }),
+        reviewerClients.http.mutation(convexApi.whoami, { auth_token: reviewerAuthToken }),
+      ]);
+      await store.replaceAll(emptyDump);
+      return {
+        store,
+        resolveActor: (requestedActor) =>
+          requestedActor === "contract/reviewer" ? reviewer.member : member.member,
+        storeForActor: (actor) => (actor === reviewer.member ? reviewerStore : store),
+        failNextEventAppend: () => store.failNextEventAppend(),
+        flushWatch: flushConvexSubscription,
+        close: async () => {
+          await closeConvexClientPair(clients);
+          await closeConvexClientPair(reviewerClients);
+        },
+      };
+    };
+    defineReviewerHandoffContract(
+      "ConvexStore reviewer handoff contract against local deployment",
+      reviewerQuestStoreFactory,
+    );
+  }
   defineBlobStoreContract("ConvexBlobStore contract against local deployment", blobStoreFactory);
 
   test.serial(
