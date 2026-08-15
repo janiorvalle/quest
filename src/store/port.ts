@@ -8,6 +8,7 @@ import type {
   Event,
   EventFilter,
   Evidence,
+  FederatedListDump,
   NewEvidence,
   NewQuest,
   Quest,
@@ -70,6 +71,11 @@ export type FederatedSnapshotWatchListener = (
 ) => void;
 
 export interface FederatedReadSnapshot {
+  readonly dump: FederatedListDump;
+  readonly fencedRepositories: readonly string[];
+}
+
+export interface FederatedFullSnapshot {
   readonly dump: QuestDump;
   readonly fencedRepositories: readonly string[];
 }
@@ -141,8 +147,11 @@ export interface QuestStore {
   /** Reads repositories fenced on this backend so federated reads can exclude stale copies. */
   listFencedRepositories?(): Promise<readonly string[]>;
 
-  /** Reads the logical dump and migration fences from one backend-consistent snapshot. */
-  readFederatedSnapshot?(): Promise<FederatedReadSnapshot>;
+  /** Reads list data and migration fences from one backend-consistent snapshot. */
+  readFederatedSnapshot?(repository?: string): Promise<FederatedReadSnapshot>;
+
+  /** Reads a complete dump and fences for one-shot history or export commands. */
+  readFederatedFullSnapshot?(): Promise<FederatedFullSnapshot>;
 
   /** Narrows read operations to one repository when the backend supports federated routing. */
   forRepository?(repository: string): QuestStore;
@@ -187,8 +196,11 @@ export interface QuestStore {
    */
   watch(filter: QuestFilter, listener: QuestWatchListener): Promise<WatchSubscription>;
 
-  /** Reactively emits the complete federated read snapshot when the backend supports it. */
-  watchFederatedSnapshot?(listener: FederatedSnapshotWatchListener): Promise<WatchSubscription>;
+  /** Reactively emits list data and fences, optionally scoped to one repository. */
+  watchFederatedSnapshot?(
+    repository: string | undefined,
+    listener: FederatedSnapshotWatchListener,
+  ): Promise<WatchSubscription>;
 }
 
 export interface StoreMigrationSession {

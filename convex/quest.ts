@@ -38,6 +38,7 @@ import {
   eventFilterSchema,
   eventSchema,
   evidenceSchema,
+  federatedListDumpSchema,
   type LaneConflictReference,
   type NewEvidence,
   newEvidenceSchema,
@@ -706,6 +707,42 @@ async function exportDump(ctx: QueryContext, timestamp: string): Promise<QuestDu
 
 async function exportRawDump(ctx: QueryContext): Promise<QuestDump> {
   return createQuestDump(ctx, await readRawQuests(ctx));
+}
+
+async function createFederatedListDump(
+  ctx: QueryContext,
+  repository: string | undefined,
+  timestamp: string,
+) {
+  if (repository === undefined) {
+    return federatedListDumpSchema.parse({
+      schema_version: STORE_SCHEMA_VERSION,
+      quests: await readQuests(ctx, timestamp),
+      chains: await readChains(ctx),
+    });
+  }
+
+  const repositoryQuests = await readRepositoryQuests(ctx, repository, timestamp);
+  const repositoryQuestIds = new Set(repositoryQuests.map((quest) => quest.id));
+  const chains = (await readChains(ctx)).filter(
+    (chain) => repositoryQuestIds.has(chain.quest_id) || repositoryQuestIds.has(chain.target_id),
+  );
+  const relatedQuestIds = new Set(chains.flatMap((chain) => [chain.quest_id, chain.target_id]));
+  const relatedQuests = await Promise.all(
+    [...relatedQuestIds]
+      .filter((questId) => !repositoryQuestIds.has(questId))
+      .map(async (questId) =>
+        materializeExpiredLease(
+          parseQuestDocument(await requireQuestRecord(ctx, questId)),
+          timestamp,
+        ),
+      ),
+  );
+  return federatedListDumpSchema.parse({
+    schema_version: STORE_SCHEMA_VERSION,
+    quests: [...repositoryQuests, ...relatedQuests].sort((left, right) => left.id - right.id),
+    chains,
+  });
 }
 
 function hardLaneConflictsForQuest(
@@ -1866,6 +1903,22 @@ export const federatedSnapshot = queryGeneric({
     const timestamp = now();
     return {
       dump: await exportDump(ctx, timestamp),
+      fencedRepositories: (await ctx.db.query("migration_fences").collect())
+        .filter((fence) => fence.unfenced !== true)
+        .map((fence) => fence.repo)
+        .sort(),
+    };
+  },
+});
+
+export const federatedListSnapshot = queryGeneric({
+  args: { auth_token: v.optional(v.string()), repository: v.optional(v.string()) },
+  handler: async (ctx, args) => {
+    await requireMemberQueryActor(ctx, args.auth_token);
+    const repository =
+      args.repository === undefined ? undefined : questSchema.shape.repo.parse(args.repository);
+    return {
+      dump: await createFederatedListDump(ctx, repository, now()),
       fencedRepositories: (await ctx.db.query("migration_fences").collect())
         .filter((fence) => fence.unfenced !== true)
         .map((fence) => fence.repo)

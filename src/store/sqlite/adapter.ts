@@ -65,6 +65,7 @@ import {
 import type {
   AcceptQuestAndExportResult,
   BackupDatabaseInspection,
+  FederatedFullSnapshot,
   FederatedReadSnapshot,
   QuestDetailSnapshot,
   QuestStore,
@@ -898,6 +899,16 @@ export class SqliteStore implements QuestStore {
   }
 
   async readFederatedSnapshot(): Promise<FederatedReadSnapshot> {
+    return this.#readTransaction(() => {
+      const { schema_version, quests, chains } = this.#readQuestDump();
+      return {
+        dump: { schema_version, quests, chains },
+        fencedRepositories: this.#readFencedRepositories(),
+      };
+    });
+  }
+
+  async readFederatedFullSnapshot(): Promise<FederatedFullSnapshot> {
     return this.#readTransaction(() => ({
       dump: this.#readQuestDump(),
       fencedRepositories: this.#readFencedRepositories(),

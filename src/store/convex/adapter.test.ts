@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import { newQuestSchema, questSchema, STORE_SCHEMA_VERSION } from "../../schema";
+import type { FederatedReadSnapshot } from "../port";
 import { ConvexStore } from "./adapter";
-import type { ConvexClientPair } from "./client";
+import { type ConvexClientPair, convexApi } from "./client";
 
 const timestamp = "2026-08-05T20:00:00.000Z";
 const quest = newQuestSchema.parse({
@@ -36,11 +37,17 @@ function fakeClients() {
   const entries: RealtimeEntry[] = [];
   const clients = {
     http: {
-      query: async () => {
+      query: async (query: unknown) => {
         httpQueries += 1;
         if (failNextQuery) {
           failNextQuery = false;
           throw new Error("temporary server-time failure");
+        }
+        if (query === convexApi.federatedListSnapshot) {
+          return {
+            dump: { chains: [], quests: [], schema_version: STORE_SCHEMA_VERSION },
+            fencedRepositories: [],
+          };
         }
         return timestamp;
       },
@@ -98,6 +105,127 @@ describe("Convex reactive watches", () => {
     }
   });
 
+  test("falls back to the legacy snapshot during a rolling backend upgrade", async () => {
+    const entries: RealtimeEntry[] = [];
+    const fullSnapshot = {
+      dump: {
+        chains: [],
+        events: [],
+        evidence: [],
+        quests: [],
+        schema_version: STORE_SCHEMA_VERSION,
+      },
+      fencedRepositories: [],
+    };
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.serverTime) {
+            return timestamp;
+          }
+          if (query === convexApi.federatedListSnapshot) {
+            throw new Error("[Request ID: bfdf4caebe0312d8] Server Error");
+          }
+          return fullSnapshot;
+        },
+      },
+      realtime: {
+        close: async () => undefined,
+        onUpdate: (
+          _query: unknown,
+          args: Readonly<Record<string, unknown>>,
+          callback: (value: unknown) => void,
+        ) => {
+          const entry = { args, callback, unsubscribed: false };
+          entries.push(entry);
+          return { unsubscribe: () => undefined };
+        },
+      },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+    const emissions: unknown[] = [];
+    const subscription = await store.watchFederatedSnapshot("quest", (snapshot) =>
+      emissions.push(snapshot),
+    );
+
+    entries[0]?.callback(fullSnapshot);
+
+    expect(entries[0]?.args).toEqual({});
+    expect(emissions).toEqual([
+      {
+        dump: { chains: [], quests: [], schema_version: STORE_SCHEMA_VERSION },
+        fencedRepositories: [],
+      },
+    ]);
+    await subscription.unsubscribe();
+  });
+
+  test("retries the list query when an ambiguous legacy probe also fails", async () => {
+    let listQueries = 0;
+    const listSnapshot: FederatedReadSnapshot = {
+      dump: { chains: [], quests: [], schema_version: STORE_SCHEMA_VERSION },
+      fencedRepositories: [],
+    };
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.federatedListSnapshot) {
+            listQueries += 1;
+            if (listQueries === 1) {
+              throw new Error("[Request ID: bfdf4caebe0312d8] Server Error");
+            }
+            return listSnapshot;
+          }
+          throw new Error("temporary legacy snapshot failure");
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.readFederatedSnapshot("quest")).rejects.toThrow(
+      "temporary legacy snapshot failure",
+    );
+    expect(await store.readFederatedSnapshot("quest")).toEqual(listSnapshot);
+    expect(listQueries).toBe(2);
+  });
+
+  test("does not cache an opaque server error after a successful legacy fallback", async () => {
+    let listQueries = 0;
+    const listSnapshot: FederatedReadSnapshot = {
+      dump: { chains: [], quests: [], schema_version: STORE_SCHEMA_VERSION },
+      fencedRepositories: [],
+    };
+    const fullSnapshot = {
+      dump: {
+        ...listSnapshot.dump,
+        events: [],
+        evidence: [],
+      },
+      fencedRepositories: [],
+    };
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.federatedListSnapshot) {
+            listQueries += 1;
+            if (listQueries === 1) {
+              throw new Error("[Request ID: bfdf4caebe0312d8] Server Error");
+            }
+            return listSnapshot;
+          }
+          return fullSnapshot;
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    expect(await store.readFederatedSnapshot("quest")).toEqual(listSnapshot);
+    expect(await store.readFederatedSnapshot("quest")).toEqual(listSnapshot);
+    expect(listQueries).toBe(2);
+  });
+
   test("streams federated snapshots and closes the realtime subscription", async () => {
     const fake = fakeClients();
     const store = new ConvexStore("http://127.0.0.1:3210", { clients: fake.clients });
@@ -105,12 +233,12 @@ describe("Convex reactive watches", () => {
     let subscription: Awaited<ReturnType<ConvexStore["watchFederatedSnapshot"]>> | undefined;
 
     try {
-      subscription = await store.watchFederatedSnapshot((snapshot) => emissions.push(snapshot));
+      subscription = await store.watchFederatedSnapshot("quest", (snapshot) =>
+        emissions.push(snapshot),
+      );
       const snapshot = {
         dump: {
           chains: [],
-          events: [],
-          evidence: [],
           quests: [],
           schema_version: STORE_SCHEMA_VERSION,
         },
@@ -119,8 +247,8 @@ describe("Convex reactive watches", () => {
 
       fake.entries[0]?.callback(snapshot);
       expect(emissions).toEqual([snapshot]);
-      expect(fake.httpQueries()).toBe(1);
-      expect(fake.entries[0]?.args).toEqual({});
+      expect(fake.httpQueries()).toBe(2);
+      expect(fake.entries[0]?.args).toEqual({ repository: "quest" });
       await subscription.unsubscribe();
       subscription = undefined;
       expect(fake.entries[0]?.unsubscribed).toBeTrue();
@@ -135,10 +263,13 @@ describe("Convex reactive watches", () => {
     const entries: RealtimeEntry[] = [];
     const clients = {
       http: {
-        query: async () => {
-          queryCount += 1;
-          if (queryCount <= 2) {
+        query: async (query: unknown) => {
+          if (query === convexApi.serverTime) {
             return timestamp;
+          }
+          queryCount += 1;
+          if (queryCount === 1) {
+            return snapshot("Initial HTTP snapshot");
           }
           return new Promise((resolve) => {
             resolveRefresh = resolve;
@@ -174,8 +305,6 @@ describe("Convex reactive watches", () => {
     const snapshot = (title: string) => ({
       dump: {
         chains: [],
-        events: [],
-        evidence: [],
         quests: [{ ...expiringQuest, title }],
         schema_version: STORE_SCHEMA_VERSION,
       },
@@ -183,7 +312,9 @@ describe("Convex reactive watches", () => {
     });
 
     try {
-      subscription = await store.watchFederatedSnapshot((value) => emissions.push(value));
+      subscription = await store.watchFederatedSnapshot(undefined, (value) =>
+        emissions.push(value),
+      );
       entries[0]?.callback(snapshot("Older lease snapshot"));
       await Bun.sleep(10);
       entries[0]?.callback(snapshot("New realtime snapshot"));

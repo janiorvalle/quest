@@ -38,6 +38,7 @@ import type {
 import type {
   AcceptQuestAndExportResult,
   Clock,
+  FederatedFullSnapshot,
   FederatedReadSnapshot,
   QuestDetailSnapshot,
 } from "../port";
@@ -149,10 +150,15 @@ export const convexApi = {
   fencedRepositories: makeFunctionReference<"query", { readonly auth_token?: string }, string[]>(
     "quest:fencedRepositories",
   ),
+  federatedListSnapshot: makeFunctionReference<
+    "query",
+    { readonly auth_token?: string; readonly repository?: string },
+    FederatedReadSnapshot
+  >("quest:federatedListSnapshot"),
   federatedSnapshot: makeFunctionReference<
     "query",
     { readonly auth_token?: string },
-    FederatedReadSnapshot
+    FederatedFullSnapshot
   >("quest:federatedSnapshot"),
   events: makeFunctionReference<
     "query",

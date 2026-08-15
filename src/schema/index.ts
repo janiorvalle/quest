@@ -79,6 +79,8 @@ export {
   chainResultSchema,
   type EventFilter,
   eventFilterSchema,
+  type FederatedListDump,
+  federatedListDumpSchema,
   type LaneConflictReference,
   laneConflictReferenceSchema,
   MAX_LEASE_TTL_MINUTES,

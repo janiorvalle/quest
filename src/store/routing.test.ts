@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { newQuestSchema } from "../schema";
-import type { FederatedStoreSource, WatchSubscription } from ".";
+import type { FederatedStoreSource, QuestStore, WatchSubscription } from ".";
 import {
   FederatedBlobStore,
   FederatedQuestStore,
@@ -90,6 +90,167 @@ describe("federated quest reads", () => {
       if (beta.questStore instanceof SqliteStore) {
         beta.questStore.close();
       }
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("keeps reactive list snapshots bounded while history and exports stay complete", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-federated-list-snapshot-"));
+    const questStore = new SqliteStore(join(root, "remote.db"), { now: () => timestamp });
+    const baseEvents = questStore.events.bind(questStore);
+    const baseExportAll = questStore.exportAll.bind(questStore);
+    const baseQueryEvents = questStore.queryEvents.bind(questStore);
+    let eventReads = 0;
+    let exportReads = 0;
+    let fullSnapshotReads = 0;
+    const snapshotScopes: Array<string | undefined> = [];
+
+    try {
+      await questStore.addQuest(task("remote", "Remote quest"));
+      const fullDump = await baseExportAll();
+      const listDump = {
+        schema_version: fullDump.schema_version,
+        quests: fullDump.quests,
+        chains: fullDump.chains,
+      };
+      const countedStore: QuestStore = Object.assign(questStore, {
+        events: async (questId: number) => {
+          eventReads += 1;
+          return baseEvents(questId);
+        },
+        exportAll: async () => {
+          exportReads += 1;
+          return baseExportAll();
+        },
+        queryEvents: async (filter: Parameters<QuestStore["queryEvents"]>[0]) => {
+          eventReads += 1;
+          return baseQueryEvents(filter);
+        },
+      });
+      const source: FederatedStoreSource = {
+        blobStore: new LocalBlobStore(join(root, "remote-evidence")),
+        includeRepository: (repo) => repo === "remote",
+        questStore: countedStore,
+        readFullSnapshot: async () => {
+          fullSnapshotReads += 1;
+          return { dump: fullDump, fencedRepositories: [] };
+        },
+        readSnapshot: async (repository) => {
+          snapshotScopes.push(repository);
+          return { dump: listDump, fencedRepositories: [] };
+        },
+      };
+      const scopedStore = new FederatedQuestStore([source]).forRepository("remote");
+
+      await expect(scopedStore.listQuests({})).resolves.toMatchObject([{ repo: "remote" }]);
+      await expect(scopedStore.events(1)).resolves.toHaveLength(fullDump.events.length);
+      await expect(scopedStore.queryEvents({})).resolves.toHaveLength(fullDump.events.length);
+      await expect(scopedStore.exportAll()).resolves.toMatchObject({
+        chains: fullDump.chains,
+        events: [{ ...fullDump.events[0], repo: "remote" }],
+        evidence: fullDump.evidence,
+        quests: fullDump.quests,
+      });
+
+      expect(listDump).not.toHaveProperty("events");
+      expect(listDump).not.toHaveProperty("evidence");
+      expect(snapshotScopes).toEqual(["remote", "remote"]);
+      expect(eventReads).toBe(0);
+      expect(exportReads).toBe(0);
+      expect(fullSnapshotReads).toBe(3);
+    } finally {
+      questStore.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("rejects history and exports when routing changes during the atomic read", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-federated-full-snapshot-race-"));
+    const questStore = new SqliteStore(join(root, "remote.db"), { now: () => timestamp });
+    let routingStale = false;
+    const staleError = new FederatedReadError(
+      "[FEDERATED_ROUTING_STALE] repository routing changed during the read; retry with a fresh store",
+    );
+
+    try {
+      await questStore.addQuest(task("remote", "Remote quest"));
+      const dump = await questStore.exportAll();
+      const source: FederatedStoreSource = {
+        blobStore: new LocalBlobStore(join(root, "remote-evidence")),
+        includeRepository: (repo) => repo === "remote",
+        questStore,
+        readError: () => (routingStale ? staleError : undefined),
+        readFullSnapshot: async () => {
+          routingStale = true;
+          return { dump, fencedRepositories: ["remote"] };
+        },
+        readSnapshot: async () => ({
+          dump: {
+            schema_version: dump.schema_version,
+            quests: dump.quests,
+            chains: dump.chains,
+          },
+          fencedRepositories: [],
+        }),
+      };
+      const scopedStore = new FederatedQuestStore([source]).forRepository("remote");
+
+      await expect(scopedStore.events(1)).rejects.toThrow(staleError.message);
+      routingStale = false;
+      await expect(scopedStore.queryEvents({ quest_id: 1 })).rejects.toThrow(staleError.message);
+      routingStale = false;
+      await expect(scopedStore.exportAll()).rejects.toThrow(staleError.message);
+    } finally {
+      questStore.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("keeps healthy full snapshots in unscoped partial-read mode", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-federated-full-snapshot-partial-"));
+    const healthyStore = new SqliteStore(join(root, "healthy.db"), { now: () => timestamp });
+    const failedStore = new SqliteStore(join(root, "failed.db"), { now: () => timestamp });
+
+    try {
+      await healthyStore.addQuest(task("healthy", "Healthy quest"));
+      const healthyDump = await healthyStore.exportAll();
+      const emptyDump = await failedStore.exportAll();
+      const listSnapshot = (dump: typeof healthyDump) => ({
+        dump: {
+          schema_version: dump.schema_version,
+          quests: dump.quests,
+          chains: dump.chains,
+        },
+        fencedRepositories: [],
+      });
+      const healthySource: FederatedStoreSource = {
+        blobStore: new LocalBlobStore(join(root, "healthy-evidence")),
+        includeRepository: (repo) => repo === "healthy",
+        questStore: healthyStore,
+        readFullSnapshot: async () => ({ dump: healthyDump, fencedRepositories: [] }),
+        readSnapshot: async () => listSnapshot(healthyDump),
+      };
+      const failedSource: FederatedStoreSource = {
+        blobStore: new LocalBlobStore(join(root, "failed-evidence")),
+        includeRepository: (repo) => repo === "failed",
+        questStore: failedStore,
+        readFullSnapshot: async () => {
+          throw new Error("failed backend is offline");
+        },
+        readSnapshot: async () => listSnapshot(emptyDump),
+      };
+      const store = new FederatedQuestStore([healthySource, failedSource], undefined, {
+        allowPartialReads: true,
+      });
+
+      await expect(store.queryEvents({})).resolves.toMatchObject([{ repo: "healthy" }]);
+      await expect(store.exportAll()).resolves.toMatchObject({ quests: [{ repo: "healthy" }] });
+      await expect(store.forRepository("failed").exportAll()).rejects.toThrow(
+        "[FEDERATED_SCOPE_UNAVAILABLE] repository failed stopped responding",
+      );
+    } finally {
+      healthyStore.close();
+      failedStore.close();
       await rm(root, { force: true, recursive: true });
     }
   });
@@ -290,9 +451,10 @@ describe("federated quest reads", () => {
       const snapshot = { dump: await questStore.exportAll(), fencedRepositories: [] };
       const reactiveQuestStore = Object.assign(questStore, {
         watchFederatedSnapshot: async (
+          _repository: string | undefined,
           listener: Parameters<
             NonNullable<FederatedStoreSource["questStore"]["watchFederatedSnapshot"]>
-          >[0],
+          >[1],
         ) => {
           listener(snapshot);
           return {
@@ -426,9 +588,10 @@ describe("federated quest reads", () => {
       const remoteSnapshot = { dump: await remoteStore.exportAll(), fencedRepositories: [] };
       const reactiveRemoteStore = Object.assign(remoteStore, {
         watchFederatedSnapshot: async (
+          _repository: string | undefined,
           listener: Parameters<
             NonNullable<FederatedStoreSource["questStore"]["watchFederatedSnapshot"]>
-          >[0],
+          >[1],
         ) => {
           watchAttempts += 1;
           if (watchAttempts === 1) {

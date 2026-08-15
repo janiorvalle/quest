@@ -56,7 +56,6 @@ import {
   FederatedBlobStore,
   FederatedQuestStore,
   FederatedReadError,
-  type FederatedReadSnapshot,
   type FederatedSnapshotWatchListener,
   type FederatedStoreSource,
   inspectSqliteStore,
@@ -388,8 +387,13 @@ async function createFederatedStoreSource(
     application.questStore,
   );
   const readSnapshot = application.questStore.readFederatedSnapshot?.bind(application.questStore);
+  const readFullSnapshot = application.questStore.readFederatedFullSnapshot?.bind(
+    application.questStore,
+  );
   const watchSnapshot = application.questStore.watchFederatedSnapshot?.bind(application.questStore);
-  const observeSnapshot = (snapshot: FederatedReadSnapshot): FederatedReadSnapshot => {
+  const observeSnapshot = <Snapshot extends { readonly fencedRepositories: readonly string[] }>(
+    snapshot: Snapshot,
+  ): Snapshot => {
     const nextFences = new Set(snapshot.fencedRepositories);
     if (observedFences !== undefined && !sameRepositorySet(observedFences, nextFences)) {
       routingStale = true;
@@ -400,12 +404,18 @@ async function createFederatedStoreSource(
     return snapshot;
   };
   const readSnapshotPort =
-    readSnapshot === undefined ? undefined : async () => observeSnapshot(await readSnapshot());
+    readSnapshot === undefined
+      ? undefined
+      : async (repository?: string) => observeSnapshot(await readSnapshot(repository));
+  const readFullSnapshotPort =
+    readFullSnapshot === undefined
+      ? undefined
+      : async () => observeSnapshot(await readFullSnapshot());
   const watchSnapshotPort =
     watchSnapshot === undefined
       ? undefined
-      : (listener: Parameters<typeof watchSnapshot>[0]) =>
-          watchSnapshot((snapshot, error) => {
+      : (repository: string | undefined, listener: FederatedSnapshotWatchListener) =>
+          watchSnapshot(repository, (snapshot, error) => {
             listener(error === undefined ? observeSnapshot(snapshot) : snapshot, error);
           });
   const refresh = async (): Promise<void> => {
@@ -455,6 +465,7 @@ async function createFederatedStoreSource(
       repositoryMatcher(config, handle.store, repo),
     questStore: application.questStore,
     readError,
+    ...(readFullSnapshotPort === undefined ? {} : { readFullSnapshot: readFullSnapshotPort }),
     ...(readSnapshotPort === undefined ? {} : { readSnapshot: readSnapshotPort }),
     routesRepository: (repo) => repositoryMatcher(config, handle.store, repo),
     ...(readSnapshotPort !== undefined || listFencedRepositories === undefined ? {} : { refresh }),
@@ -505,10 +516,11 @@ function createUnavailableFederatedStoreSource(
   const recoveryWatchSnapshot: FederatedStoreSource["watchSnapshot"] =
     handle.store.backend !== "convex"
       ? undefined
-      : (listener) =>
+      : (repository, listener) =>
           watchRecoveringFederatedSource({
             currentWatch: () => activeSource?.watchSnapshot,
             listener,
+            repository,
             refresh,
           });
   return {
@@ -523,6 +535,9 @@ function createUnavailableFederatedStoreSource(
       return activeSource?.questStore ?? questStore;
     },
     readError,
+    get readFullSnapshot() {
+      return activeSource?.readFullSnapshot;
+    },
     get readSnapshot() {
       return activeSource?.readSnapshot;
     },
@@ -535,6 +550,7 @@ function createUnavailableFederatedStoreSource(
 interface RecoveringFederatedWatchOptions {
   readonly currentWatch: () => FederatedStoreSource["watchSnapshot"];
   readonly listener: FederatedSnapshotWatchListener;
+  readonly repository: string | undefined;
   readonly refresh: () => Promise<void>;
 }
 
@@ -555,7 +571,7 @@ async function watchRecoveringFederatedSource(
         "[FEDERATED_REALTIME_UNAVAILABLE] the recovered backend is not ready for live updates; retry registration",
       );
     }
-    const openedSubscription = await watchSnapshot(options.listener);
+    const openedSubscription = await watchSnapshot(options.repository, options.listener);
     if (!subscribed) {
       await openedSubscription.unsubscribe();
       return;

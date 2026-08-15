@@ -11,6 +11,7 @@ import {
   type EventFilter,
   type Evidence,
   eventFilterSchema,
+  federatedListDumpSchema,
   type NewEvidence,
   type NewQuest,
   newEvidenceSchema,
@@ -28,13 +29,13 @@ import {
   questTransitionSchema,
   type SignoffBatchInput,
   type SignoffBatchResult,
-  STORE_SCHEMA_VERSION,
   signoffBatchInputSchema,
   stableSerialize,
   type TouchQuestInput,
   touchQuestInputSchema,
 } from "../../schema";
 import type {
+  FederatedFullSnapshot,
   FederatedReadSnapshot,
   FederatedSnapshotWatchListener,
   AcceptQuestAndExportResult as PortAcceptQuestAndExportResult,
@@ -118,6 +119,26 @@ function isMissingFencedRepositoriesQuery(error: unknown): boolean {
   );
 }
 
+type FederatedListSnapshotFailure = "confirmed-missing" | "opaque-server-error";
+
+function federatedListSnapshotFailure(error: unknown): FederatedListSnapshotFailure | undefined {
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+  const message = error.message.trim();
+  if (
+    /(?:could not find|not found|does not exist|not a function).*federatedListSnapshot|federatedListSnapshot.*(?:could not find|not found|does not exist|not a function)/i.test(
+      message,
+    )
+  ) {
+    return "confirmed-missing";
+  }
+  // Production Convex redacts a missing public function to this request envelope.
+  return /^\[Request ID: [0-9a-f]+\] Server Error$/i.test(message)
+    ? "opaque-server-error"
+    : undefined;
+}
+
 function isMissingFederatedSnapshotQuery(error: unknown): boolean {
   return (
     error instanceof Error &&
@@ -125,6 +146,19 @@ function isMissingFederatedSnapshotQuery(error: unknown): boolean {
       error.message,
     )
   );
+}
+
+function projectFederatedListSnapshot(
+  snapshot: FederatedReadSnapshot | FederatedFullSnapshot,
+): FederatedReadSnapshot {
+  return {
+    dump: federatedListDumpSchema.parse({
+      schema_version: snapshot.dump.schema_version,
+      quests: snapshot.dump.quests,
+      chains: snapshot.dump.chains,
+    }),
+    fencedRepositories: [...snapshot.fencedRepositories],
+  };
 }
 
 function addConfiguredLeaseTtl<T extends { readonly lease_ttl_minutes?: number | undefined }>(
@@ -143,6 +177,7 @@ export class ConvexStore implements QuestStore {
   readonly #ownsClients: boolean;
   readonly #leaseTtlMinutes: number;
   #failNextEventAppend = false;
+  #federatedListSnapshotAvailable: boolean | undefined;
 
   constructor(deployment: string, options: ConvexStoreOptions = {}) {
     this.deployment = deployment;
@@ -290,7 +325,43 @@ export class ConvexStore implements QuestStore {
     }
   }
 
-  async readFederatedSnapshot(): Promise<FederatedReadSnapshot> {
+  async #readFederatedListSnapshot(repository?: string): Promise<{
+    readonly source: "legacy" | "list";
+    readonly snapshot: FederatedReadSnapshot;
+  }> {
+    if (this.#federatedListSnapshotAvailable === false) {
+      return {
+        source: "legacy",
+        snapshot: projectFederatedListSnapshot(await this.readFederatedFullSnapshot()),
+      };
+    }
+    try {
+      const snapshot = await this.#clients.http.query(convexApi.federatedListSnapshot, {
+        ...authTokenInput(this.#clients),
+        ...(repository === undefined
+          ? {}
+          : { repository: questSchema.shape.repo.parse(repository) }),
+      });
+      this.#federatedListSnapshotAvailable = true;
+      return { source: "list", snapshot };
+    } catch (error: unknown) {
+      const failure = federatedListSnapshotFailure(error);
+      if (failure !== undefined) {
+        const snapshot = projectFederatedListSnapshot(await this.readFederatedFullSnapshot());
+        if (failure === "confirmed-missing") {
+          this.#federatedListSnapshotAvailable = false;
+        }
+        return { source: "legacy", snapshot };
+      }
+      throw error;
+    }
+  }
+
+  async readFederatedSnapshot(repository?: string): Promise<FederatedReadSnapshot> {
+    return (await this.#readFederatedListSnapshot(repository)).snapshot;
+  }
+
+  async readFederatedFullSnapshot(): Promise<FederatedFullSnapshot> {
     try {
       return await this.#clients.http.query(convexApi.federatedSnapshot, {
         ...authTokenInput(this.#clients),
@@ -298,7 +369,7 @@ export class ConvexStore implements QuestStore {
     } catch (error: unknown) {
       if (isMissingFederatedSnapshotQuery(error)) {
         throw new Error(
-          "[FEDERATED_SNAPSHOT_QUERY_UNAVAILABLE] this Convex deployment does not expose `quest:federatedSnapshot`; deploy the current Quest backend before federated reads",
+          "[FEDERATED_FULL_SNAPSHOT_QUERY_UNAVAILABLE] this Convex deployment does not expose `quest:federatedSnapshot`; deploy the current Quest backend before federated history or export reads",
         );
       }
       throw error;
@@ -306,23 +377,19 @@ export class ConvexStore implements QuestStore {
   }
 
   async watchFederatedSnapshot(
+    repository: string | undefined,
     listener: FederatedSnapshotWatchListener,
   ): Promise<WatchSubscription> {
     let active = true;
     let leaseTimer: ReturnType<typeof setTimeout> | undefined;
-    let leaseCutoff = await this.serverTime();
+    const [initialLeaseCutoff, initialSnapshot] = await Promise.all([
+      this.serverTime(),
+      this.#readFederatedListSnapshot(repository),
+    ]);
+    let leaseCutoff = initialLeaseCutoff;
     let leaseCutoffObservedAt = Date.now();
     let snapshotRevision = 0;
-    let latestSnapshot: FederatedReadSnapshot = {
-      dump: {
-        schema_version: STORE_SCHEMA_VERSION,
-        chains: [],
-        events: [],
-        evidence: [],
-        quests: [],
-      },
-      fencedRepositories: [],
-    };
+    let latestSnapshot = initialSnapshot.snapshot;
 
     const retryLeaseRefresh = (error: unknown): void => {
       if (!active) {
@@ -357,7 +424,7 @@ export class ConvexStore implements QuestStore {
       const refreshRevision = snapshotRevision;
       const [nextLeaseCutoff, snapshot] = await Promise.all([
         this.serverTime(),
-        this.readFederatedSnapshot(),
+        this.readFederatedSnapshot(repository),
       ]);
       if (!active || refreshRevision !== snapshotRevision) {
         return;
@@ -366,34 +433,46 @@ export class ConvexStore implements QuestStore {
       leaseCutoff = nextLeaseCutoff;
       leaseCutoffObservedAt = Date.now();
       latestSnapshot = {
-        dump: questDumpSchema.parse(snapshot.dump),
+        dump: federatedListDumpSchema.parse(snapshot.dump),
         fencedRepositories: [...snapshot.fencedRepositories],
       };
       listener(latestSnapshot);
       scheduleLeaseRefresh();
     };
 
-    const subscription = this.#clients.realtime.onUpdate(
-      convexApi.federatedSnapshot,
-      { ...authTokenInput(this.#clients) },
-      (snapshot) => {
-        if (!active) {
-          return;
-        }
-        snapshotRevision += 1;
-        latestSnapshot = {
-          dump: questDumpSchema.parse(snapshot.dump),
-          fencedRepositories: [...snapshot.fencedRepositories],
-        };
-        listener(latestSnapshot);
-        scheduleLeaseRefresh();
-      },
-      (error) => {
-        if (active) {
-          listener(latestSnapshot, realtimeWatchError(error));
-        }
-      },
-    );
+    const receiveSnapshot = (snapshot: FederatedReadSnapshot | FederatedFullSnapshot): void => {
+      if (!active) {
+        return;
+      }
+      snapshotRevision += 1;
+      latestSnapshot = projectFederatedListSnapshot(snapshot);
+      listener(latestSnapshot);
+      scheduleLeaseRefresh();
+    };
+    const receiveError = (error: unknown): void => {
+      if (active) {
+        listener(latestSnapshot, realtimeWatchError(error));
+      }
+    };
+    const subscription =
+      initialSnapshot.source === "list"
+        ? this.#clients.realtime.onUpdate(
+            convexApi.federatedListSnapshot,
+            {
+              ...authTokenInput(this.#clients),
+              ...(repository === undefined
+                ? {}
+                : { repository: questSchema.shape.repo.parse(repository) }),
+            },
+            receiveSnapshot,
+            receiveError,
+          )
+        : this.#clients.realtime.onUpdate(
+            convexApi.federatedSnapshot,
+            { ...authTokenInput(this.#clients) },
+            receiveSnapshot,
+            receiveError,
+          );
     return {
       unsubscribe: async () => {
         if (!active) {
