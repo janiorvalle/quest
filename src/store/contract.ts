@@ -18,6 +18,8 @@ export type QuestStoreHarness = {
   store: QuestStore;
   /** Resolves a requested actor to the identity the backend records for this harness. */
   resolveActor?: (requestedActor: string) => string;
+  /** Returns the authenticated store used when the backend derives actors from credentials. */
+  storeForActor?: (actor: string) => QuestStore;
   /** Makes the next event append reject after its domain mutation has been prepared. */
   failNextEventAppend: () => Promise<void>;
   /** Waits until mutations already submitted to the store have reached registered watchers. */
@@ -89,6 +91,10 @@ export function defineQuestStoreContract(name: string, factory: QuestStoreFactor
       test.serial(scenario.name, () => scenario.run(factory));
     }
   });
+}
+
+export function defineReviewerHandoffContract(name: string, factory: QuestStoreFactory): void {
+  test.serial(name, () => verifyTurninLeaseRelease(factory));
 }
 
 export async function inspectQuestStoreContract(
@@ -258,6 +264,67 @@ async function verifyIllegalTransition(factory: QuestStoreFactory): Promise<void
     }
     expect(await store.getQuest(quest.id)).toEqual(acceptedBefore);
     expect(await store.events(quest.id)).toEqual(acceptedEventsBefore);
+  });
+}
+
+async function verifyTurninLeaseRelease(factory: QuestStoreFactory): Promise<void> {
+  await withHarness(factory, async (harness) => {
+    const resolveActor = harness.resolveActor ?? identityActor;
+    const owner = resolveActor("contract/owner");
+    const reviewer = resolveActor("contract/reviewer");
+    const ownerStore = harness.storeForActor?.(owner) ?? harness.store;
+    const reviewerStore = harness.storeForActor?.(reviewer) ?? harness.store;
+    const quest = await ownerStore.addQuest(taskInput("turn-in lease release"));
+    const acceptance = await ownerStore.acceptQuest({ id: quest.id, owner });
+    requireContract(acceptance.outcome === "accepted", "lease release fixture must be accepted");
+
+    const beforeRejectedTurnin = snapshotDump(await ownerStore.exportAll());
+    let rejection: unknown;
+    try {
+      await reviewerStore.transition(quest.id, {
+        action: "turnin",
+        actor: reviewer,
+        pr: null,
+        session_guild: null,
+      });
+    } catch (error: unknown) {
+      rejection = error;
+    }
+    requireContract(
+      rejection instanceof Error &&
+        rejection.message.includes(
+          `[QUEST_LEASE_HELD] quest ${quest.id} lease owned by ${owner}; stop, ${owner} has it`,
+        ),
+      "non-owner turn-in must expose QUEST_LEASE_HELD with the current owner",
+    );
+    expect(await ownerStore.exportAll()).toEqual(beforeRejectedTurnin);
+
+    const turnedIn = await ownerStore.transition(quest.id, {
+      action: "turnin",
+      actor: owner,
+      pr: null,
+      session_guild: null,
+    });
+    requireContract(
+      turnedIn.status === "turned_in" && turnedIn.lease_expires_at === null,
+      "turn-in must clear the accepted quest lease",
+    );
+
+    const completed = await reviewerStore.transition(quest.id, {
+      action: "complete",
+      actor: reviewer,
+      session_guild: null,
+    });
+    requireContract(
+      completed.status === "complete" && completed.lease_expires_at === null,
+      "a reviewer must complete a turned-in quest without owning its former lease",
+    );
+    expect((await ownerStore.events(quest.id)).map(({ action }) => action)).toEqual([
+      "add",
+      "accept",
+      "turnin",
+      "complete",
+    ]);
   });
 }
 

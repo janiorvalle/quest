@@ -4,6 +4,8 @@ import { dirname } from "node:path";
 
 import {
   allocateDisplayId,
+  assertActiveLeaseOwner,
+  assertLeaseOwner,
   assertLifecycleActionAllowed,
   canApplyVerdict,
   computeQuestPlan,
@@ -19,6 +21,7 @@ import {
   statusAfterClaimRelease,
   statusForRetestVerdict,
   statusForVerdict,
+  transitionRequiresLeaseOwner,
 } from "../../domain";
 import {
   type AcceptQuestInput,
@@ -566,7 +569,7 @@ export class SqliteStore implements QuestStore {
       const current = this.#requireStoredQuest(parsed.id);
       this.#requireRepositoryUnfenced(current.repo);
       const timestamp = this.#now();
-      this.#requireActiveLeaseOwner(current, parsed.owner, timestamp);
+      assertActiveLeaseOwner(current, parsed.owner, timestamp);
       const updated = questSchema.parse({
         ...current,
         lease_expires_at: leaseExpiry(timestamp, parsed.lease_ttl_minutes ?? this.#leaseTtlMinutes),
@@ -594,8 +597,13 @@ export class SqliteStore implements QuestStore {
       this.#requireRepositoryUnfenced(current.repo);
       const timestamp = this.#now();
       const updated = this.#applyTransition(current, parsedTransition, timestamp);
-      if (parsedTransition.action !== "signoff") {
-        this.#requireLeaseOwner(current, parsedTransition.actor, timestamp);
+      if (transitionRequiresLeaseOwner(current, parsedTransition.action)) {
+        assertLeaseOwner(
+          current,
+          parsedTransition.actor,
+          timestamp,
+          this.#hasAcceptedEvent(current.id, parsedTransition.actor),
+        );
       }
       if (parsedTransition.action !== "signoff") {
         this.#updateQuest(updated);
@@ -791,7 +799,12 @@ export class SqliteStore implements QuestStore {
 
       const current = this.#requireStoredQuest(parsed.link.quest_id);
       const timestamp = this.#now();
-      this.#requireLeaseOwner(current, parsed.actor, timestamp);
+      assertLeaseOwner(
+        current,
+        parsed.actor,
+        timestamp,
+        this.#hasAcceptedEvent(current.id, parsed.actor),
+      );
       if (current.status === "accepted") {
         this.#updateQuest(this.#renewLease(current, timestamp, parsed.lease_ttl_minutes));
       }
@@ -831,7 +844,12 @@ export class SqliteStore implements QuestStore {
       }
       const current = this.#requireStoredQuest(parsed.link.quest_id);
       const timestamp = this.#now();
-      this.#requireLeaseOwner(current, parsed.actor, timestamp);
+      assertLeaseOwner(
+        current,
+        parsed.actor,
+        timestamp,
+        this.#hasAcceptedEvent(current.id, parsed.actor),
+      );
       if (current.status === "accepted") {
         this.#updateQuest(this.#renewLease(current, timestamp, parsed.lease_ttl_minutes));
       }
@@ -858,7 +876,12 @@ export class SqliteStore implements QuestStore {
         throw new Error(signoffNotCompleteMessage(current.id, current.status));
       }
       if (parsed.stage !== "signoff") {
-        this.#requireLeaseOwner(current, parsed.added_by, timestamp);
+        assertLeaseOwner(
+          current,
+          parsed.added_by,
+          timestamp,
+          this.#hasAcceptedEvent(current.id, parsed.added_by),
+        );
       }
       if (current.status === "accepted") {
         this.#updateQuest(this.#renewLease(current, timestamp, parsed.lease_ttl_minutes));
@@ -2155,50 +2178,6 @@ export class SqliteStore implements QuestStore {
       lease_expires_at: leaseExpiry(timestamp, leaseTtlMinutes ?? this.#leaseTtlMinutes),
       updated_at: timestamp,
     });
-  }
-
-  #requireLeaseOwner(quest: Quest, actor: string, now: string): void {
-    if (quest.status !== "accepted") {
-      return;
-    }
-    if (quest.lease_expires_at === null || isLeaseExpired(quest.lease_expires_at, now)) {
-      if (quest.assignee === actor) {
-        throw new Error(`quest ${quest.id} lease expired; re-accept to continue`);
-      }
-      if (this.#hasAcceptedEvent(quest.id, actor)) {
-        throw new Error(`quest ${quest.id} lease expired; stop, ${quest.assignee} has it`);
-      }
-      throw new Error(`quest ${quest.id} lease expired; re-accept to continue`);
-    }
-    if (quest.assignee === actor) {
-      return;
-    }
-    if (this.#hasAcceptedEvent(quest.id, actor)) {
-      throw new Error(`quest ${quest.id} lease expired; stop, ${quest.assignee} has it`);
-    }
-    if (quest.assignee === null) {
-      throw new Error(`quest ${quest.id} has no active lease; re-accept to continue`);
-    }
-    throw new Error(
-      `quest ${quest.id} lease owned by ${quest.assignee}; stop, ${quest.assignee} has it`,
-    );
-  }
-
-  #requireActiveLeaseOwner(quest: Quest, owner: string, now: string): void {
-    if (quest.status !== "accepted") {
-      throw new Error(`quest ${quest.id} is not accepted; re-accept to continue`);
-    }
-    if (quest.assignee !== owner) {
-      if (quest.assignee === null) {
-        throw new Error(`quest ${quest.id} has no active lease; re-accept to continue`);
-      }
-      throw new Error(
-        `quest ${quest.id} lease owned by ${quest.assignee}; stop, ${quest.assignee} has it`,
-      );
-    }
-    if (quest.lease_expires_at === null || isLeaseExpired(quest.lease_expires_at, now)) {
-      throw new Error(`quest ${quest.id} lease expired; re-accept to continue`);
-    }
   }
 
   #hasAcceptedEvent(id: number, actor: string): boolean {
