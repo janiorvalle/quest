@@ -353,3 +353,10 @@ export const questDumpSchema = z.strictObject({
   events: z.array(eventSchema),
 });
 export type QuestDump = z.infer<typeof questDumpSchema>;
+
+export const federatedListDumpSchema = questDumpSchema.pick({
+  schema_version: true,
+  quests: true,
+  chains: true,
+});
+export type FederatedListDump = z.infer<typeof federatedListDumpSchema>;
