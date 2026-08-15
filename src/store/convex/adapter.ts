@@ -119,13 +119,24 @@ function isMissingFencedRepositoriesQuery(error: unknown): boolean {
   );
 }
 
-function isMissingFederatedListSnapshotQuery(error: unknown): boolean {
-  return (
-    error instanceof Error &&
+type FederatedListSnapshotFailure = "confirmed-missing" | "opaque-server-error";
+
+function federatedListSnapshotFailure(error: unknown): FederatedListSnapshotFailure | undefined {
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+  const message = error.message.trim();
+  if (
     /(?:could not find|not found|does not exist|not a function).*federatedListSnapshot|federatedListSnapshot.*(?:could not find|not found|does not exist|not a function)/i.test(
-      error.message,
+      message,
     )
-  );
+  ) {
+    return "confirmed-missing";
+  }
+  // Production Convex redacts a missing public function to this request envelope.
+  return /^\[Request ID: [0-9a-f]+\] Server Error$/i.test(message)
+    ? "opaque-server-error"
+    : undefined;
 }
 
 function isMissingFederatedSnapshotQuery(error: unknown): boolean {
@@ -334,12 +345,13 @@ export class ConvexStore implements QuestStore {
       this.#federatedListSnapshotAvailable = true;
       return { source: "list", snapshot };
     } catch (error: unknown) {
-      if (isMissingFederatedListSnapshotQuery(error)) {
-        this.#federatedListSnapshotAvailable = false;
-        return {
-          source: "legacy",
-          snapshot: projectFederatedListSnapshot(await this.readFederatedFullSnapshot()),
-        };
+      const failure = federatedListSnapshotFailure(error);
+      if (failure !== undefined) {
+        const snapshot = projectFederatedListSnapshot(await this.readFederatedFullSnapshot());
+        if (failure === "confirmed-missing") {
+          this.#federatedListSnapshotAvailable = false;
+        }
+        return { source: "legacy", snapshot };
       }
       throw error;
     }

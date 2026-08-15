@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { newQuestSchema, questSchema, STORE_SCHEMA_VERSION } from "../../schema";
+import type { FederatedReadSnapshot } from "../port";
 import { ConvexStore } from "./adapter";
 import { type ConvexClientPair, convexApi } from "./client";
 
@@ -123,7 +124,7 @@ describe("Convex reactive watches", () => {
             return timestamp;
           }
           if (query === convexApi.federatedListSnapshot) {
-            throw new Error("Could not find public function quest:federatedListSnapshot");
+            throw new Error("[Request ID: bfdf4caebe0312d8] Server Error");
           }
           return fullSnapshot;
         },
@@ -157,6 +158,72 @@ describe("Convex reactive watches", () => {
       },
     ]);
     await subscription.unsubscribe();
+  });
+
+  test("retries the list query when an ambiguous legacy probe also fails", async () => {
+    let listQueries = 0;
+    const listSnapshot: FederatedReadSnapshot = {
+      dump: { chains: [], quests: [], schema_version: STORE_SCHEMA_VERSION },
+      fencedRepositories: [],
+    };
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.federatedListSnapshot) {
+            listQueries += 1;
+            if (listQueries === 1) {
+              throw new Error("[Request ID: bfdf4caebe0312d8] Server Error");
+            }
+            return listSnapshot;
+          }
+          throw new Error("temporary legacy snapshot failure");
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.readFederatedSnapshot("quest")).rejects.toThrow(
+      "temporary legacy snapshot failure",
+    );
+    expect(await store.readFederatedSnapshot("quest")).toEqual(listSnapshot);
+    expect(listQueries).toBe(2);
+  });
+
+  test("does not cache an opaque server error after a successful legacy fallback", async () => {
+    let listQueries = 0;
+    const listSnapshot: FederatedReadSnapshot = {
+      dump: { chains: [], quests: [], schema_version: STORE_SCHEMA_VERSION },
+      fencedRepositories: [],
+    };
+    const fullSnapshot = {
+      dump: {
+        ...listSnapshot.dump,
+        events: [],
+        evidence: [],
+      },
+      fencedRepositories: [],
+    };
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.federatedListSnapshot) {
+            listQueries += 1;
+            if (listQueries === 1) {
+              throw new Error("[Request ID: bfdf4caebe0312d8] Server Error");
+            }
+            return listSnapshot;
+          }
+          return fullSnapshot;
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    expect(await store.readFederatedSnapshot("quest")).toEqual(listSnapshot);
+    expect(await store.readFederatedSnapshot("quest")).toEqual(listSnapshot);
+    expect(listQueries).toBe(2);
   });
 
   test("streams federated snapshots and closes the realtime subscription", async () => {
