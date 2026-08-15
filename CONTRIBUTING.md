@@ -21,6 +21,24 @@ bun install
 `make setup` runs the same install plus an explicit `lefthook install` when
 the hooks need reinstalling.
 
+When development needs a Convex backend, start it with the repository's only
+local-backend command:
+
+```sh
+make backend
+```
+
+That target runs `CONVEX_AGENT_MODE=anonymous bunx convex dev` from an isolated
+scratch directory. It clears cloud selectors for the child process, copies the
+repository's functions into scratch, and deletes Convex's generated local files
+when the backend exits. The checkout's `.env.local` is never read or changed.
+
+Never run bare `bunx convex dev` or its configure flow for local testing. A bare
+configure inherits the terminal's active Convex account and can create a
+project on that account's team. This has happened twice, including one incident
+that rewrote this repository's `.env.local` to select a work-account project.
+Real deployments follow [docs/DEPLOY.md](docs/DEPLOY.md) instead.
+
 Run the same gate CI runs:
 
 ```sh
