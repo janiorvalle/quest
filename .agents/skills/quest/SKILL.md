@@ -86,6 +86,26 @@ An optional `guild = "<agent-class>"` in config is equivalent to
 different guild, while manual `accept` reports a mismatch and requires
 `--force`.
 
+## Local Convex backends
+
+This section applies only while editing the Quest source repository: the
+checkout whose `package.json` is named `quest` and whose `Makefile` defines the
+`backend` target. It does not define a backend command for repositories where
+Quest is only installed.
+
+When work in the Quest source repository needs a local Convex backend, run
+`make backend`. It is the only sanctioned local-backend command. The target
+runs `CONVEX_AGENT_MODE=anonymous bunx convex dev` from isolated scratch space,
+with cloud selectors cleared for that child process. The backend is local, and
+the checkout's `.env.local` is neither read nor changed.
+
+Never run bare `bunx convex dev` or its configure flow for local testing. A bare
+configure inherits the terminal's active Convex account and can create a
+project on that account's team. This has happened twice, including one incident
+that rewrote this repository's `.env.local` to select a work-account project.
+Use the real deployment ceremony in `docs/DEPLOY.md` only when the work
+explicitly requires a deployment.
+
 ## JSON report contract
 
 A successful JSON-producing command returns this envelope:

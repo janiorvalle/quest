@@ -12,6 +12,16 @@ team. Quest does not deploy to, or require access to, anyone else's project.
 
 Run every command below from the root of this repository.
 
+Local testing and real deployment are separate paths. For local testing, run
+`make backend` only; it isolates Convex from this checkout's `.env.local` and
+from cloud selectors in the shell, then forces anonymous mode. It cannot create
+a project on the account logged in to the terminal. Do not substitute a bare
+`bunx convex dev` or configure command. For a real deployment, use the
+administrator ceremony below: before creating or selecting anything, read the
+configure prompt's `Team:` line and confirm it names the team that should own
+Quest. Cancel if it does not. Only after that check should you continue through
+configuration and deployment.
+
 ## Create and deploy a project
 
 Install dependencies and configure a new Convex project. The CLI asks which
