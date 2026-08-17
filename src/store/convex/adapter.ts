@@ -902,14 +902,16 @@ export class ConvexStore implements QuestStore {
       current.event_high_water,
     );
     let committed = false;
+    let commitStarted = false;
     try {
       await this.activateRestore(token, parsed);
-      await this.commitRestore(token);
+      commitStarted = true;
+      await this.#commitRestoreResolvingAmbiguity(token);
       committed = true;
     } finally {
       if (committed) {
         await this.releaseRestore(token);
-      } else {
+      } else if (!commitStarted) {
         await this.rollbackRestore(token).catch(() => undefined);
       }
     }
@@ -1065,25 +1067,7 @@ export class ConvexStore implements QuestStore {
         if (committed) {
           return;
         }
-        let committedDump: QuestDump;
-        try {
-          committedDump = await this.commitRestore(token);
-        } catch (error: unknown) {
-          try {
-            committedDump = await this.commitRestore(token);
-          } catch {
-            let status: Awaited<ReturnType<ConvexStore["restoreStatus"]>>;
-            try {
-              status = await this.restoreStatus(token);
-            } catch {
-              throw error;
-            }
-            if (status.status !== "committed") {
-              throw error;
-            }
-            committedDump = status.dump;
-          }
-        }
+        const committedDump = await this.#commitRestoreResolvingAmbiguity(token);
         committed = true;
         expectedSnapshot = questDumpSchema.parse(committedDump);
         replacement = expectedSnapshot;
@@ -1239,6 +1223,32 @@ export class ConvexStore implements QuestStore {
       // Each mutation stays below Convex's transaction read/write limits.
     }
     this.#legacyRestoreTokens.delete(token);
+  }
+
+  async #commitRestoreResolvingAmbiguity(token: string): Promise<QuestDump> {
+    let firstError: unknown;
+    try {
+      return await this.commitRestore(token);
+    } catch (error: unknown) {
+      firstError = error;
+    }
+    try {
+      return await this.commitRestore(token);
+    } catch {
+      let status: Awaited<ReturnType<ConvexStore["restoreStatus"]>>;
+      try {
+        status = await this.restoreStatus(token);
+      } catch {
+        throw firstError;
+      }
+      if (status.status === "committed") {
+        return status.dump;
+      }
+      throw new Error(
+        `[CONVEX_RESTORE_COMMIT_UNRESOLVED] Convex restore ${token} may have started committing; retry commitRestore with this token until it reports committed, and do not roll it back`,
+        { cause: firstError },
+      );
+    }
   }
 
   async close(): Promise<void> {

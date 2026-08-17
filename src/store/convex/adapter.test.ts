@@ -418,6 +418,53 @@ describe("Convex atomic claim detail", () => {
 });
 
 describe("Convex restore rolling upgrades", () => {
+  test("resumes replaceAll when a commit response is lost after deletion starts", async () => {
+    const empty: QuestDump = {
+      schema_version: STORE_SCHEMA_VERSION,
+      quests: [],
+      evidence: [],
+      chains: [],
+      events: [],
+    };
+    const mutations: unknown[] = [];
+    let commitAttempts = 0;
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.serverTime) {
+            return timestamp;
+          }
+          return empty;
+        },
+        mutation: async (mutation: unknown) => {
+          mutations.push(mutation);
+          if (mutation === convexApi.beginRestore) {
+            return { status: "ready" };
+          }
+          if (mutation === convexApi.commitRestore) {
+            commitAttempts += 1;
+            if (commitAttempts === 1) {
+              throw new Error("connection closed after commit");
+            }
+            return { lease_cutoff: timestamp, status: "committed" };
+          }
+          if (mutation === convexApi.releaseRestore) {
+            return true;
+          }
+          return null;
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.replaceAll(empty)).resolves.toBeUndefined();
+
+    expect(commitAttempts).toBe(2);
+    expect(mutations).not.toContain(convexApi.rollbackRestore);
+    expect(mutations.at(-1)).toBe(convexApi.releaseRestore);
+  });
+
   test("uses the legacy monolithic restore only when the previous validator rejects paging", async () => {
     const empty: QuestDump = {
       schema_version: STORE_SCHEMA_VERSION,
