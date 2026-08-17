@@ -5,7 +5,12 @@ import { type JSONType, z } from "zod";
 import { normalizeConvexDeployment } from "../config";
 import { type CliOutputBoundary, EXIT_SUCCESS, type ExitCode, formatQuestReport } from "../output";
 import { type Config, questReportSchema } from "../schema";
-import { type ConvexMember, convexApi, createConvexHttpClient } from "../store";
+import {
+  type ConvexMember,
+  clientProtocolInput,
+  convexApi,
+  createConvexHttpClient,
+} from "../store";
 import type { CliPrompter } from "./prompt";
 import type { CliFormat } from "./scope";
 import { hasQuestSkillInstalled, QUEST_SKILL_INSTALL_SUGGESTION } from "./skill";
@@ -528,37 +533,45 @@ export function createConvexOnboardingOperations(): ConvexOnboardingOperations {
   return {
     migrateReadyStatuses: (deployment, adminSecret) =>
       createConvexHttpClient(deployment).mutation(convexApi.migrateReadyStatuses, {
+        ...clientProtocolInput(),
         admin_secret: adminSecret,
       }),
     invite: (deployment, name, adminSecret) =>
       createConvexHttpClient(deployment).mutation(convexApi.membersInvite, {
+        ...clientProtocolInput(),
         admin_secret: adminSecret,
         name,
       }),
     rotate: (deployment, name, adminSecret) =>
       createConvexHttpClient(deployment).mutation(convexApi.membersRotate, {
+        ...clientProtocolInput(),
         admin_secret: adminSecret,
         name,
       }),
     remove: (deployment, name, adminSecret) =>
       createConvexHttpClient(deployment).mutation(convexApi.membersRemove, {
+        ...clientProtocolInput(),
         admin_secret: adminSecret,
         name,
       }),
     list: (deployment, adminSecret) =>
       createConvexHttpClient(deployment).query(convexApi.membersList, {
+        ...clientProtocolInput(),
         admin_secret: adminSecret,
       }),
     join: (deployment, inviteToken) =>
       createConvexHttpClient(deployment).mutation(convexApi.join, {
+        ...clientProtocolInput(),
         invite_token: inviteToken,
       }),
     whoami: (deployment, authToken) =>
       createConvexHttpClient(deployment).mutation(convexApi.whoami, {
+        ...clientProtocolInput(),
         auth_token: authToken,
       }),
     repositories: async (deployment, authToken) => {
       const stats = await createConvexHttpClient(deployment).query(convexApi.stats, {
+        ...clientProtocolInput(),
         auth_token: authToken,
         lease_cutoff: new Date().toISOString(),
         scope: { repo: null },

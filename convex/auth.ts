@@ -10,6 +10,10 @@ import {
 } from "convex/server";
 import { ConvexError, v } from "convex/values";
 
+import {
+  type ClientProtocolInput,
+  MINIMUM_QUEST_CLIENT_PROTOCOL,
+} from "../src/store/convex/protocol";
 import type schema from "./schema";
 
 export type MemberMutationContext = GenericMutationCtx<
@@ -64,16 +68,38 @@ export const questApiKeys = new ApiKeys(componentApiKeys(), {
   prefix: "qtk",
 });
 
-type MemberAuthErrorCode = "QUEST_CONVEX_TOKEN_REQUIRED" | "QUEST_CONVEX_TOKEN_INVALID";
+type MemberAuthErrorCode =
+  | "QUEST_CLI_OUTDATED"
+  | "QUEST_CONVEX_TOKEN_REQUIRED"
+  | "QUEST_CONVEX_TOKEN_INVALID";
 
 function failMemberAuth(code: MemberAuthErrorCode, message: string): never {
   throw new ConvexError({ code, message });
 }
 
+export function requireClientProtocol(clientProtocol: number | undefined): void {
+  if (
+    clientProtocol === undefined ||
+    !Number.isSafeInteger(clientProtocol) ||
+    clientProtocol < MINIMUM_QUEST_CLIENT_PROTOCOL
+  ) {
+    failMemberAuth(
+      "QUEST_CLI_OUTDATED",
+      "this Quest CLI is too old for this Convex deployment; run `quest upgrade`, then retry. No read or mutation was attempted.",
+    );
+  }
+}
+
+type MemberCredentials = ClientProtocolInput & {
+  readonly auth_token?: string;
+};
+
 export async function requireMemberActor(
   ctx: Pick<MemberMutationContext, "runMutation">,
-  authToken: string | undefined,
+  credentials: MemberCredentials,
 ): Promise<string> {
+  requireClientProtocol(credentials.client_protocol);
+  const authToken = credentials.auth_token;
   if (authToken === undefined || authToken.trim() === "") {
     return failMemberAuth(
       "QUEST_CONVEX_TOKEN_REQUIRED",
@@ -112,8 +138,10 @@ export const expireMemberTokenReference = makeFunctionReference<
 
 export async function requireMemberQueryActor(
   ctx: MemberQueryContext,
-  authToken: string | undefined,
+  credentials: MemberCredentials,
 ): Promise<string> {
+  requireClientProtocol(credentials.client_protocol);
+  const authToken = credentials.auth_token;
   if (authToken === undefined || authToken.trim() === "") {
     return failMemberAuth(
       "QUEST_CONVEX_TOKEN_REQUIRED",
@@ -143,13 +171,13 @@ export async function requireMemberQueryActor(
 
 export const validateActorReference = makeFunctionReference<
   "mutation",
-  { readonly auth_token: string },
+  { readonly auth_token: string; readonly client_protocol?: number },
   string
 >("auth:validateActor");
 
 export const validateActor = internalMutationGeneric({
-  args: { auth_token: v.string() },
-  handler: async (ctx: MemberMutationContext, args) => requireMemberActor(ctx, args.auth_token),
+  args: { auth_token: v.string(), client_protocol: v.optional(v.number()) },
+  handler: async (ctx: MemberMutationContext, args) => requireMemberActor(ctx, args),
 });
 
 export const expireMemberToken = internalMutationGeneric({

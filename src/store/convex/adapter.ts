@@ -50,6 +50,7 @@ import {
   type ConvexClientPair,
   closeConvexClientPair,
   convexApi,
+  convexClientProtocolInput,
   createConvexClientPair,
 } from "./client";
 
@@ -546,7 +547,7 @@ export class ConvexStore implements QuestStore {
   }
 
   async serverTime(): Promise<string> {
-    return this.#clients.http.query(convexApi.serverTime, {});
+    return this.#clients.http.query(convexApi.serverTime, convexClientProtocolInput(this.#clients));
   }
 
   async exportAllAt(leaseCutoff: string): Promise<QuestDump> {
@@ -794,6 +795,7 @@ export class ConvexStore implements QuestStore {
       fence: async (repository) => {
         await renew();
         await this.#clients.http.mutation(convexApi.fenceRepository, {
+          ...convexClientProtocolInput(this.#clients),
           repo: repository,
           target_backend: "migration",
           token,
@@ -802,6 +804,7 @@ export class ConvexStore implements QuestStore {
       unfence: async (repository) => {
         await renew();
         return this.#clients.http.mutation(convexApi.unfenceRepository, {
+          ...convexClientProtocolInput(this.#clients),
           repo: repository,
           token,
         });

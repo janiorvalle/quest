@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ConvexHttpClient } from "convex/browser";
 import { type NewQuest, type QuestDump, STORE_SCHEMA_VERSION } from "../../schema";
 import {
   type BlobStoreFactory,
@@ -15,6 +16,7 @@ import { ConvexStore } from "./adapter";
 import { ConvexBackupDatabase } from "./backup";
 import { ConvexBlobStore } from "./blob-store";
 import { closeConvexClientPair, convexApi, createConvexClientPair } from "./client";
+import { MINIMUM_QUEST_CLIENT_PROTOCOL } from "./protocol";
 
 const deployment = process.env["QUEST_CONVEX_TEST_URL"];
 const authToken = process.env["QUEST_CONVEX_TEST_TOKEN"];
@@ -37,6 +39,46 @@ async function flushConvexSubscription(): Promise<void> {
 if (deployment === undefined || authToken === undefined) {
   test.skip("Convex contract suite requires QUEST_CONVEX_TEST_URL and QUEST_CONVEX_TEST_TOKEN", () => {});
 } else {
+  test.serial("Convex rejects outdated clients before member authentication", async () => {
+    const outdatedClient = new ConvexHttpClient(deployment, {
+      logger: false,
+      skipConvexDeploymentUrlCheck: true,
+    });
+    const errors: string[] = [];
+    for (const args of [{}, { client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL - 1 }]) {
+      try {
+        await outdatedClient.query(convexApi.federatedSnapshot, args);
+      } catch (error: unknown) {
+        errors.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    expect(errors).toHaveLength(2);
+    for (const error of errors) {
+      expect(error).toContain("QUEST_CLI_OUTDATED");
+      expect(error).toContain("quest upgrade");
+      expect(error).not.toContain("QUEST_CONVEX_TOKEN_REQUIRED");
+    }
+
+    let joinError = "";
+    try {
+      await outdatedClient.mutation(convexApi.join, { invite_token: "not-consumed" });
+    } catch (error: unknown) {
+      joinError = error instanceof Error ? error.message : String(error);
+    }
+    expect(joinError).toContain("QUEST_CLI_OUTDATED");
+    expect(joinError).not.toContain("QUEST_INVITE_INVALID");
+
+    const clients = createConvexClientPair(deployment, { authToken });
+    try {
+      await expect(
+        clients.http.query(convexApi.federatedSnapshot, { auth_token: authToken }),
+      ).resolves.toBeDefined();
+    } finally {
+      await closeConvexClientPair(clients);
+    }
+  });
+
   const questStoreFactory: QuestStoreFactory = async () => {
     const clients = createConvexClientPair(deployment, { authToken });
     const store = new ConvexStore(deployment, { clients });

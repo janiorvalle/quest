@@ -5,6 +5,7 @@ export {
 } from "./compatibility";
 export {
   authTokenInput,
+  type ClientProtocolInput,
   CONVEX_OLDER_STORE_REMEDY,
   ConvexBackupDatabase,
   ConvexBlobStore,
@@ -15,12 +16,15 @@ export {
   type ConvexMemberStatus,
   ConvexStore,
   type ConvexStoreOptions,
+  clientProtocolInput,
   closeConvexClientPair,
   convexApi,
   createConvexClientPair,
   createConvexClock,
   createConvexHttpClient,
   createConvexStoreCompatibilityProbe,
+  MINIMUM_QUEST_CLIENT_PROTOCOL,
+  QUEST_CLIENT_PROTOCOL,
 } from "./convex";
 export { LocalBlobStore } from "./local-blob-store";
 export type {

@@ -13,6 +13,7 @@ import {
   hashMemberToken,
   type MemberMutationContext,
   questApiKeys,
+  requireClientProtocol,
   requireMemberActor,
 } from "./auth";
 import type schema from "./schema";
@@ -160,7 +161,11 @@ export async function revokeOwnerKeys(
 }
 
 export const invite = mutationGeneric({
-  args: { admin_secret: v.string(), name: v.string() },
+  args: {
+    admin_secret: v.string(),
+    client_protocol: v.optional(v.number()),
+    name: v.string(),
+  },
   handler: async (ctx: MemberMutationContext, args) => {
     await assertAdminSecret(args.admin_secret);
     const name = normalizeMemberName(args.name);
@@ -197,7 +202,11 @@ export const invite = mutationGeneric({
 });
 
 export const rotate = mutationGeneric({
-  args: { admin_secret: v.string(), name: v.string() },
+  args: {
+    admin_secret: v.string(),
+    client_protocol: v.optional(v.number()),
+    name: v.string(),
+  },
   handler: async (ctx: MemberMutationContext, args) => {
     await assertAdminSecret(args.admin_secret);
     const name = normalizeMemberName(args.name);
@@ -251,7 +260,11 @@ export const rotate = mutationGeneric({
 });
 
 export const remove = mutationGeneric({
-  args: { admin_secret: v.string(), name: v.string() },
+  args: {
+    admin_secret: v.string(),
+    client_protocol: v.optional(v.number()),
+    name: v.string(),
+  },
   handler: async (ctx: MemberMutationContext, args) => {
     await assertAdminSecret(args.admin_secret);
     const name = normalizeMemberName(args.name);
@@ -273,7 +286,7 @@ export const remove = mutationGeneric({
 });
 
 export const list = queryGeneric({
-  args: { admin_secret: v.string() },
+  args: { admin_secret: v.string(), client_protocol: v.optional(v.number()) },
   handler: async (ctx: MemberQueryContext, args) => {
     await assertAdminSecret(args.admin_secret);
     const members = await ctx.db.query("members").collect();
@@ -289,8 +302,9 @@ export const list = queryGeneric({
 });
 
 export const join = mutationGeneric({
-  args: { invite_token: v.string() },
+  args: { client_protocol: v.optional(v.number()), invite_token: v.string() },
   handler: async (ctx: MemberMutationContext, args) => {
+    requireClientProtocol(args.client_protocol);
     const inviteToken = args.invite_token.trim();
     const result = await questApiKeys.validate(ctx, { key: inviteToken });
     if (
@@ -341,8 +355,8 @@ export const join = mutationGeneric({
 });
 
 export const whoami = mutationGeneric({
-  args: { auth_token: v.string() },
+  args: { auth_token: v.string(), client_protocol: v.optional(v.number()) },
   handler: async (ctx: MemberMutationContext, args) => ({
-    member: await requireMemberActor(ctx, args.auth_token),
+    member: await requireMemberActor(ctx, args),
   }),
 });

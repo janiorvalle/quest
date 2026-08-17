@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import { convexApi, createConvexHttpClient } from "./client";
+import { QUEST_CLIENT_PROTOCOL } from "./protocol";
 
 function convexErrorResponse(
   code = "QUEST_INVITE_INVALID",
@@ -90,4 +91,78 @@ test("leaves non-Convex request failures unchanged", async () => {
 
   const error = await captureFailure(() => client.query(convexApi.serverTime, {}));
   expect(error).toBe(networkError);
+});
+
+test("adds the current client protocol to every HTTP function call", async () => {
+  const requestBodies: Array<Record<string, unknown>> = [];
+  const responses = ["2026-08-17T13:00:00.000Z", { member: "janiorvalle", token: "qtk" }, "sha"];
+  const fetchImplementation = async (
+    _input: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    if (typeof init?.body !== "string") {
+      throw new Error("expected Convex to send a JSON request body");
+    }
+    requestBodies.push(JSON.parse(init.body) as Record<string, unknown>);
+    return new Response(JSON.stringify({ status: "success", value: responses.shift() }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+  const client = createConvexHttpClient("https://example.convex.cloud", {
+    fetch: Object.assign(fetchImplementation, { preconnect: globalThis.fetch.preconnect }),
+  });
+
+  await client.query(convexApi.serverTime, {});
+  await client.mutation(convexApi.join, { invite_token: "invite" });
+  await client.action(convexApi.finalizeBlobUpload, {
+    sha256: "0".repeat(64),
+    storage_id: "storage-id",
+  });
+
+  expect(
+    requestBodies.map(
+      (body) => (body["args"] as Array<Record<string, unknown>>)[0]?.["client_protocol"],
+    ),
+  ).toEqual([QUEST_CLIENT_PROTOCOL, QUEST_CLIENT_PROTOCOL, QUEST_CLIENT_PROTOCOL]);
+});
+
+test("remembers a legacy backend after its validator rejects the protocol field", async () => {
+  const requestBodies: Array<Record<string, unknown>> = [];
+  const responses = [
+    new Response(
+      JSON.stringify({
+        status: "error",
+        errorMessage:
+          "ArgumentValidationError: Object contains extra field `client_protocol` that is not in the validator.",
+      }),
+      { headers: { "Content-Type": "application/json" }, status: 560 },
+    ),
+    new Response(JSON.stringify({ status: "success", value: "first" })),
+    new Response(JSON.stringify({ status: "success", value: "second" })),
+  ];
+  const fetchImplementation = async (
+    _input: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    if (typeof init?.body !== "string") {
+      throw new Error("expected Convex to send a JSON request body");
+    }
+    requestBodies.push(JSON.parse(init.body) as Record<string, unknown>);
+    const response = responses.shift();
+    if (response === undefined) {
+      throw new Error("unexpected Convex request");
+    }
+    return response;
+  };
+  const client = createConvexHttpClient("https://example.convex.cloud", {
+    fetch: Object.assign(fetchImplementation, { preconnect: globalThis.fetch.preconnect }),
+  });
+
+  expect(await client.query(convexApi.serverTime, {})).toBe("first");
+  expect(await client.query(convexApi.serverTime, {})).toBe("second");
+  expect(
+    requestBodies.map(
+      (body) => (body["args"] as Array<Record<string, unknown>>)[0]?.["client_protocol"],
+    ),
+  ).toEqual([QUEST_CLIENT_PROTOCOL, undefined, undefined]);
 });
