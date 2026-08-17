@@ -57,7 +57,9 @@ function httpClient(
   };
 }
 
-function fakeFileSystem(options: { readonly failFirstMove?: boolean } = {}) {
+function fakeFileSystem(
+  options: { readonly directoryEntries?: readonly string[]; readonly failFirstMove?: boolean } = {},
+) {
   const calls: string[] = [];
   let moveCount = 0;
   const fileSystem = {
@@ -75,6 +77,7 @@ function fakeFileSystem(options: { readonly failFirstMove?: boolean } = {}) {
       return `${parent}/.quest-upgrade-123`;
     },
     fileExists: async () => true,
+    listDirectory: async () => options.directoryEntries ?? [],
     move: async (source: string, destination: string) => {
       moveCount += 1;
       calls.push(`move:${source}->${destination}`);
@@ -93,6 +96,26 @@ function fakeFileSystem(options: { readonly failFirstMove?: boolean } = {}) {
     },
   } satisfies UpgradeFileSystem;
   return { calls, fileSystem };
+}
+
+function windowsReleasePayload(): string {
+  return JSON.stringify({
+    assets: [
+      {
+        browser_download_url:
+          "https://github.com/owner/repo/releases/download/v0.8.1/quest-0.8.1-windows-x64.exe",
+        name: "quest-0.8.1-windows-x64.exe",
+        url: artifactApiUrl,
+      },
+      {
+        browser_download_url: checksumsUrl,
+        name: "checksums.txt",
+        url: checksumsApiUrl,
+      },
+    ],
+    html_url: releaseUrl,
+    tag_name: "v0.8.1",
+  });
 }
 
 describe("upgrade service", () => {
@@ -222,6 +245,94 @@ describe("upgrade service", () => {
 
     await expect(operations.install("0.8.0")).resolves.toMatchObject({ installed: true });
     expect(refreshPaths).toEqual([join("/install", ".quest-upgrade-123", "quest")]);
+  });
+
+  test("cleans stale Windows artifacts, verifies the replacement, and retains its rollback", async () => {
+    const artifact = new TextEncoder().encode("quest 0.8.1");
+    const checksum = createHash("sha256").update(artifact).digest("hex");
+    const { calls, fileSystem } = fakeFileSystem({
+      directoryEntries: [".quest-upgrade-abandoned", "keep.txt"],
+    });
+    const replacementCalls: string[] = [];
+    const versionChecks: string[] = [];
+    const operations = createUpgradeOperations({
+      architecture: "x64",
+      executablePath: "/install/quest.exe",
+      fileSystem,
+      httpClient: httpClient(
+        new Map([
+          [latestUrl, response(windowsReleasePayload())],
+          [artifactApiUrl, response(artifact)],
+          [checksumsApiUrl, response(`${checksum}  quest-0.8.1-windows-x64.exe\n`)],
+        ]),
+        [],
+      ),
+      platform: "win32",
+      readExecutableVersion: async (versionRead) => {
+        versionChecks.push(`${versionRead.executablePath}:${versionRead.isolatedDataDirectory}`);
+        return "quest 0.8.1";
+      },
+      replaceExecutable: async (replacement) => {
+        replacementCalls.push(JSON.stringify(replacement));
+        return "replaced";
+      },
+      repository: "owner/repo",
+    });
+
+    await expect(operations.install("0.8.0")).resolves.toMatchObject({
+      current_version: "0.8.0",
+      installed: true,
+      latest_version: "0.8.1",
+    });
+    expect(calls.indexOf("rmdir:/install/.quest-upgrade-abandoned")).toBeLessThan(
+      calls.indexOf("mktemp:/install"),
+    );
+    expect(calls.indexOf("rm:/install/quest.exe.previous")).toBeLessThan(
+      calls.indexOf("mktemp:/install"),
+    );
+    expect(replacementCalls).toEqual([
+      JSON.stringify({
+        destination: "/install/quest.exe",
+        previousExecutable: "/install/quest.exe.previous",
+        stagedExecutable: "/install/.quest-upgrade-123/quest.exe",
+        temporaryDirectory: "/install/.quest-upgrade-123",
+      }),
+    ]);
+    expect(versionChecks).toEqual(["/install/quest.exe:/install/.quest-upgrade-123"]);
+    expect(calls.at(-1)).toBe("rmdir:/install/.quest-upgrade-123");
+    expect(calls.filter((call) => call === "rm:/install/quest.exe.previous")).toHaveLength(1);
+  });
+
+  test("keeps a failed Windows replacement staged and returns the manual finish command", async () => {
+    const artifact = new TextEncoder().encode("quest 0.8.1");
+    const checksum = createHash("sha256").update(artifact).digest("hex");
+    const { calls, fileSystem } = fakeFileSystem();
+    const operations = createUpgradeOperations({
+      architecture: "x64",
+      executablePath: "/install/quest.exe",
+      fileSystem,
+      httpClient: httpClient(
+        new Map([
+          [latestUrl, response(windowsReleasePayload())],
+          [artifactApiUrl, response(artifact)],
+          [checksumsApiUrl, response(`${checksum}  quest-0.8.1-windows-x64.exe\n`)],
+        ]),
+        [],
+      ),
+      platform: "win32",
+      replaceExecutable: async ({ destination, stagedExecutable }) => {
+        throw new Error(
+          `Windows could not replace ${destination}; the new binary remains at ${stagedExecutable}. Exit every quest process, then finish the upgrade in PowerShell with: Move-Item -LiteralPath '${stagedExecutable}' -Destination '${destination}' -Force (EPERM: destination is locked)`,
+        );
+      },
+      repository: "owner/repo",
+    });
+
+    await expect(operations.install("0.8.0")).rejects.toThrow(
+      "Move-Item -LiteralPath '/install/.quest-upgrade-123/quest.exe' -Destination '/install/quest.exe' -Force",
+    );
+    expect(calls).not.toContain("rmdir:/install/.quest-upgrade-123");
+    expect(calls).not.toContain("rm:/install/.quest-upgrade-123/quest.exe");
   });
 
   test("keeps a successful binary upgrade successful when skill refresh throws", async () => {

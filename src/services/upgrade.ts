@@ -1,5 +1,16 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, chmod, copyFile, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { z } from "zod";
 
@@ -57,11 +68,19 @@ export interface UpgradeFileSystem {
   readonly createDirectory: (path: string) => Promise<void>;
   readonly createTemporaryDirectory: (parent: string) => Promise<string>;
   readonly fileExists: (path: string) => Promise<boolean>;
+  readonly listDirectory: (path: string) => Promise<readonly string[]>;
   readonly move: (source: string, destination: string) => Promise<void>;
   readonly removeDirectory: (path: string) => Promise<void>;
   readonly removeFile: (path: string) => Promise<void>;
   readonly writeFile: (path: string, contents: Uint8Array) => Promise<void>;
 }
+
+export interface ExecutableVersionReadOptions {
+  readonly executablePath: string;
+  readonly isolatedDataDirectory: string;
+}
+
+export type ExecutableVersionReader = (options: ExecutableVersionReadOptions) => Promise<string>;
 
 export interface UpgradeLookupResult {
   readonly artifact: string;
@@ -113,6 +132,7 @@ export interface CreateUpgradeOperationsOptions {
   readonly fileSystem?: UpgradeFileSystem;
   readonly httpClient?: UpgradeHttpClient;
   readonly platform?: NodeJS.Platform;
+  readonly readExecutableVersion?: ExecutableVersionReader;
   readonly refreshInstalledSkills?: InstalledSkillRefresher;
   readonly replaceExecutable?: ExecutableReplacer;
   readonly repository?: string;
@@ -182,11 +202,55 @@ const defaultFileSystem: UpgradeFileSystem = {
       return false;
     }
   },
+  listDirectory: (path) => readdir(path),
   move: (source, destination) => rename(source, destination),
   removeDirectory: (path) => rm(path, { force: true, recursive: true }),
   removeFile: (path) => rm(path, { force: true }),
   writeFile: (path, contents) => writeFile(path, contents),
 };
+
+function isolatedVersionEnvironment(isolatedDataDirectory: string): NodeJS.ProcessEnv {
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => {
+      const normalizedKey = key.toUpperCase();
+      return (
+        !normalizedKey.startsWith("QUEST_") &&
+        normalizedKey !== "APPDATA" &&
+        normalizedKey !== "HOME" &&
+        normalizedKey !== "LOCALAPPDATA" &&
+        normalizedKey !== "USERPROFILE"
+      );
+    }),
+  );
+  return {
+    ...inherited,
+    APPDATA: join(isolatedDataDirectory, "appdata"),
+    HOME: isolatedDataDirectory,
+    LOCALAPPDATA: join(isolatedDataDirectory, "localappdata"),
+    USERPROFILE: isolatedDataDirectory,
+  };
+}
+
+function defaultExecutableVersionReader(options: ExecutableVersionReadOptions): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      options.executablePath,
+      ["--version"],
+      {
+        cwd: options.isolatedDataDirectory,
+        encoding: "utf8",
+        env: isolatedVersionEnvironment(options.isolatedDataDirectory),
+      },
+      (error, stdout) => {
+        if (error !== null) {
+          reject(error);
+          return;
+        }
+        resolve(stdout.trim());
+      },
+    );
+  });
+}
 
 function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -460,6 +524,7 @@ function lookupResult(currentVersion: string, release: LatestRelease): UpgradeLo
 
 interface PreviousExecutable {
   readonly copied: boolean;
+  readonly existed: boolean;
   readonly path: string;
 }
 
@@ -470,10 +535,118 @@ async function backupExistingExecutable(
 ): Promise<PreviousExecutable> {
   const path = join(temporaryDirectory, `.quest.previous${basename(executablePath)}`);
   if (!(await fileSystem.fileExists(executablePath))) {
-    return { copied: false, path };
+    return { copied: false, existed: false, path };
   }
   await fileSystem.copyFile(executablePath, path);
-  return { copied: true, path };
+  return { copied: true, existed: true, path };
+}
+
+function powerShellLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function windowsRollbackPath(executablePath: string): string {
+  return `${executablePath}.previous`;
+}
+
+async function removeStaleWindowsUpgradeArtifact(
+  path: string,
+  remove: () => Promise<void>,
+  manualCommand: string,
+): Promise<void> {
+  try {
+    await remove();
+  } catch (error) {
+    throw new UpgradeError(
+      "UPGRADE_INSTALL_FAILED",
+      `could not remove stale upgrade artifact ${path}; no binary was replaced and the artifact remains in the install directory. Exit every quest process, run this PowerShell command, then retry: ${manualCommand} (${errorDetail(error)})`,
+      true,
+    );
+  }
+}
+
+async function cleanupStaleWindowsUpgradeArtifacts(
+  fileSystem: UpgradeFileSystem,
+  installDirectory: string,
+  executablePath: string,
+): Promise<void> {
+  const staleDirectories = (await fileSystem.listDirectory(installDirectory)).filter((entry) =>
+    entry.startsWith(".quest-upgrade-"),
+  );
+  for (const entry of staleDirectories) {
+    const path = join(installDirectory, entry);
+    await removeStaleWindowsUpgradeArtifact(
+      path,
+      () => fileSystem.removeDirectory(path),
+      `Remove-Item -LiteralPath ${powerShellLiteral(path)} -Recurse -Force`,
+    );
+  }
+
+  const rollbackPath = windowsRollbackPath(executablePath);
+  if (await fileSystem.fileExists(rollbackPath)) {
+    await removeStaleWindowsUpgradeArtifact(
+      rollbackPath,
+      () => fileSystem.removeFile(rollbackPath),
+      `Remove-Item -LiteralPath ${powerShellLiteral(rollbackPath)} -Force`,
+    );
+  }
+}
+
+async function windowsPreviousExecutable(
+  fileSystem: UpgradeFileSystem,
+  executablePath: string,
+): Promise<PreviousExecutable> {
+  return {
+    copied: false,
+    existed: await fileSystem.fileExists(executablePath),
+    path: windowsRollbackPath(executablePath),
+  };
+}
+
+function previousExecutableForReplacement(options: {
+  readonly executablePath: string;
+  readonly fileSystem: UpgradeFileSystem;
+  readonly platform: NodeJS.Platform;
+  readonly temporaryDirectory: string;
+}): Promise<PreviousExecutable> {
+  return options.platform === "win32"
+    ? windowsPreviousExecutable(options.fileSystem, options.executablePath)
+    : backupExistingExecutable(
+        options.fileSystem,
+        options.executablePath,
+        options.temporaryDirectory,
+      );
+}
+
+async function verifyWindowsReplacement(options: {
+  readonly executablePath: string;
+  readonly expectedVersion: string;
+  readonly isolatedDataDirectory: string;
+  readonly previous: PreviousExecutable;
+  readonly readExecutableVersion: ExecutableVersionReader;
+}): Promise<void> {
+  const rollbackCommand = `Move-Item -LiteralPath ${powerShellLiteral(options.previous.path)} -Destination ${powerShellLiteral(options.executablePath)} -Force`;
+  let installedVersion: string;
+  try {
+    installedVersion = await options.readExecutableVersion({
+      executablePath: options.executablePath,
+      isolatedDataDirectory: options.isolatedDataDirectory,
+    });
+  } catch (error) {
+    throw new UpgradeError(
+      "UPGRADE_INSTALL_FAILED",
+      `the new binary is at ${options.executablePath}, but running its --version check failed; the previous binary remains at ${options.previous.path}. Exit every quest process and roll back in PowerShell with: ${rollbackCommand} (${errorDetail(error)})`,
+      true,
+    );
+  }
+  const expectedOutput = `quest ${options.expectedVersion}`;
+  if (installedVersion !== expectedOutput) {
+    throw new UpgradeError(
+      "UPGRADE_INSTALL_FAILED",
+      `the new binary at ${options.executablePath} reported ${JSON.stringify(installedVersion)} from --version instead of ${JSON.stringify(expectedOutput)}; the previous binary remains at ${options.previous.path}. Exit every quest process and roll back in PowerShell with: ${rollbackCommand}`,
+      false,
+    );
+  }
 }
 
 async function replaceByUnlinkingAndMoving(
@@ -493,8 +666,25 @@ async function cleanupReplacement(
   temporaryDirectory: string,
   previous: PreviousExecutable,
   outcome: ExecutableReplacementOutcome | undefined,
+  platform: NodeJS.Platform,
 ): Promise<void> {
   if (outcome === "scheduled") {
+    return;
+  }
+  if (platform === "win32") {
+    if (outcome !== "replaced") {
+      return;
+    }
+    try {
+      await fileSystem.removeDirectory(temporaryDirectory);
+    } catch (error) {
+      const command = `Remove-Item -LiteralPath ${powerShellLiteral(temporaryDirectory)} -Recurse -Force`;
+      throw new UpgradeError(
+        "UPGRADE_INSTALL_FAILED",
+        `quest was replaced at ${executablePath}, and the rollback remains at ${previous.path}, but the staging directory ${temporaryDirectory} could not be removed. Run this PowerShell command to finish cleanup: ${command} (${errorDetail(error)})`,
+        true,
+      );
+    }
     return;
   }
   if (outcome === "replaced" && previous.copied) {
@@ -512,6 +702,9 @@ export async function replaceInstalledExecutable(options: {
   readonly artifact: Uint8Array;
   readonly executablePath: string;
   readonly fileSystem: UpgradeFileSystem;
+  readonly expectedVersion: string;
+  readonly platform: NodeJS.Platform;
+  readonly readExecutableVersion: ExecutableVersionReader;
   readonly replaceExecutable?: ExecutableReplacer;
 }): Promise<{
   readonly newExecutablePath: string;
@@ -524,30 +717,50 @@ export async function replaceInstalledExecutable(options: {
   let outcome: ExecutableReplacementOutcome | undefined;
   try {
     await options.fileSystem.createDirectory(installDirectory);
+    if (options.platform === "win32") {
+      await cleanupStaleWindowsUpgradeArtifacts(
+        options.fileSystem,
+        installDirectory,
+        options.executablePath,
+      );
+    }
     temporaryDirectory = await options.fileSystem.createTemporaryDirectory(installDirectory);
     stagedExecutable = join(temporaryDirectory, basename(options.executablePath));
     await options.fileSystem.writeFile(stagedExecutable, options.artifact);
     await options.fileSystem.chmodExecutable(stagedExecutable);
-    previous = await backupExistingExecutable(
-      options.fileSystem,
-      options.executablePath,
+    previous = await previousExecutableForReplacement({
+      executablePath: options.executablePath,
+      fileSystem: options.fileSystem,
+      platform: options.platform,
       temporaryDirectory,
-    );
+    });
     const replaceExecutable =
       options.replaceExecutable ??
       ((replacement) => replaceByUnlinkingAndMoving(options.fileSystem, replacement));
     outcome = await replaceExecutable({
       destination: options.executablePath,
-      ...(previous.copied ? { previousExecutable: previous.path } : {}),
+      ...(previous.existed ? { previousExecutable: previous.path } : {}),
       stagedExecutable,
       temporaryDirectory,
     });
+    if (options.platform === "win32" && outcome === "replaced") {
+      await verifyWindowsReplacement({
+        executablePath: options.executablePath,
+        expectedVersion: options.expectedVersion,
+        isolatedDataDirectory: temporaryDirectory,
+        previous,
+        readExecutableVersion: options.readExecutableVersion,
+      });
+    }
     return {
       // A deferred Windows swap leaves the downloaded binary staged until this process exits.
       newExecutablePath: outcome === "scheduled" ? stagedExecutable : options.executablePath,
       outcome,
     };
   } catch (error) {
+    if (error instanceof UpgradeError) {
+      throw error;
+    }
     throw new UpgradeError(
       "UPGRADE_INSTALL_FAILED",
       `could not replace ${options.executablePath}; retry the upgrade or run the installer manually (${errorDetail(error)})`,
@@ -566,6 +779,7 @@ export async function replaceInstalledExecutable(options: {
         temporaryDirectory,
         previous,
         outcome,
+        options.platform,
       );
     }
   }
@@ -620,7 +834,10 @@ export function createUpgradeOperations(
       const replacement = await replaceInstalledExecutable({
         artifact,
         executablePath: options.executablePath,
+        expectedVersion: resolved.release.version,
         fileSystem,
+        platform: options.platform ?? process.platform,
+        readExecutableVersion: options.readExecutableVersion ?? defaultExecutableVersionReader,
         ...(options.replaceExecutable === undefined
           ? {}
           : { replaceExecutable: options.replaceExecutable }),
