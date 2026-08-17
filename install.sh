@@ -102,6 +102,20 @@ tmp_dir=$(mktemp -d 2>/dev/null || mktemp -d -t quest-install)
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 artifact="$tmp_dir/$artifact_name"
 checksums="$tmp_dir/checksums.txt"
+smoke_home="$tmp_dir/smoke-home"
+smoke_config="$smoke_home/config"
+smoke_state="$smoke_home/state"
+mkdir -p "$smoke_config" "$smoke_state"
+
+quest_version() {
+  HOME="$smoke_home" \
+    USERPROFILE="$smoke_home" \
+    XDG_CONFIG_HOME="$smoke_config" \
+    XDG_STATE_HOME="$smoke_state" \
+    APPDATA="$smoke_config" \
+    LOCALAPPDATA="$smoke_state" \
+    "$1" --version
+}
 
 if [ -n "$local_artifact" ] || [ -n "$local_checksums" ]; then
   [ -n "$local_artifact" ] && [ -n "$local_checksums" ] ||
@@ -143,7 +157,7 @@ fi
 [ "$actual" = "$expected" ] || fail "checksum mismatch for $artifact_name"
 
 chmod 0755 "$artifact"
-reported_version=$("$artifact" --version) || fail "downloaded quest failed its version smoke test"
+reported_version=$(quest_version "$artifact") || fail "downloaded quest failed its version smoke test"
 [ "$reported_version" = "quest $version" ] ||
   fail "downloaded quest reported $reported_version instead of quest $version"
 
@@ -171,7 +185,7 @@ fi
 # Unlink before rename: replacing a running signed binary in place can invalidate macOS's signature cache.
 rm -f "$install_dir/quest"
 mv -f "$stage" "$install_dir/quest"
-"$install_dir/quest" --version >/dev/null ||
+quest_version "$install_dir/quest" >/dev/null ||
   fail "installed quest failed its version smoke test"
 
 printf 'Installed quest %s to %s/quest\n' "$version" "$install_dir"

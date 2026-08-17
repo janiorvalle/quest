@@ -16,6 +16,7 @@ import {
   createSqliteStore,
   createStoreCompatibilityProbe,
   LocalBlobStore,
+  SQLITE_SCHEMA_VERSION,
   type StoreCompatibilityProbe,
 } from "../store";
 import type { ConvexOnboardingOperations } from "./members";
@@ -156,8 +157,12 @@ function harness(options: {
 }
 
 describe("Commander CLI wiring", () => {
-  test("--version checks compatibility and retains the installed-binary output contract", async () => {
-    const { dependencies, stderr, stdout } = harness({});
+  test("--version retains the installed-binary output contract without checking the store", async () => {
+    const { dependencies, stderr, stdout } = harness({
+      probe: {
+        check: () => Promise.reject(new Error("version must not inspect the store")),
+      },
+    });
 
     expect(await runQuestCli(["--version"], dependencies)).toBe(EXIT_SUCCESS);
     expect(stdout).toEqual(["quest 1.2.3\n"]);
@@ -176,7 +181,7 @@ describe("Commander CLI wiring", () => {
       warnings: [],
       data: {
         version: "1.2.3",
-        store_schema_version: 1,
+        store_schema_version: SQLITE_SCHEMA_VERSION,
       },
     });
   });
@@ -666,43 +671,34 @@ describe("Commander CLI wiring", () => {
     expect(stderr.join("\n")).toContain("cannot be used with option");
   });
 
-  test("newer stores tell the user to upgrade the binary", async () => {
-    const { dependencies, stderr } = harness({ compatible: "store-newer" });
+  test("--version succeeds when the discovered store is newer", async () => {
+    const { dependencies, stderr, stdout } = harness({ compatible: "store-newer" });
 
-    expect(await runQuestCli(["--version"], dependencies)).toBe(EXIT_DOMAIN_ERROR);
-    expect(stderr).toEqual([
-      "quest: domain: store schema 2 was written by a newer quest; upgrade the quest binary (this binary supports schema 1)",
-    ]);
+    expect(await runQuestCli(["--version"], dependencies)).toBe(EXIT_SUCCESS);
+    expect(stdout).toEqual(["quest 1.2.3\n"]);
+    expect(stderr).toEqual([]);
   });
 
-  test("older stores give a distinct migration instruction", async () => {
-    const { dependencies, stderr } = harness({ compatible: "store-older" });
+  test("--version succeeds when the discovered store is older", async () => {
+    const { dependencies, stderr, stdout } = harness({ compatible: "store-older" });
 
-    expect(await runQuestCli(["--version"], dependencies)).toBe(EXIT_DOMAIN_ERROR);
-    expect(stderr).toEqual([
-      "quest: domain: store schema 0 is older than this binary supports (1); run quest migrate before retrying",
-    ]);
+    expect(await runQuestCli(["--version"], dependencies)).toBe(EXIT_SUCCESS);
+    expect(stdout).toEqual(["quest 1.2.3\n"]);
+    expect(stderr).toEqual([]);
   });
 
-  test("older Convex stores tell the operator to deploy the matching functions", async () => {
-    const { dependencies, stderr } = harness({
+  test("--version succeeds without contacting an older Convex store", async () => {
+    const { dependencies, stderr, stdout } = harness({
       probe: {
-        check: () =>
-          Promise.resolve({
-            outcome: "store-older" as const,
-            supported_version: 6,
-            store_version: 5,
-            action: "migrate-store" as const,
-          }),
+        check: () => Promise.reject(new Error("version must not contact Convex")),
         olderStoreRemedy:
           "deploy the matching Convex functions with `bunx convex deploy`, then retry",
       },
     });
 
-    expect(await runQuestCli(["--version"], dependencies)).toBe(EXIT_DOMAIN_ERROR);
-    expect(stderr).toEqual([
-      "quest: domain: store schema 5 is older than this binary supports (6); deploy the matching Convex functions with `bunx convex deploy`, then retry",
-    ]);
+    expect(await runQuestCli(["--version"], dependencies)).toBe(EXIT_SUCCESS);
+    expect(stdout).toEqual(["quest 1.2.3\n"]);
+    expect(stderr).toEqual([]);
   });
 
   test("ordinary commands do not migrate older stores", async () => {
@@ -722,9 +718,9 @@ describe("Commander CLI wiring", () => {
     };
     const { dependencies, stderr } = harness({ probe });
 
-    expect(await runQuestCli(["--version"], dependencies)).toBe(EXIT_DOMAIN_ERROR);
+    expect(await runQuestCli(["--version"], dependencies)).toBe(EXIT_SUCCESS);
     expect(migrationCalls).toBe(0);
-    expect(stderr[0]).toContain("run quest migrate");
+    expect(stderr).toEqual([]);
   });
 
   test("migrate explicitly upgrades an older store", async () => {
@@ -849,15 +845,14 @@ describe("Commander CLI wiring", () => {
     }
   });
 
-  test("invalid infrastructure versions are domain errors rather than CLI usage errors", async () => {
+  test("--version ignores invalid store compatibility results", async () => {
     const probe = createStoreCompatibilityProbe({
       readStoreVersion: () => -1,
     });
-    const { dependencies, stderr } = harness({ probe });
+    const { dependencies, stderr, stdout } = harness({ probe });
 
-    expect(await runQuestCli(["--version"], dependencies)).toBe(EXIT_DOMAIN_ERROR);
-    expect(stderr).toEqual([
-      expect.stringContaining("quest: domain: invalid store compatibility result"),
-    ]);
+    expect(await runQuestCli(["--version"], dependencies)).toBe(EXIT_SUCCESS);
+    expect(stdout).toEqual(["quest 1.2.3\n"]);
+    expect(stderr).toEqual([]);
   });
 });

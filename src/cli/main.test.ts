@@ -90,7 +90,7 @@ function backendFactory(calls: string[], name: string): CliBackendFactory {
 }
 
 describe("CLI composition root", () => {
-  test("parses help and usage errors before reading invalid configuration", async () => {
+  test("parses help, version, and usage errors before reading invalid configuration", async () => {
     const homeDirectory = await mkdtemp(join(tmpdir(), "quest-cli-preflight-"));
     const configDirectories = [
       join(homeDirectory, ".config", "quest"),
@@ -123,6 +123,16 @@ describe("CLI composition root", () => {
       expect(await help.exited).toBe(EXIT_SUCCESS);
       expect(await new Response(help.stdout).text()).toContain("Usage: quest");
       expect(await new Response(help.stderr).text()).toBe("");
+
+      const version = Bun.spawn({
+        cmd: [process.execPath, "src/entrypoint.ts", "--version"],
+        env: environment,
+        stderr: "pipe",
+        stdout: "pipe",
+      });
+      expect(await version.exited).toBe(EXIT_SUCCESS);
+      expect(await new Response(version.stdout).text()).toBe("quest 0.0.0-dev\n");
+      expect(await new Response(version.stderr).text()).toBe("");
 
       const invalid = Bun.spawn({
         cmd: [process.execPath, "src/entrypoint.ts", "--unknown"],
@@ -257,7 +267,7 @@ describe("CLI composition root", () => {
 
     expect(calls).toEqual([]);
     expect(await root.run(["--version"])).toBe(EXIT_SUCCESS);
-    expect(calls).toEqual(["sqlite"]);
+    expect(calls).toEqual([]);
     expect(stdout).toEqual(["quest 1.2.3\n"]);
   });
 

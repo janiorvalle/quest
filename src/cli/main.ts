@@ -74,6 +74,7 @@ import { createConvexOnboardingOperations } from "./members";
 import type { RepositoryMigrationOperations, RepositoryMigrationRequest } from "./migrate";
 import {
   type CliApplicationPorts,
+  executeQuestVersion,
   type FutureTuiLauncher,
   isBackupRecoveryRequest,
   parseQuestCliArguments,
@@ -1491,6 +1492,7 @@ function createCliDependencies(input: {
     saveViewerTheme: (themeName) => writeViewerTheme(configFile, themeName),
     upgrade,
     validateWorkingDirectory: options.validateWorkingDirectory ?? validateWorkingDirectory,
+    versionClock: createSystemClock(),
     ...(viewer === undefined ? {} : { viewer }),
     ...(ports.doctor === undefined ? {} : { doctor: ports.doctor }),
   };
@@ -1561,6 +1563,15 @@ export async function runQuestMain(
     const parsed = await parseQuestCliArguments(argumentsWithoutRuntime, output);
     if (parsed.outcome === "exit") {
       return parsed.exitCode;
+    }
+    if (parsed.flags.version && parsed.flags.format === "human") {
+      return await executeQuestVersion({
+        clock: createSystemClock(),
+        format: parsed.flags.format,
+        output,
+        storeSchemaVersion: SQLITE_SCHEMA_VERSION,
+        version: runtime.version ?? applicationVersion,
+      });
     }
     if (shouldRunStandaloneUpgrade(parsed.flags, parsed.request)) {
       return await runStandaloneUpgrade(

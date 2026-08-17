@@ -16,7 +16,7 @@ import {
 } from "../output";
 import type { EvidenceOpener } from "../platform";
 import type { Config, QuestScope, QuestStats, StoreCompatibilityResult } from "../schema";
-import { questStatusSchema, storeCompatibilityResultSchema } from "../schema";
+import { questStatusSchema, STORE_SCHEMA_VERSION, storeCompatibilityResultSchema } from "../schema";
 import {
   type BackupOperations,
   type DoctorOperations,
@@ -24,7 +24,13 @@ import {
   questStats,
   type UpgradeOperations,
 } from "../services";
-import type { BlobStore, Clock, QuestStore, StoreCompatibilityProbe } from "../store";
+import {
+  type BlobStore,
+  type Clock,
+  type QuestStore,
+  SQLITE_SCHEMA_VERSION,
+  type StoreCompatibilityProbe,
+} from "../store";
 import { InvalidTuiMouseError, selectQuestMouse } from "../tui/mouse-selection";
 import {
   assertKnownThemeFlag,
@@ -249,6 +255,7 @@ export interface QuestCliDependencies {
   readonly saveViewerTheme?: ((themeName: string) => Promise<void>) | undefined;
   readonly upgrade?: UpgradeOperations | undefined;
   readonly validateWorkingDirectory: WorkingDirectoryValidator;
+  readonly versionClock?: Clock | undefined;
   readonly viewer?: EvidenceOpener;
 }
 
@@ -769,32 +776,29 @@ async function openRequestBackend(
   return openScopedBackend(dependencies, scope);
 }
 
-async function executeVersionRequest(
-  flags: GlobalCliOptions,
-  dependencies: QuestCliDependencies,
-): Promise<ExitCode> {
-  const backend = await openDefaultBackend(dependencies);
-  try {
-    const storeSchemaVersion = await requireCompatibleStore(backend.compatibilityProbe);
-    if (flags.format === "json") {
-      const report = buildQuestReport(versionDataSchema, {
-        command: "version",
-        generated_at: await backend.clock.now(),
-        filters: {},
-        warnings: [],
-        data: {
-          version: dependencies.applicationVersion,
-          store_schema_version: storeSchemaVersion,
-        },
-      });
-      dependencies.output.write(formatQuestReport(report));
-    } else {
-      dependencies.output.write(`quest ${dependencies.applicationVersion}\n`);
-    }
-    return EXIT_SUCCESS;
-  } finally {
-    await closeBackend(backend);
+export async function executeQuestVersion(options: {
+  readonly clock: Clock;
+  readonly format: GlobalCliOptions["format"];
+  readonly output: CliOutputBoundary;
+  readonly storeSchemaVersion: number;
+  readonly version: string;
+}): Promise<ExitCode> {
+  if (options.format === "json") {
+    const report = buildQuestReport(versionDataSchema, {
+      command: "version",
+      generated_at: await options.clock.now(),
+      filters: {},
+      warnings: [],
+      data: {
+        version: options.version,
+        store_schema_version: options.storeSchemaVersion,
+      },
+    });
+    options.output.write(formatQuestReport(report));
+  } else {
+    options.output.write(`quest ${options.version}\n`);
   }
+  return EXIT_SUCCESS;
 }
 
 function executeCompletionsRequest(
@@ -805,6 +809,10 @@ function executeCompletionsRequest(
     generateShellCompletions(createQuestCommand(dependencies.output), request.shell),
   );
   return EXIT_SUCCESS;
+}
+
+function supportedStoreSchemaVersion(config: Config): number {
+  return config.store.backend === "sqlite" ? SQLITE_SCHEMA_VERSION : STORE_SCHEMA_VERSION;
 }
 
 function executeMembersRequest(
@@ -889,7 +897,13 @@ async function executePreScopeRequest(
   dependencies: QuestCliDependencies,
 ): Promise<ExitCode | undefined> {
   if (flags.version) {
-    return executeVersionRequest(flags, dependencies);
+    return executeQuestVersion({
+      clock: dependencies.versionClock ?? dependencies.clock,
+      format: flags.format,
+      output: dependencies.output,
+      storeSchemaVersion: supportedStoreSchemaVersion(dependencies.config),
+      version: dependencies.applicationVersion,
+    });
   }
 
   if (request?.command === "completions") {
