@@ -76,6 +76,11 @@ export type ConvexRestoreStatus =
   | { readonly status: "active" | "missing" }
   | { readonly status: "committed"; readonly lease_cutoff: string };
 
+export interface ConvexActiveRestore {
+  readonly status: "committed" | "copying" | "deleting";
+  readonly token: string;
+}
+
 export interface ConvexCommitRestoreResult {
   readonly status: "committed";
   readonly lease_cutoff: string;
@@ -217,6 +222,9 @@ export const convexApi = {
     AuthTokenInput & { readonly token: string },
     null
   >("quest:renewRestore"),
+  activeRestore: makeFunctionReference<"query", AuthTokenInput, ConvexActiveRestore | null>(
+    "quest:activeRestore",
+  ),
   restoreStatus: makeFunctionReference<
     "query",
     AuthTokenInput & { readonly token: string },

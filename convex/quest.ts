@@ -610,12 +610,16 @@ async function appendEvent(
   }
   await ctx.db.insert("events", parsed);
   const quest = parseQuestDocument(await requireQuestRecord(ctx, questId));
+  await bumpRepositoryRevision(ctx, quest.repo);
+}
+
+async function bumpRepositoryRevision(ctx: MutationContext, repository: string): Promise<void> {
   const revision = await ctx.db
     .query("repository_revisions")
-    .withIndex("by_repo", (query) => query.eq("repo", quest.repo))
+    .withIndex("by_repo", (query) => query.eq("repo", repository))
     .unique();
   if (revision === null) {
-    await ctx.db.insert("repository_revisions", { repo: quest.repo, value: 1 });
+    await ctx.db.insert("repository_revisions", { repo: repository, value: 1 });
   } else {
     await ctx.db.patch(revision._id, { value: revision.value + 1 });
   }
@@ -714,6 +718,24 @@ async function eventHighWater(ctx: QueryContext): Promise<number> {
   }
   const lastEvent = await ctx.db.query("events").withIndex("by_display_id").order("desc").first();
   return lastEvent === null ? 0 : parseEventDocument(lastEvent).id;
+}
+
+async function advanceSnapshotRevision(
+  ctx: MutationContext,
+  repositories: ReadonlySet<string>,
+): Promise<void> {
+  const counter = await ctx.db
+    .query("counters")
+    .withIndex("by_name", (query) => query.eq("name", "events"))
+    .unique();
+  if (counter === null) {
+    await ctx.db.insert("counters", { name: "events", value: (await eventHighWater(ctx)) + 1 });
+  } else {
+    await ctx.db.patch(counter._id, { value: counter.value + 1 });
+  }
+  for (const repository of repositories) {
+    await bumpRepositoryRevision(ctx, repository);
+  }
 }
 
 async function activeFencedRepositories(ctx: QueryContext): Promise<string[]> {
@@ -1797,12 +1819,17 @@ export const migrateReadyStatuses = mutationGeneric({
     await requireNoRestoreLease(ctx);
     const quests = await ctx.db.query("quests").collect();
     let converted = 0;
+    const changedRepositories = new Set<string>();
     for (const quest of quests) {
       if (quest.status !== "ready") {
         continue;
       }
       await ctx.db.patch(quest._id, { status: "open" });
+      changedRepositories.add(quest.repo);
       converted += 1;
+    }
+    if (converted > 0) {
+      await advanceSnapshotRevision(ctx, changedRepositories);
     }
     return { converted, unchanged: quests.length - converted, total: quests.length };
   },
@@ -2761,6 +2788,24 @@ export const renewRestore = mutationGeneric({
     await requireMemberActor(ctx, args);
     const lease = await requireRestoreLease(ctx, args.token);
     await ctx.db.patch(lease._id, { expires_at: restoreLeaseExpiry(now()) });
+    return null;
+  },
+});
+
+export const activeRestore = queryGeneric({
+  args: { auth_token: v.optional(v.string()), ...clientProtocolArgs },
+  handler: async (ctx, args) => {
+    await requireMemberQueryActor(ctx, args);
+    const lease = await findRestoreLease(ctx);
+    if (lease === null) {
+      return null;
+    }
+    if (lease.committed === true) {
+      return { status: "committed" as const, token: lease.token };
+    }
+    if (lease.commit_phase !== undefined) {
+      return { status: lease.commit_phase, token: lease.token };
+    }
     return null;
   },
 });

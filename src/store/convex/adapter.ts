@@ -48,6 +48,7 @@ import type {
 } from "../port";
 import {
   authTokenInput,
+  type ConvexActiveRestore,
   type ConvexClientPair,
   closeConvexClientPair,
   convexApi,
@@ -237,6 +238,17 @@ function isMissingFencedRepositoriesQuery(error: unknown): boolean {
     /(?:could not find|not found|does not exist|not a function).*fencedRepositories|fencedRepositories.*(?:could not find|not found|does not exist|not a function)/i.test(
       error.message,
     )
+  );
+}
+
+function isMissingActiveRestoreQuery(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return (
+    /(?:could not find|not found|does not exist|not a function).*activeRestore|activeRestore.*(?:could not find|not found|does not exist|not a function)/i.test(
+      error.message,
+    ) || /^\[Request ID: [0-9a-f]+\] Server Error$/i.test(error.message.trim())
   );
 }
 
@@ -893,6 +905,7 @@ export class ConvexStore implements QuestStore {
   }
 
   async replaceAll(dump: QuestDump): Promise<void> {
+    await this.resumeInterruptedRestore();
     const parsed = questDumpSchema.parse(dump);
     const current = await this.exportAllWithCutoff();
     const token = await this.beginRestore(
@@ -933,6 +946,7 @@ export class ConvexStore implements QuestStore {
   }
 
   async beginMigration(expected: QuestDump): Promise<StoreMigrationSession> {
+    await this.resumeInterruptedRestore();
     const parsedExpected = questDumpSchema.parse(expected);
     const snapshot = await this.exportAllWithCutoff();
     if (stableSerialize(snapshot.dump) !== stableSerialize(parsedExpected)) {
@@ -1223,6 +1237,30 @@ export class ConvexStore implements QuestStore {
       // Each mutation stays below Convex's transaction read/write limits.
     }
     this.#legacyRestoreTokens.delete(token);
+  }
+
+  async resumeInterruptedRestore(): Promise<boolean> {
+    let active: ConvexActiveRestore | null;
+    try {
+      active = await this.#activeRestore();
+    } catch (error: unknown) {
+      if (isMissingActiveRestoreQuery(error)) {
+        return false;
+      }
+      throw error;
+    }
+    if (active === null) {
+      return false;
+    }
+    if (active.status !== "committed") {
+      await this.#commitRestoreResolvingAmbiguity(active.token);
+    }
+    await this.releaseRestore(active.token);
+    return true;
+  }
+
+  #activeRestore() {
+    return this.#clients.http.query(convexApi.activeRestore, authTokenInput(this.#clients));
   }
 
   async #commitRestoreResolvingAmbiguity(token: string): Promise<QuestDump> {

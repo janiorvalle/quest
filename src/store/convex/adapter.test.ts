@@ -434,6 +434,9 @@ describe("Convex restore rolling upgrades", () => {
           if (query === convexApi.serverTime) {
             return timestamp;
           }
+          if (query === convexApi.activeRestore) {
+            return null;
+          }
           return empty;
         },
         mutation: async (mutation: unknown) => {
@@ -463,6 +466,40 @@ describe("Convex restore rolling upgrades", () => {
     expect(commitAttempts).toBe(2);
     expect(mutations).not.toContain(convexApi.rollbackRestore);
     expect(mutations.at(-1)).toBe(convexApi.releaseRestore);
+  });
+
+  test("lets a fresh client discover and finish a partial restore", async () => {
+    const empty: QuestDump = {
+      schema_version: STORE_SCHEMA_VERSION,
+      quests: [],
+      evidence: [],
+      chains: [],
+      events: [],
+    };
+    const mutations: unknown[] = [];
+    const clients = {
+      http: {
+        query: async (query: unknown) =>
+          query === convexApi.activeRestore
+            ? { status: "deleting", token: "interrupted-token" }
+            : empty,
+        mutation: async (mutation: unknown) => {
+          mutations.push(mutation);
+          if (mutation === convexApi.commitRestore) {
+            return { lease_cutoff: timestamp, status: "committed" };
+          }
+          if (mutation === convexApi.releaseRestore) {
+            return true;
+          }
+          return null;
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.resumeInterruptedRestore()).resolves.toBeTrue();
+    expect(mutations).toEqual([convexApi.commitRestore, convexApi.releaseRestore]);
   });
 
   test("uses the legacy monolithic restore only when the previous validator rejects paging", async () => {
