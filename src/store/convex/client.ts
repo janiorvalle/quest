@@ -36,6 +36,7 @@ import type {
   TouchQuestInput,
 } from "../../schema";
 import type {
+  AcceptQuestAndDetailResult,
   AcceptQuestAndExportResult,
   Clock,
   FederatedFullSnapshot,
@@ -86,6 +87,11 @@ export const convexApi = {
     AuthenticatedMutation<AcceptQuestInput>,
     AcceptResult
   >("quest:acceptQuest"),
+  acceptQuestAndDetail: makeFunctionReference<
+    "mutation",
+    AuthenticatedMutation<AcceptQuestInput>,
+    AcceptQuestAndDetailResult
+  >("quest:acceptQuestAndDetail"),
   acceptQuestAndExport: makeFunctionReference<
     "mutation",
     AuthenticatedMutation<AcceptQuestInput>,

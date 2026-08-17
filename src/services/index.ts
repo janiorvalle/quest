@@ -25,6 +25,7 @@ export {
 export {
   compileQuestBrief,
   compileQuestBriefFromDump,
+  compileQuestBriefFromSnapshot,
   type QuestBrief,
 } from "./brief";
 export {
@@ -55,6 +56,7 @@ export {
 export {
   type AddQuestResult,
   acceptLifecycleQuest,
+  acceptLifecycleQuestWithDetail,
   acceptLifecycleQuestWithSnapshot,
   addLifecycleQuest,
   type DuplicateCandidate,

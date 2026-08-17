@@ -66,6 +66,7 @@ import {
   touchQuestInputSchema,
 } from "../../schema";
 import type {
+  AcceptQuestAndDetailResult,
   AcceptQuestAndExportResult,
   BackupDatabaseInspection,
   FederatedFullSnapshot,
@@ -471,6 +472,22 @@ export class SqliteStore implements QuestStore {
       return this.#acceptQuest(parsed);
     });
     if (result.outcome === "accepted") {
+      this.#emitWatchers();
+    }
+    return result;
+  }
+
+  async acceptQuestAndDetail(input: AcceptQuestInput): Promise<AcceptQuestAndDetailResult> {
+    const parsed = acceptQuestInputSchema.parse(input);
+    const result = this.#writeTransaction(() => {
+      const current = this.#requireStoredQuest(parsed.id);
+      this.#requireRepositoryUnfenced(current.repo);
+      return {
+        acceptance: this.#acceptQuest(parsed),
+        detail: this.#readQuestDetail(parsed.id),
+      };
+    });
+    if (result.acceptance.outcome === "accepted") {
       this.#emitWatchers();
     }
     return result;
@@ -945,41 +962,7 @@ export class SqliteStore implements QuestStore {
 
   async readQuestDetail(id: number): Promise<QuestDetailSnapshot> {
     const parsedId = questSchema.shape.id.parse(id);
-    return this.#readTransaction(() => {
-      const quest = this.#requireStoredQuest(parsedId);
-      const evidence = getRows<Evidence, [number]>(
-        this.#database,
-        `${selectEvidenceSql} WHERE quest_id = ? ORDER BY id`,
-        parsedId,
-      ).map((row) => evidenceSchema.parse(row));
-      const events = getRows<EventRow, [number]>(
-        this.#database,
-        `${selectEventsSql} WHERE quest_id = ? ORDER BY id`,
-        parsedId,
-      ).map(decodeEvent);
-      const chains = getRows<Chain, [number, number]>(
-        this.#database,
-        `${selectChainsSql}
-         WHERE quest_id = ? OR target_id = ?
-         ORDER BY quest_id, target_id, type`,
-        parsedId,
-        parsedId,
-      ).map((row) => chainSchema.parse(row));
-      const relatedIds = new Set(
-        chains.flatMap((link) => [link.quest_id, link.target_id]).filter((id) => id !== parsedId),
-      );
-      const relatedQuests = [...relatedIds].flatMap((relatedId) => {
-        const relatedQuest = this.#getStoredQuest(relatedId);
-        return relatedQuest === null ? [] : [this.#publicQuest(relatedQuest)];
-      });
-      return {
-        chains,
-        events,
-        evidence,
-        quest: this.#publicQuest(quest),
-        related_quests: relatedQuests,
-      };
-    });
+    return this.#readTransaction(() => this.#readQuestDetail(parsedId));
   }
 
   async stats(scope: QuestScope): Promise<QuestStats> {
@@ -2077,6 +2060,44 @@ export class SqliteStore implements QuestStore {
   #getQuest(id: number): Quest | null {
     const quest = this.#getStoredQuest(id);
     return quest === null ? null : this.#publicQuest(quest);
+  }
+
+  #readQuestDetail(id: number): QuestDetailSnapshot {
+    const quest = this.#requireStoredQuest(id);
+    const evidence = getRows<Evidence, [number]>(
+      this.#database,
+      `${selectEvidenceSql} WHERE quest_id = ? ORDER BY id`,
+      id,
+    ).map((row) => evidenceSchema.parse(row));
+    const events = getRows<EventRow, [number]>(
+      this.#database,
+      `${selectEventsSql} WHERE quest_id = ? ORDER BY id`,
+      id,
+    ).map(decodeEvent);
+    const chains = getRows<Chain, [number, number]>(
+      this.#database,
+      `${selectChainsSql}
+       WHERE quest_id = ? OR target_id = ?
+       ORDER BY quest_id, target_id, type`,
+      id,
+      id,
+    ).map((row) => chainSchema.parse(row));
+    const relatedIds = new Set(
+      chains
+        .flatMap((link) => [link.quest_id, link.target_id])
+        .filter((relatedId) => relatedId !== id),
+    );
+    const relatedQuests = [...relatedIds].flatMap((relatedId) => {
+      const relatedQuest = this.#getStoredQuest(relatedId);
+      return relatedQuest === null ? [] : [this.#publicQuest(relatedQuest)];
+    });
+    return {
+      chains,
+      events,
+      evidence,
+      quest: this.#publicQuest(quest),
+      related_quests: relatedQuests,
+    };
   }
 
   #requireStoredQuest(id: number): Quest {

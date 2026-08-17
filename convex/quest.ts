@@ -1435,6 +1435,16 @@ export const acceptQuest = mutationGeneric({
   },
 });
 
+export const acceptQuestAndDetail = mutationGeneric({
+  args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
+  handler: async (ctx, args) => {
+    const actor = await requireMemberActor(ctx, args);
+    const parsed = acceptQuestInputSchema.parse(args.input);
+    const acceptance = await accept(ctx, { ...parsed, owner: actor }, args.test_failure);
+    return { acceptance, detail: await readQuestDetailSnapshot(ctx, parsed.id) };
+  },
+});
+
 export const acceptQuestAndExport = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
@@ -1991,36 +2001,37 @@ export const getQuest = queryGeneric({
   },
 });
 
+async function readQuestDetailSnapshot(ctx: QueryContext, id: number) {
+  const quest = materializeExpiredLease(
+    parseQuestDocument(await requireQuestRecord(ctx, id)),
+    now(),
+  );
+  const [evidence, events, chains] = await Promise.all([
+    readQuestEvidence(ctx, id),
+    readQuestEvents(ctx, id),
+    readQuestChains(ctx, id),
+  ]);
+  const relatedIds = [
+    ...new Set(
+      chains
+        .flatMap((link) => [link.quest_id, link.target_id])
+        .filter((relatedId) => relatedId !== id),
+    ),
+  ];
+  const relatedQuests = await Promise.all(
+    relatedIds.map(async (relatedId) =>
+      materializeExpiredLease(parseQuestDocument(await requireQuestRecord(ctx, relatedId)), now()),
+    ),
+  );
+  return { chains, events, evidence, quest, related_quests: relatedQuests };
+}
+
 export const questDetail = queryGeneric({
   args: { auth_token: v.optional(v.string()), id: v.number(), ...clientProtocolArgs },
   handler: async (ctx, args) => {
     await requireMemberQueryActor(ctx, args);
     const id = questSchema.shape.id.parse(args.id);
-    const quest = materializeExpiredLease(
-      parseQuestDocument(await requireQuestRecord(ctx, id)),
-      now(),
-    );
-    const [evidence, events, chains] = await Promise.all([
-      readQuestEvidence(ctx, id),
-      readQuestEvents(ctx, id),
-      readQuestChains(ctx, id),
-    ]);
-    const relatedIds = [
-      ...new Set(
-        chains
-          .flatMap((link) => [link.quest_id, link.target_id])
-          .filter((relatedId) => relatedId !== id),
-      ),
-    ];
-    const relatedQuests = await Promise.all(
-      relatedIds.map(async (relatedId) =>
-        materializeExpiredLease(
-          parseQuestDocument(await requireQuestRecord(ctx, relatedId)),
-          now(),
-        ),
-      ),
-    );
-    return { chains, events, evidence, quest, related_quests: relatedQuests };
+    return readQuestDetailSnapshot(ctx, id);
   },
 });
 
