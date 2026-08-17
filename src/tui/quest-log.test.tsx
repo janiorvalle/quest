@@ -239,6 +239,38 @@ test("ignores injected wheel events when terminal mouse tracking is disabled", a
   }
 });
 
+test("keeps the active area tab visible while keyboard cycling an overflowing strip", async () => {
+  const areas = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf"];
+  const snapshot: QuestLogSnapshot = {
+    ...SNAPSHOT,
+    items: areas.map((area, index) => ({
+      ...item(index + 1, `${area} quest`),
+      area,
+    })),
+  };
+  const setup = await testRender(
+    <QuestLogApp
+      runtime={runtimeFor(snapshot)}
+      theme={{ name: "dense", save: () => Promise.resolve(), warnings: [] }}
+    />,
+    { height: 24, width: 52 },
+  );
+
+  try {
+    await setup.waitForFrame((frame) => frame.includes("alpha quest"));
+    for (const area of areas.slice(0, 5)) {
+      act(() => setup.mockInput.pressTab());
+      await setup.waitForFrame((frame) => frame.includes(`${area} quest`));
+    }
+
+    const frame = setup.captureCharFrame();
+    const tabsRow = frame.split("\n")[2] ?? "";
+    expect(tabsRow).toContain("echo 1");
+  } finally {
+    act(() => setup.renderer.destroy());
+  }
+});
+
 async function waitFor(condition: () => boolean): Promise<void> {
   const deadline = Date.now() + 2_000;
   while (!condition()) {
