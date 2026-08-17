@@ -3198,6 +3198,19 @@ export const commitRestore = mutationGeneric({
         lease_cutoff: parseLeaseCutoff(lease.lease_cutoff),
       };
     }
+    const replacementHighWaterQuests = lease.replacement_high_water_quests;
+    const replacementHighWaterEvidence = lease.replacement_high_water_evidence;
+    const replacementHighWaterEvents = lease.replacement_high_water_events;
+    if (
+      replacementHighWaterQuests === undefined ||
+      replacementHighWaterEvidence === undefined ||
+      replacementHighWaterEvents === undefined
+    ) {
+      failQuestDomain(
+        "CONVEX_MONOLITHIC_DUMP_UNSUPPORTED",
+        `Convex restore ${lease.token} was staged by an older monolithic backend and has not changed the destination; call rollbackRestore with this token until it succeeds, then retry the restore with the current Quest CLI`,
+      );
+    }
     if (lease.commit_phase === undefined) {
       await ctx.db.patch(lease._id, {
         expires_at: restoreLeaseExpiry(now()),
@@ -3229,17 +3242,11 @@ export const commitRestore = mutationGeneric({
     const sequenceFloorEvents = lease.sequence_floor_events;
     const sequenceFloorSnapshotGeneration =
       lease.sequence_floor_snapshot_generation ?? lease.sequence_floor_events;
-    const replacementHighWaterQuests = lease.replacement_high_water_quests;
-    const replacementHighWaterEvidence = lease.replacement_high_water_evidence;
-    const replacementHighWaterEvents = lease.replacement_high_water_events;
     if (
       sequenceFloorQuests === undefined ||
       sequenceFloorEvidence === undefined ||
       sequenceFloorEvents === undefined ||
-      sequenceFloorSnapshotGeneration === undefined ||
-      replacementHighWaterQuests === undefined ||
-      replacementHighWaterEvidence === undefined ||
-      replacementHighWaterEvents === undefined
+      sequenceFloorSnapshotGeneration === undefined
     ) {
       failQuestDomain(
         "CONVEX_RESTORE_STAGE_CHANGED",

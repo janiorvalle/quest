@@ -587,4 +587,51 @@ describe("Convex restore rolling upgrades", () => {
     expect(calls[1]?.args["expected_snapshot"]).toBe(JSON.stringify(empty));
     expect(calls.some((call) => call.mutation === convexApi.uploadRestorePage)).toBeFalse();
   });
+
+  test("rolls back a legacy restore when the backend upgrades before commit", async () => {
+    const empty: QuestDump = {
+      schema_version: STORE_SCHEMA_VERSION,
+      quests: [],
+      evidence: [],
+      chains: [],
+      events: [],
+    };
+    const mutations: unknown[] = [];
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.activeRestore) {
+            return null;
+          }
+          if (query === convexApi.serverTime) {
+            return timestamp;
+          }
+          return empty;
+        },
+        mutation: async (mutation: unknown, args: Record<string, unknown>) => {
+          mutations.push(mutation);
+          if (mutation === convexApi.beginRestore && "expected_hash" in args) {
+            throw new Error(
+              "ArgumentValidationError: Object contains extra field expected_hash that is not in the validator",
+            );
+          }
+          if (mutation === convexApi.activateRestore) {
+            return args["dump"];
+          }
+          if (mutation === convexApi.commitRestore) {
+            throw new Error(
+              "[CONVEX_MONOLITHIC_DUMP_UNSUPPORTED] this restore needs the current paging protocol",
+            );
+          }
+          return null;
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.replaceAll(empty)).rejects.toThrow("safely rolled it back");
+    expect(mutations.filter((mutation) => mutation === convexApi.commitRestore)).toHaveLength(1);
+    expect(mutations.at(-1)).toBe(convexApi.rollbackRestore);
+  });
 });

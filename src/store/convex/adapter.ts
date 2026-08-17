@@ -232,6 +232,10 @@ function isLegacyRestoreValidatorError(error: unknown): boolean {
   );
 }
 
+function isMonolithicRestoreUnsupported(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("CONVEX_MONOLITHIC_DUMP_UNSUPPORTED");
+}
+
 function isMissingFencedRepositoriesQuery(error: unknown): boolean {
   return (
     error instanceof Error &&
@@ -1273,6 +1277,13 @@ export class ConvexStore implements QuestStore {
       return await this.commitRestore(token);
     } catch (error: unknown) {
       firstError = error;
+    }
+    if (this.#legacyRestoreTokens.has(token) && isMonolithicRestoreUnsupported(firstError)) {
+      await this.rollbackRestore(token);
+      throw new Error(
+        "[CONVEX_MONOLITHIC_DUMP_UNSUPPORTED] the backend upgraded while this legacy restore was staged; Quest safely rolled it back before changing the destination, so retry with the current CLI",
+        { cause: firstError },
+      );
     }
     try {
       return await this.commitRestore(token);
