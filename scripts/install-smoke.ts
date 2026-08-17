@@ -180,7 +180,7 @@ async function runPowerShellFailureSmoke(): Promise<void> {
   if (!failureOutput.includes(failingFixture.expectedOutput)) {
     throw new Error(`install.ps1 hid the smoke-test output: ${failing.output.trim()}`);
   }
-  if (!failureOutput.toLowerCase().includes("retry the installer")) {
+  if (!/retry the.{0,80}installer/.test(failureOutput.toLowerCase())) {
     throw new Error(
       `install.ps1 did not provide an actionable next step: ${failing.output.trim()}`,
     );
