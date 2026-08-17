@@ -46,6 +46,7 @@ import {
   type NewEvidence,
   newEvidenceSchema,
   newQuestSchema,
+  QUEST_INPUT_TOO_LARGE_CODE,
   type Quest,
   type QuestDump,
   type QuestFilter,
@@ -54,6 +55,7 @@ import {
   type QuestTransition,
   questDumpSchema,
   questFilterSchema,
+  questInputTooLargeMessage,
   questSchema,
   questScopeSchema,
   questStatsSchema,
@@ -113,6 +115,7 @@ type QuestDomainErrorCode =
   | "MIGRATION_REPOSITORY_REQUIRED"
   | "MIGRATION_RESTORE_TOKEN_REQUIRED"
   | "QUEST_BACKFILL_INVALID"
+  | typeof QUEST_INPUT_TOO_LARGE_CODE
   | "QUEST_NOT_FOUND"
   | "SIGNOFF_EVIDENCE_OUTSIDE_BATCH"
   | "SIGNOFF_EVIDENCE_STAGE_REQUIRED"
@@ -121,6 +124,18 @@ type QuestDomainErrorCode =
 
 function failQuestDomain(code: QuestDomainErrorCode, message: string): never {
   throw new ConvexError({ code, message });
+}
+
+function parseWriteInput<Output>(schema: { parse: (input: unknown) => Output }, input: unknown) {
+  try {
+    return schema.parse(input);
+  } catch (error: unknown) {
+    const message = questInputTooLargeMessage(error);
+    if (message !== undefined) {
+      failQuestDomain(QUEST_INPUT_TOO_LARGE_CODE, message);
+    }
+    throw error;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> & { readonly id?: unknown } {
@@ -1980,8 +1995,9 @@ export const addQuest = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
     const actor = await requireMemberActor(ctx, args);
+    const requested = parseWriteInput(newQuestSchema, args.input);
+    const parsed = parseWriteInput(newQuestSchema, { ...requested, opened_by: actor });
     await requireNoRestoreLease(ctx);
-    const parsed = newQuestSchema.parse(args.input);
     await requireRepositoryNotFenced(ctx, parsed.repo);
     if (!isValidBackfill(parsed)) {
       return failQuestDomain(
@@ -2101,8 +2117,9 @@ export const acceptQuest = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
     const actor = await requireMemberActor(ctx, args);
-    const parsed = acceptQuestInputSchema.parse(args.input);
-    return accept(ctx, { ...parsed, owner: actor }, args.test_failure);
+    const parsed = parseWriteInput(acceptQuestInputSchema, args.input);
+    const input = parseWriteInput(acceptQuestInputSchema, { ...parsed, owner: actor });
+    return accept(ctx, input, args.test_failure);
   },
 });
 
@@ -2110,8 +2127,9 @@ export const acceptQuestAndDetail = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
     const actor = await requireMemberActor(ctx, args);
-    const parsed = acceptQuestInputSchema.parse(args.input);
-    const acceptance = await accept(ctx, { ...parsed, owner: actor }, args.test_failure);
+    const parsed = parseWriteInput(acceptQuestInputSchema, args.input);
+    const input = parseWriteInput(acceptQuestInputSchema, { ...parsed, owner: actor });
+    const acceptance = await accept(ctx, input, args.test_failure);
     return { acceptance, detail: await readQuestDetailSnapshot(ctx, parsed.id) };
   },
 });
@@ -2132,8 +2150,8 @@ export const touchQuest = mutationGeneric({
   handler: async (ctx, args) => {
     const actor = await requireMemberActor(ctx, args);
     await requireNoRestoreLease(ctx);
-    const parsed = touchQuestInputSchema.parse(args.input);
-    const input = { ...parsed, owner: actor };
+    const parsed = parseWriteInput(touchQuestInputSchema, args.input);
+    const input = parseWriteInput(touchQuestInputSchema, { ...parsed, owner: actor });
     const record = await requireQuestRecord(ctx, input.id);
     const current = parseQuestDocument(record);
     await requireRepositoryNotFenced(ctx, current.repo);
@@ -2164,10 +2182,13 @@ export const transition = mutationGeneric({
   args: { auth_token: v.optional(v.string()), id: v.number(), transition: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
     const actor = await requireMemberActor(ctx, args);
+    const parsedTransition = parseWriteInput(questTransitionSchema, args.transition);
     await requireNoRestoreLease(ctx);
     const id = questSchema.shape.id.parse(args.id);
-    const parsedTransition = questTransitionSchema.parse(args.transition);
-    const transitionInput = questTransitionSchema.parse({ ...parsedTransition, actor });
+    const transitionInput = parseWriteInput(questTransitionSchema, {
+      ...parsedTransition,
+      actor,
+    });
     const record = await requireQuestRecord(ctx, id);
     const current = parseQuestDocument(record);
     await requireRepositoryNotFenced(ctx, current.repo);
@@ -2251,7 +2272,7 @@ function groupSignoffEvidence(
         "sign-off batches accept only signoff-stage evidence",
       );
     }
-    const evidence = newEvidenceSchema.parse({ ...parsedEvidence, added_by: actor });
+    const evidence = parseWriteInput(newEvidenceSchema, { ...parsedEvidence, added_by: actor });
     const quest = questsById.get(evidence.quest_id);
     if (quest === undefined) {
       failQuestDomain(
@@ -2363,7 +2384,7 @@ async function prepareSignoffBatch(
   actor: string,
 ): Promise<PreparedSignoffBatch> {
   const ids = [...new Set(input.ids)];
-  const transition = questTransitionSchema.parse({ ...input.transition, actor });
+  const transition = parseWriteInput(questTransitionSchema, { ...input.transition, actor });
   if (transition.action !== "signoff") {
     failQuestDomain(
       "SIGNOFF_TRANSITION_REQUIRED",
@@ -2418,8 +2439,8 @@ export const signoffBatch = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
     const actor = await requireMemberActor(ctx, args);
+    const parsed = parseWriteInput(signoffBatchInputSchema, args.input);
     await requireNoRestoreLease(ctx);
-    const parsed = signoffBatchInputSchema.parse(args.input);
     const prepared = await prepareSignoffBatch(ctx, parsed, actor);
     return persistSignoffBatch(ctx, prepared, args.test_failure);
   },
@@ -2430,8 +2451,8 @@ export const addChainLink = mutationGeneric({
   handler: async (ctx, args) => {
     const actor = await requireMemberActor(ctx, args);
     await requireNoRestoreLease(ctx);
-    const parsed = chainMutationSchema.parse(args.input);
-    const input = chainMutationSchema.parse({ ...parsed, actor });
+    const parsed = parseWriteInput(chainMutationSchema, args.input);
+    const input = parseWriteInput(chainMutationSchema, { ...parsed, actor });
     const timestamp = now();
     const quests = await readQuests(ctx, timestamp);
     const sourceQuest = requireQuestInSnapshot(quests, input.link.quest_id);
@@ -2485,8 +2506,8 @@ export const removeChainLink = mutationGeneric({
   handler: async (ctx, args) => {
     const actor = await requireMemberActor(ctx, args);
     await requireNoRestoreLease(ctx);
-    const parsed = chainMutationSchema.parse(args.input);
-    const input = chainMutationSchema.parse({ ...parsed, actor });
+    const parsed = parseWriteInput(chainMutationSchema, args.input);
+    const input = parseWriteInput(chainMutationSchema, { ...parsed, actor });
     const timestamp = now();
     const quests = await readQuests(ctx, timestamp);
     const sourceQuest = requireQuestInSnapshot(quests, input.link.quest_id);
@@ -2538,9 +2559,9 @@ export const addEvidence = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
     const actor = await requireMemberActor(ctx, args);
+    const parsed = parseWriteInput(newEvidenceSchema, args.input);
     await requireNoRestoreLease(ctx);
-    const parsed = newEvidenceSchema.parse(args.input);
-    const input = newEvidenceSchema.parse({ ...parsed, added_by: actor });
+    const input = parseWriteInput(newEvidenceSchema, { ...parsed, added_by: actor });
     const record = await requireQuestRecord(ctx, input.quest_id);
     const current = parseQuestDocument(record);
     await requireRepositoryNotFenced(ctx, current.repo);
