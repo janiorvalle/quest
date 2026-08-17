@@ -178,6 +178,7 @@ type RestoreStageTable =
 const RESTORE_LEASE_DURATION_MS = 10 * 60 * 1_000;
 const RESTORE_MUTATION_MAXIMUM_BYTES_READ = 2 * 1_024 * 1_024;
 const RESTORE_MUTATION_MAXIMUM_ROWS_READ = 256;
+const SNAPSHOT_GENERATION_COUNTER = "snapshot_generation";
 
 async function nextDocumentId(
   ctx: MutationContext,
@@ -610,7 +611,7 @@ async function appendEvent(
   }
   await ctx.db.insert("events", parsed);
   const quest = parseQuestDocument(await requireQuestRecord(ctx, questId));
-  await bumpRepositoryRevision(ctx, quest.repo);
+  await advanceSnapshotGeneration(ctx, new Set([quest.repo]));
 }
 
 async function bumpRepositoryRevision(ctx: MutationContext, repository: string): Promise<void> {
@@ -708,7 +709,7 @@ async function exportDump(ctx: QueryContext, timestamp: string): Promise<QuestDu
   return createQuestDump(ctx, await readQuests(ctx, timestamp));
 }
 
-async function eventHighWater(ctx: QueryContext): Promise<number> {
+async function eventSequenceHighWater(ctx: QueryContext): Promise<number> {
   const counter = await ctx.db
     .query("counters")
     .withIndex("by_name", (query) => query.eq("name", "events"))
@@ -720,16 +721,27 @@ async function eventHighWater(ctx: QueryContext): Promise<number> {
   return lastEvent === null ? 0 : parseEventDocument(lastEvent).id;
 }
 
-async function advanceSnapshotRevision(
+async function snapshotGeneration(ctx: QueryContext): Promise<number> {
+  const counter = await ctx.db
+    .query("counters")
+    .withIndex("by_name", (query) => query.eq("name", SNAPSHOT_GENERATION_COUNTER))
+    .unique();
+  return counter?.value ?? eventSequenceHighWater(ctx);
+}
+
+async function advanceSnapshotGeneration(
   ctx: MutationContext,
   repositories: ReadonlySet<string>,
 ): Promise<void> {
   const counter = await ctx.db
     .query("counters")
-    .withIndex("by_name", (query) => query.eq("name", "events"))
+    .withIndex("by_name", (query) => query.eq("name", SNAPSHOT_GENERATION_COUNTER))
     .unique();
   if (counter === null) {
-    await ctx.db.insert("counters", { name: "events", value: (await eventHighWater(ctx)) + 1 });
+    await ctx.db.insert("counters", {
+      name: SNAPSHOT_GENERATION_COUNTER,
+      value: (await eventSequenceHighWater(ctx)) + 1,
+    });
   } else {
     await ctx.db.patch(counter._id, { value: counter.value + 1 });
   }
@@ -766,7 +778,7 @@ async function createDumpCursor(
     version: 1,
     section: "quests",
     database_cursor: null,
-    event_high_water: await eventHighWater(ctx),
+    event_high_water: await snapshotGeneration(ctx),
     lease_cutoff: leaseCutoff,
     raw,
     ...(fencedRepositories === undefined ? {} : { fenced_repositories: [...fencedRepositories] }),
@@ -798,7 +810,7 @@ async function requireStableDumpCursor(
       "the Convex snapshot cursor does not match this export; restart the export and keep its cursor with the same export mode and lease cutoff",
     );
   }
-  if ((await eventHighWater(ctx)) !== cursor.event_high_water) {
+  if ((await snapshotGeneration(ctx)) !== cursor.event_high_water) {
     failQuestDomain(
       "CONVEX_SNAPSHOT_CHANGED",
       "the Convex store changed while its paginated snapshot was being read; restart the export to capture one complete consistency point",
@@ -1422,7 +1434,7 @@ async function requireRestoreStateUnchanged(
 ): Promise<void> {
   const highWater = committed ? lease.committed_event_high_water : lease.expected_event_high_water;
   if (highWater !== undefined) {
-    if ((await eventHighWater(ctx)) !== highWater) {
+    if ((await snapshotGeneration(ctx)) !== highWater) {
       failQuestDomain(code, message);
     }
     return;
@@ -1543,7 +1555,7 @@ async function markMigrationFencesCommitted(
   recoveryCutoff: string,
 ): Promise<void> {
   const fences = await ctx.db.query("migration_fences").collect();
-  const recoveryEventHighWater = await eventHighWater(ctx);
+  const recoveryEventHighWater = await snapshotGeneration(ctx);
   for (const fence of fences) {
     if (fence.lease_token === token) {
       const recoveryRepositoryRevision = await repositoryRevision(ctx, fence.repo);
@@ -1586,7 +1598,7 @@ async function migrationFenceRecoveryFields(
   return {
     committed: true,
     recovery_cutoff: input.leaseCutoff,
-    recovery_event_high_water: await eventHighWater(ctx),
+    recovery_event_high_water: await snapshotGeneration(ctx),
     recovery_repository_revision: await repositoryRevision(ctx, input.repo),
   } as const;
 }
@@ -1702,7 +1714,7 @@ async function verifyCommittedFenceSnapshot(
     return;
   }
   if (recoveryEventHighWater !== undefined) {
-    if ((await eventHighWater(ctx)) !== recoveryEventHighWater) {
+    if ((await snapshotGeneration(ctx)) !== recoveryEventHighWater) {
       failQuestDomain(
         "MIGRATION_FENCE_RECOVERY_BLOCKED",
         `repository ${repo} changed after its committed migration; inspect the destination and routing before retrying`,
@@ -1829,7 +1841,7 @@ export const migrateReadyStatuses = mutationGeneric({
       converted += 1;
     }
     if (converted > 0) {
-      await advanceSnapshotRevision(ctx, changedRepositories);
+      await advanceSnapshotGeneration(ctx, changedRepositories);
     }
     return { converted, unchanged: quests.length - converted, total: quests.length };
   },
@@ -2753,7 +2765,7 @@ export const beginRestore = mutationGeneric({
       }
       await ctx.db.delete(existing._id);
     }
-    if ((await eventHighWater(ctx)) !== expectation.eventHighWater) {
+    if ((await snapshotGeneration(ctx)) !== expectation.eventHighWater) {
       failQuestDomain(
         "CONVEX_RESTORE_PRECONDITION_FAILED",
         "Convex restore precondition failed; the store changed, so retry the restore",
@@ -3169,7 +3181,7 @@ export const commitRestore = mutationGeneric({
         await ctx.db.patch(lease._id, { expires_at: restoreLeaseExpiry(now()) });
         return { status: "pending" as const };
       }
-      const committedEventHighWater = await eventHighWater(ctx);
+      const committedEventHighWater = await snapshotGeneration(ctx);
       await ctx.db.patch(lease._id, {
         expires_at: restoreLeaseExpiry(now()),
         committed_event_high_water: committedEventHighWater,
@@ -3188,6 +3200,7 @@ export const commitRestore = mutationGeneric({
         sequence_floor_quests: await counterHighWater(ctx, "quests", "quests"),
         sequence_floor_evidence: await counterHighWater(ctx, "evidence", "evidence"),
         sequence_floor_events: await counterHighWater(ctx, "events", "events"),
+        sequence_floor_snapshot_generation: await snapshotGeneration(ctx),
       });
       return { status: "pending" as const };
     }
@@ -3209,6 +3222,8 @@ export const commitRestore = mutationGeneric({
     const sequenceFloorQuests = lease.sequence_floor_quests;
     const sequenceFloorEvidence = lease.sequence_floor_evidence;
     const sequenceFloorEvents = lease.sequence_floor_events;
+    const sequenceFloorSnapshotGeneration =
+      lease.sequence_floor_snapshot_generation ?? lease.sequence_floor_events;
     const replacementHighWaterQuests = lease.replacement_high_water_quests;
     const replacementHighWaterEvidence = lease.replacement_high_water_evidence;
     const replacementHighWaterEvents = lease.replacement_high_water_events;
@@ -3216,6 +3231,7 @@ export const commitRestore = mutationGeneric({
       sequenceFloorQuests === undefined ||
       sequenceFloorEvidence === undefined ||
       sequenceFloorEvents === undefined ||
+      sequenceFloorSnapshotGeneration === undefined ||
       replacementHighWaterQuests === undefined ||
       replacementHighWaterEvidence === undefined ||
       replacementHighWaterEvents === undefined
@@ -3237,13 +3253,17 @@ export const commitRestore = mutationGeneric({
       name: "events",
       value: Math.max(sequenceFloorEvents, replacementHighWaterEvents),
     });
+    const committedSnapshotGeneration = sequenceFloorSnapshotGeneration + 1;
+    await ctx.db.insert("counters", {
+      name: SNAPSHOT_GENERATION_COUNTER,
+      value: committedSnapshotGeneration,
+    });
     const timestamp = now();
-    const committedEventHighWater = await eventHighWater(ctx);
     await ctx.db.patch(lease._id, {
       expires_at: restoreLeaseExpiry(timestamp),
       expected_hash: lease.replacement_hash,
-      expected_event_high_water: committedEventHighWater,
-      committed_event_high_water: committedEventHighWater,
+      expected_event_high_water: committedSnapshotGeneration,
+      committed_event_high_water: committedSnapshotGeneration,
       lease_cutoff: timestamp,
       activated: false,
       replacement_hash: null,

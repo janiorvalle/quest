@@ -137,6 +137,7 @@ export default defineSchema({
     sequence_floor_quests: v.optional(v.number()),
     sequence_floor_evidence: v.optional(v.number()),
     sequence_floor_events: v.optional(v.number()),
+    sequence_floor_snapshot_generation: v.optional(v.number()),
     replacement_high_water_quests: v.optional(v.number()),
     replacement_high_water_evidence: v.optional(v.number()),
     replacement_high_water_events: v.optional(v.number()),

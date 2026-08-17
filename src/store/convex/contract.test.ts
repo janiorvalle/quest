@@ -587,11 +587,23 @@ if (deployment === undefined || authToken === undefined) {
         }
         expect(page.items.length).toBeLessThan(12);
         expect(page.next_cursor).not.toBeNull();
+        const preRestoreCursor = page.next_cursor;
+        if (preRestoreCursor === null) {
+          throw new Error("expected an in-flight cursor before replacing the store");
+        }
 
         const backupPath = join(directory, "large.json");
         const backup = new ConvexBackupDatabase(join(directory, "live.json"), store);
         expect((await backup.createSnapshot(backupPath)).dump.events).toHaveLength(8_193);
         await store.replaceAll(emptyDump);
+        await expect(
+          clients.http.query(convexApi.exportAll, {
+            auth_token: authToken,
+            client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+            cursor: preRestoreCursor,
+            lease_cutoff: pageCutoff,
+          }),
+        ).rejects.toThrow("CONVEX_SNAPSHOT_CHANGED");
         const restore = await backup.restoreSnapshot(backupPath, "large-round-trip");
         await restore.activate();
         await restore.commit();
