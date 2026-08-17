@@ -2818,7 +2818,12 @@ export const activeRestore = queryGeneric({
     if (lease.commit_phase !== undefined) {
       return { status: lease.commit_phase, token: lease.token };
     }
-    return { status: "staged" as const, token: lease.token };
+    const expiresAt = Date.parse(lease.expires_at);
+    const current = Date.parse(now());
+    if (Number.isFinite(expiresAt) && Number.isFinite(current) && expiresAt <= current) {
+      return { status: "expired" as const, token: lease.token };
+    }
+    return null;
   },
 });
 

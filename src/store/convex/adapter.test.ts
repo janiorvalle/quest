@@ -502,7 +502,7 @@ describe("Convex restore rolling upgrades", () => {
     expect(mutations).toEqual([convexApi.commitRestore, convexApi.releaseRestore]);
   });
 
-  test("lets a fresh client discard a restore interrupted before commit", async () => {
+  test("lets a fresh client discard an expired restore interrupted before commit", async () => {
     const empty: QuestDump = {
       schema_version: STORE_SCHEMA_VERSION,
       quests: [],
@@ -515,7 +515,7 @@ describe("Convex restore rolling upgrades", () => {
       http: {
         query: async (query: unknown) =>
           query === convexApi.activeRestore
-            ? { status: "staged", token: "interrupted-token" }
+            ? { status: "expired", token: "interrupted-token" }
             : empty,
         mutation: async (mutation: unknown) => {
           mutations.push(mutation);
@@ -528,6 +528,24 @@ describe("Convex restore rolling upgrades", () => {
 
     await expect(store.resumeInterruptedRestore()).resolves.toBeTrue();
     expect(mutations).toEqual([convexApi.releaseRestore]);
+  });
+
+  test("does not let a fresh client discard an unexpired restore", async () => {
+    const mutations: unknown[] = [];
+    const clients = {
+      http: {
+        query: async () => null,
+        mutation: async (mutation: unknown) => {
+          mutations.push(mutation);
+          return true;
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.resumeInterruptedRestore()).resolves.toBeFalse();
+    expect(mutations).toEqual([]);
   });
 
   test("uses the legacy monolithic restore only when the previous validator rejects paging", async () => {

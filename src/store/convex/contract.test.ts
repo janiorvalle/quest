@@ -237,7 +237,7 @@ if (deployment === undefined || authToken === undefined) {
     }
   });
 
-  test.serial("a fresh Convex client clears a restore interrupted before commit", async () => {
+  test.serial("a fresh Convex client cannot cancel a live restore before commit", async () => {
     const primaryClients = createConvexClientPair(deployment, { authToken });
     const freshClients = createConvexClientPair(deployment, { authToken });
     const primary = new ConvexStore(deployment, { clients: primaryClients });
@@ -254,9 +254,10 @@ if (deployment === undefined || authToken === undefined) {
       );
       await primary.activateRestore(token, emptyDump);
 
-      expect(await fresh.resumeInterruptedRestore()).toBeTrue();
-      token = undefined;
+      expect(await fresh.resumeInterruptedRestore()).toBeFalse();
       expect(await fresh.exportAll()).toEqual(previous.dump);
+      await primary.rollbackRestore(token);
+      token = undefined;
     } finally {
       if (token !== undefined) {
         await primary.releaseRestore(token).catch(() => undefined);

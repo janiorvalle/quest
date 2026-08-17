@@ -1252,7 +1252,7 @@ export class ConvexStore implements QuestStore {
     if (active === null) {
       return false;
     }
-    if (active.status === "staged") {
+    if (active.status === "expired") {
       await this.releaseRestore(active.token);
       return true;
     }
