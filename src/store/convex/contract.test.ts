@@ -501,6 +501,14 @@ if (deployment === undefined || authToken === undefined) {
         ).rejects.toThrow("CONVEX_SNAPSHOT_CHANGED");
 
         await store.replaceAll(expected);
+        await expect(
+          clients.http.mutation(convexApi.acceptQuestAndExport, {
+            auth_token: authToken,
+            client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+            input: { id: 1, owner: "contract/tester", session_guild: null },
+          }),
+        ).rejects.toThrow("CONVEX_MONOLITHIC_DUMP_UNSUPPORTED");
+        expect((await store.getQuest(1))?.status).toBe("open");
         expect((await store.exportAll()).events).toHaveLength(8_193);
         expect((await store.readFederatedFullSnapshot()).dump.events).toHaveLength(8_193);
         expect((await store.readQuestDetail(1)).events).toHaveLength(2_731);

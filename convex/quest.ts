@@ -1761,17 +1761,11 @@ export const acceptQuestAndDetail = mutationGeneric({
 export const acceptQuestAndExport = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
-    const actor = await requireMemberActor(ctx, args);
-    const parsed = acceptQuestInputSchema.parse(args.input);
-    const acceptance = await accept(ctx, { ...parsed, owner: actor }, args.test_failure);
-    const leaseCutoff = now();
-    return {
-      acceptance,
-      snapshot: {
-        cursor: await createDumpCursor(ctx, leaseCutoff, false),
-        lease_cutoff: leaseCutoff,
-      },
-    };
+    await requireMemberActor(ctx, args);
+    return failQuestDomain(
+      "CONVEX_MONOLITHIC_DUMP_UNSUPPORTED",
+      "acceptQuestAndExport no longer accepts a quest because its full-dump result is unsupported; call acceptQuestAndDetail, or retry the claim with the current Quest CLI",
+    );
   },
 });
 

@@ -305,7 +305,7 @@ export class ConvexStore implements QuestStore {
 
   async acceptQuestAndExport(input: AcceptQuestInput): Promise<PortAcceptQuestAndExportResult> {
     const parsed = acceptQuestInputSchema.parse(input);
-    const result = await this.#clients.http.mutation(
+    return this.#clients.http.mutation(
       convexApi.acceptQuestAndExport,
       testableMutation(
         this.#clients,
@@ -313,23 +313,6 @@ export class ConvexStore implements QuestStore {
         this.#consumeEventFailure(),
       ),
     );
-    if ("schema_version" in result.snapshot) {
-      return { acceptance: result.acceptance, snapshot: questDumpSchema.parse(result.snapshot) };
-    }
-    const snapshotCursor = result.snapshot;
-    const firstPage = await this.#clients.http.query(convexApi.exportAll, {
-      ...authTokenInput(this.#clients),
-      cursor: snapshotCursor.cursor,
-      lease_cutoff: snapshotCursor.lease_cutoff,
-    });
-    const snapshot = await assembleDumpPages(firstPage, (cursor) =>
-      this.#clients.http.query(convexApi.exportAll, {
-        ...authTokenInput(this.#clients),
-        cursor,
-        lease_cutoff: snapshotCursor.lease_cutoff,
-      }),
-    );
-    return { acceptance: result.acceptance, snapshot };
   }
 
   async touchQuest(input: TouchQuestInput): Promise<Quest> {

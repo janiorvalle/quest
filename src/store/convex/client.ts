@@ -72,14 +72,6 @@ export interface ConvexReadyStatusMigrationResult {
   readonly unchanged: number;
 }
 
-export interface ConvexAcceptQuestAndExportResult {
-  readonly acceptance: AcceptResult;
-  readonly snapshot: {
-    readonly cursor: string;
-    readonly lease_cutoff: string;
-  };
-}
-
 export type ConvexRestoreStatus =
   | { readonly status: "active" | "missing" }
   | { readonly status: "committed"; readonly lease_cutoff: string };
@@ -117,7 +109,7 @@ export const convexApi = {
   acceptQuestAndExport: makeFunctionReference<
     "mutation",
     AuthenticatedMutation<AcceptQuestInput>,
-    ConvexAcceptQuestAndExportResult | AcceptQuestAndExportResult
+    AcceptQuestAndExportResult
   >("quest:acceptQuestAndExport"),
   touchQuest: makeFunctionReference<"mutation", AuthenticatedMutation<TouchQuestInput>, Quest>(
     "quest:touchQuest",
