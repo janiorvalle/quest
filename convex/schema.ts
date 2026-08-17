@@ -140,6 +140,8 @@ export default defineSchema({
     replacement_high_water_quests: v.optional(v.number()),
     replacement_high_water_evidence: v.optional(v.number()),
     replacement_high_water_events: v.optional(v.number()),
+    expected_event_high_water: v.optional(v.number()),
+    committed_event_high_water: v.optional(v.number()),
   }).index("by_token", ["token"]),
   migration_fences: defineTable({
     repo: v.string(),
@@ -151,17 +153,49 @@ export default defineSchema({
     recovery_cutoff: v.optional(v.string()),
     unfenced: v.optional(v.boolean()),
     recovery_restore_token: v.optional(v.string()),
+    recovery_event_high_water: v.optional(v.number()),
   }).index("by_repo", ["repo"]),
-  restore_staged_quests: defineTable({ token: v.string(), ...questFields })
+  restore_staged_quests: defineTable({
+    token: v.string(),
+    page_index: v.optional(v.number()),
+    ...questFields,
+  })
     .index("by_token", ["token"])
     .index("by_token_and_id", ["token", "id"]),
-  restore_staged_evidence: defineTable({ token: v.string(), ...evidenceFields })
+  restore_staged_evidence: defineTable({
+    token: v.string(),
+    page_index: v.optional(v.number()),
+    ...evidenceFields,
+  })
     .index("by_token", ["token"])
     .index("by_token_and_id", ["token", "id"]),
-  restore_staged_chains: defineTable({ token: v.string(), ...chainFields })
+  restore_staged_chains: defineTable({
+    token: v.string(),
+    page_index: v.optional(v.number()),
+    ...chainFields,
+  })
     .index("by_token", ["token"])
     .index("by_token_and_link", ["token", "quest_id", "target_id", "type"]),
-  restore_staged_events: defineTable({ token: v.string(), ...eventFields })
+  restore_staged_events: defineTable({
+    token: v.string(),
+    page_index: v.optional(v.number()),
+    ...eventFields,
+  })
     .index("by_token", ["token"])
     .index("by_token_and_id", ["token", "id"]),
+  restore_staged_pages: defineTable({
+    token: v.string(),
+    page_index: v.number(),
+    section: v.union(
+      v.literal("quests"),
+      v.literal("evidence"),
+      v.literal("chains"),
+      v.literal("events"),
+    ),
+    item_count: v.number(),
+    page_hash: v.string(),
+    high_water: v.number(),
+  })
+    .index("by_token", ["token"])
+    .index("by_token_and_page", ["token", "page_index"]),
 });

@@ -168,7 +168,12 @@ if (deployment === undefined || authToken === undefined) {
         await primary.replaceAll(emptyDump);
         await primary.addQuest(quest);
         const previous = await primary.exportAllWithCutoff();
-        token = await primary.beginRestore(previous.dump, previous.lease_cutoff);
+        token = await primary.beginRestore(
+          previous.dump,
+          previous.lease_cutoff,
+          "full-backup",
+          previous.event_high_water,
+        );
         await primary.activateRestore(token, emptyDump);
         await expect(concurrent.addQuest({ ...quest, title: "blocked" })).rejects.toThrow(
           "restore is in progress",
@@ -452,7 +457,12 @@ if (deployment === undefined || authToken === undefined) {
       try {
         await store.replaceAll(emptyDump);
         const initial = await store.exportAllWithCutoff();
-        const legacyToken = await store.beginRestore(initial.dump, initial.lease_cutoff);
+        const legacyToken = await store.beginRestore(
+          initial.dump,
+          initial.lease_cutoff,
+          "full-backup",
+          initial.event_high_water,
+        );
         await expect(
           clients.http.mutation(convexApi.activateRestore, {
             auth_token: authToken,

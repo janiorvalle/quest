@@ -38,6 +38,7 @@ test("restore pages stay below the Convex array element cap", () => {
 
   expect(pages).toHaveLength(2);
   expect(pages.map((page) => page.items.length)).toEqual([CONVEX_DUMP_PAGE_MAX_ITEMS, 1]);
+  expect(pages.map((page) => page.page_index)).toEqual([0, 1]);
   const dumpPages: ConvexDumpPage[] = pages.map((page, index) => {
     if (page.section !== "events") {
       throw new Error(`expected an events page, received ${page.section}`);
@@ -46,9 +47,18 @@ test("restore pages stay below the Convex array element cap", () => {
       section: "events",
       items: page.items,
       next_cursor: index === pages.length - 1 ? null : `page-${index + 1}`,
+      event_high_water: source.events.length,
     };
   });
   expect(assembleConvexDump(dumpPages)).toEqual(source);
+});
+
+test("restore pages canonicalize item order before hashing and upload", () => {
+  const pages = createConvexRestorePages(dump([event(2), event(1)]));
+
+  expect(pages).toHaveLength(1);
+  expect(pages[0]?.section).toBe("events");
+  expect(pages[0]?.items.map((item) => ("id" in item ? item.id : 0))).toEqual([1, 2]);
 });
 
 test("restore pages split by serialized value size before item count", () => {

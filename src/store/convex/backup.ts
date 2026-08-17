@@ -337,7 +337,12 @@ export class ConvexBackupDatabase implements BackupDatabase {
     );
     let token: string | undefined;
     try {
-      token = await this.#store.beginRestore(previous, previousSnapshot.lease_cutoff, restoreKind);
+      token = await this.#store.beginRestore(
+        previous,
+        previousSnapshot.lease_cutoff,
+        restoreKind,
+        previousSnapshot.event_high_water,
+      );
       if (trimmedRepository !== undefined && trimmedRepository !== "") {
         await this.#store.recoverMigrationFenceForRestore(token, trimmedRepository);
       }

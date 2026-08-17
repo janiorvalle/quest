@@ -25,25 +25,31 @@ export type ConvexDumpPage =
       readonly section: "quests";
       readonly items: readonly Quest[];
       readonly next_cursor: string | null;
+      readonly event_high_water: number;
     }
   | {
       readonly section: "evidence";
       readonly items: readonly Evidence[];
       readonly next_cursor: string | null;
+      readonly event_high_water: number;
     }
   | {
       readonly section: "chains";
       readonly items: readonly Chain[];
       readonly next_cursor: string | null;
+      readonly event_high_water: number;
     }
   | {
       readonly section: "events";
       readonly items: readonly Event[];
       readonly next_cursor: string | null;
+      readonly event_high_water: number;
     };
 
-type WithoutNextCursor<T> = T extends unknown ? Omit<T, "next_cursor"> : never;
-export type ConvexRestorePage = WithoutNextCursor<ConvexDumpPage>;
+type RestorePage<T> = T extends unknown
+  ? Omit<T, "event_high_water" | "next_cursor"> & { readonly page_index: number }
+  : never;
+export type ConvexRestorePage = RestorePage<ConvexDumpPage>;
 
 export interface ConvexDumpCursor {
   readonly version: 1;
@@ -95,6 +101,7 @@ export function parseConvexDumpPage(value: unknown): ConvexDumpPage {
       section: convexDumpSectionSchema,
       items: z.array(z.unknown()),
       next_cursor: z.string().nullable(),
+      event_high_water: z.int().nonnegative(),
     })
     .parse(value);
   switch (envelope.section) {
@@ -103,26 +110,82 @@ export function parseConvexDumpPage(value: unknown): ConvexDumpPage {
         section: "quests",
         items: z.array(questSchema).parse(envelope.items),
         next_cursor: envelope.next_cursor,
+        event_high_water: envelope.event_high_water,
       };
     case "evidence":
       return {
         section: "evidence",
         items: z.array(evidenceSchema).parse(envelope.items),
         next_cursor: envelope.next_cursor,
+        event_high_water: envelope.event_high_water,
       };
     case "chains":
       return {
         section: "chains",
         items: z.array(chainSchema).parse(envelope.items),
         next_cursor: envelope.next_cursor,
+        event_high_water: envelope.event_high_water,
       };
     case "events":
       return {
         section: "events",
         items: z.array(eventSchema).parse(envelope.items),
         next_cursor: envelope.next_cursor,
+        event_high_water: envelope.event_high_water,
       };
   }
+}
+
+export function parseConvexRestorePage(value: unknown): ConvexRestorePage {
+  const envelope = z
+    .object({
+      section: convexDumpSectionSchema,
+      items: z.array(z.unknown()),
+      page_index: z.int().nonnegative(),
+    })
+    .parse(value);
+  switch (envelope.section) {
+    case "quests":
+      return {
+        section: "quests",
+        items: z.array(questSchema).parse(envelope.items),
+        page_index: envelope.page_index,
+      };
+    case "evidence":
+      return {
+        section: "evidence",
+        items: z.array(evidenceSchema).parse(envelope.items),
+        page_index: envelope.page_index,
+      };
+    case "chains":
+      return {
+        section: "chains",
+        items: z.array(chainSchema).parse(envelope.items),
+        page_index: envelope.page_index,
+      };
+    case "events":
+      return {
+        section: "events",
+        items: z.array(eventSchema).parse(envelope.items),
+        page_index: envelope.page_index,
+      };
+  }
+}
+
+export function canonicalizeQuestDump(dump: QuestDump): QuestDump {
+  const parsed = questDumpSchema.parse(dump);
+  return questDumpSchema.parse({
+    ...parsed,
+    quests: [...parsed.quests].sort((left, right) => left.id - right.id),
+    evidence: [...parsed.evidence].sort((left, right) => left.id - right.id),
+    chains: [...parsed.chains].sort(
+      (left, right) =>
+        left.quest_id - right.quest_id ||
+        left.target_id - right.target_id ||
+        left.type.localeCompare(right.type),
+    ),
+    events: [...parsed.events].sort((left, right) => left.id - right.id),
+  });
 }
 
 export function assembleConvexDump(pages: readonly ConvexDumpPage[]): QuestDump {
@@ -155,15 +218,18 @@ export function assembleConvexDump(pages: readonly ConvexDumpPage[]): QuestDump 
         break;
     }
   }
-  return questDumpSchema.parse(dump);
+  return canonicalizeQuestDump(dump);
 }
 
 function serializedBytes(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }
 
-function sectionPages<T>(section: ConvexDumpSection, items: readonly T[]): ConvexRestorePage[] {
-  const pages: ConvexRestorePage[] = [];
+function sectionPages<T>(
+  section: ConvexDumpSection,
+  items: readonly T[],
+): Array<Omit<ConvexRestorePage, "page_index">> {
+  const pages: Array<Omit<ConvexRestorePage, "page_index">> = [];
   let page: T[] = [];
   let pageBytes = 2;
   for (const item of items) {
@@ -173,7 +239,7 @@ function sectionPages<T>(section: ConvexDumpSection, items: readonly T[]): Conve
       (page.length >= CONVEX_DUMP_PAGE_MAX_ITEMS ||
         pageBytes + itemBytes > CONVEX_DUMP_PAGE_MAX_BYTES)
     ) {
-      pages.push({ section, items: page } as ConvexRestorePage);
+      pages.push({ section, items: page } as Omit<ConvexRestorePage, "page_index">);
       page = [];
       pageBytes = 2;
     }
@@ -181,17 +247,17 @@ function sectionPages<T>(section: ConvexDumpSection, items: readonly T[]): Conve
     pageBytes += itemBytes;
   }
   if (page.length > 0) {
-    pages.push({ section, items: page } as ConvexRestorePage);
+    pages.push({ section, items: page } as Omit<ConvexRestorePage, "page_index">);
   }
   return pages;
 }
 
 export function createConvexRestorePages(dump: QuestDump): readonly ConvexRestorePage[] {
-  const parsed = questDumpSchema.parse(dump);
+  const parsed = canonicalizeQuestDump(dump);
   return [
     ...sectionPages("quests", parsed.quests),
     ...sectionPages("evidence", parsed.evidence),
     ...sectionPages("chains", parsed.chains),
     ...sectionPages("events", parsed.events),
-  ];
+  ].map((page, pageIndex) => ({ ...page, page_index: pageIndex }) as ConvexRestorePage);
 }

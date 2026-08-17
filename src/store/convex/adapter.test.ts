@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { newQuestSchema, questSchema, STORE_SCHEMA_VERSION } from "../../schema";
+import { newQuestSchema, type QuestDump, questSchema, STORE_SCHEMA_VERSION } from "../../schema";
 import type { FederatedReadSnapshot } from "../port";
 import { ConvexStore } from "./adapter";
 import { type ConvexClientPair, convexApi } from "./client";
@@ -414,5 +414,47 @@ describe("Convex atomic claim detail", () => {
       },
     });
     expect(mutations).toEqual([convexApi.acceptQuestAndDetail, convexApi.acceptQuestAndExport]);
+  });
+});
+
+describe("Convex restore rolling upgrades", () => {
+  test("uses the legacy monolithic restore only when the previous validator rejects paging", async () => {
+    const empty: QuestDump = {
+      schema_version: STORE_SCHEMA_VERSION,
+      quests: [],
+      evidence: [],
+      chains: [],
+      events: [],
+    };
+    const calls: Array<{ readonly args: Record<string, unknown>; readonly mutation: unknown }> = [];
+    const clients = {
+      http: {
+        mutation: async (mutation: unknown, args: Record<string, unknown>) => {
+          calls.push({ args, mutation });
+          if (mutation === convexApi.beginRestore && "expected_hash" in args) {
+            throw new Error(
+              "ArgumentValidationError: Object contains extra field expected_hash that is not in the validator",
+            );
+          }
+          if (mutation === convexApi.activateRestore) {
+            return args["dump"];
+          }
+          return null;
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    const token = await store.beginRestore(empty, timestamp, "migration", 0);
+    await expect(store.activateRestore(token, empty)).resolves.toEqual(empty);
+
+    expect(calls.map((call) => call.mutation)).toEqual([
+      convexApi.beginRestore,
+      convexApi.beginRestore,
+      convexApi.activateRestore,
+    ]);
+    expect(calls[1]?.args["expected_snapshot"]).toBe(JSON.stringify(empty));
+    expect(calls.some((call) => call.mutation === convexApi.uploadRestorePage)).toBeFalse();
   });
 });

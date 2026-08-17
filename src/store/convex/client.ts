@@ -205,6 +205,7 @@ export const convexApi = {
     AuthTokenInput & {
       readonly token: string;
       readonly expected_hash?: string;
+      readonly expected_event_high_water?: number;
       readonly expected_snapshot?: string;
       readonly lease_cutoff: string;
       readonly restore_kind?: "full-backup";
