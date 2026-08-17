@@ -781,6 +781,7 @@ export class ConvexStore implements QuestStore {
   }
 
   async exportAllWithCutoff(): Promise<ConvexExportSnapshot> {
+    await this.resumeInterruptedRestore();
     const leaseCutoff = await this.serverTime();
     const firstPage = await this.#clients.http.query(convexApi.exportAll, {
       ...authTokenInput(this.#clients),

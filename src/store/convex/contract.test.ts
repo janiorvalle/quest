@@ -217,9 +217,8 @@ if (deployment === undefined || authToken === undefined) {
         }),
       ).resolves.toEqual({ status: "pending" });
 
-      expect(await fresh.resumeInterruptedRestore()).toBeTrue();
-      token = undefined;
       expect(await fresh.exportAll()).toEqual(emptyDump);
+      token = undefined;
       await expect(
         freshClients.http.query(convexApi.activeRestore, {
           auth_token: authToken,

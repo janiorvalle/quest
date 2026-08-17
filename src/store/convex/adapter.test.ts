@@ -479,10 +479,14 @@ describe("Convex restore rolling upgrades", () => {
     const mutations: unknown[] = [];
     const clients = {
       http: {
-        query: async (query: unknown) =>
-          query === convexApi.activeRestore
-            ? { status: "deleting", token: "interrupted-token" }
-            : empty,
+        query: async (query: unknown) => {
+          if (query === convexApi.activeRestore) {
+            return mutations.includes(convexApi.releaseRestore)
+              ? null
+              : { status: "deleting", token: "interrupted-token" };
+          }
+          return query === convexApi.serverTime ? timestamp : empty;
+        },
         mutation: async (mutation: unknown) => {
           mutations.push(mutation);
           if (mutation === convexApi.commitRestore) {
@@ -498,7 +502,7 @@ describe("Convex restore rolling upgrades", () => {
     } as unknown as ConvexClientPair;
     const store = new ConvexStore("http://127.0.0.1:3210", { clients });
 
-    await expect(store.resumeInterruptedRestore()).resolves.toBeTrue();
+    await expect(store.exportAll()).resolves.toEqual(empty);
     expect(mutations).toEqual([convexApi.commitRestore, convexApi.releaseRestore]);
   });
 
