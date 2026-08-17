@@ -6,20 +6,138 @@ import { nonEmptyTextSchema } from "./primitives";
 
 const displayIdSchema = z.int().positive();
 
+export const QUEST_INPUT_TOO_LARGE_CODE = "QUEST_INPUT_TOO_LARGE";
+export const QUEST_INPUT_LIMITS = {
+  descriptionBytes: 256 * 1_024,
+  evidenceFilenameBytes: 4 * 1_024,
+  fileListBytes: 384 * 1_024,
+  fileListItems: 128,
+  filePathBytes: 4 * 1_024,
+  inlineTextBytes: 16 * 1_024,
+  notesBytes: 64 * 1_024,
+  summaryBytes: 256 * 1_024,
+} as const;
+
+const inputTooLargePrefix = `[${QUEST_INPUT_TOO_LARGE_CODE}] `;
+const textEncoder = new TextEncoder();
+
+function utf8Bytes(value: string): number {
+  return textEncoder.encode(value).byteLength;
+}
+
+function inputTooLargeMessage(
+  field: string,
+  actual: number,
+  limit: number,
+  unit: "bytes" | "items",
+): string {
+  return `${inputTooLargePrefix}${field} has ${actual} ${unit}; expected at most ${limit} ${unit}; shorten ${field} and retry`;
+}
+
+function byteBoundedTextSchema(
+  field: string,
+  maximumBytes: number,
+  schema: z.ZodString = z.string(),
+) {
+  return schema.superRefine((value, context) => {
+    const actualBytes = utf8Bytes(value);
+    if (actualBytes > maximumBytes) {
+      context.addIssue({
+        code: "custom",
+        message: inputTooLargeMessage(field, actualBytes, maximumBytes, "bytes"),
+      });
+    }
+  });
+}
+
+function fileListInputSchema(field: string) {
+  return z.array(nonEmptyTextSchema).superRefine((files, context) => {
+    if (files.length > QUEST_INPUT_LIMITS.fileListItems) {
+      context.addIssue({
+        code: "custom",
+        message: inputTooLargeMessage(
+          field,
+          files.length,
+          QUEST_INPUT_LIMITS.fileListItems,
+          "items",
+        ),
+      });
+    }
+
+    let totalBytes = 0;
+    for (const [index, file] of files.entries()) {
+      const fileBytes = utf8Bytes(file);
+      totalBytes += fileBytes;
+      if (fileBytes > QUEST_INPUT_LIMITS.filePathBytes) {
+        context.addIssue({
+          code: "custom",
+          message: inputTooLargeMessage(
+            `${field}[${index}]`,
+            fileBytes,
+            QUEST_INPUT_LIMITS.filePathBytes,
+            "bytes",
+          ),
+          path: [index],
+        });
+      }
+    }
+
+    if (totalBytes > QUEST_INPUT_LIMITS.fileListBytes) {
+      context.addIssue({
+        code: "custom",
+        message: inputTooLargeMessage(field, totalBytes, QUEST_INPUT_LIMITS.fileListBytes, "bytes"),
+      });
+    }
+  });
+}
+
+function inlineTextInputSchema(field: string) {
+  return byteBoundedTextSchema(field, QUEST_INPUT_LIMITS.inlineTextBytes, nonEmptyTextSchema);
+}
+
+const descriptionInputSchema = byteBoundedTextSchema(
+  "description",
+  QUEST_INPUT_LIMITS.descriptionBytes,
+);
+const evidenceFilenameInputSchema = byteBoundedTextSchema(
+  "filename",
+  QUEST_INPUT_LIMITS.evidenceFilenameBytes,
+  nonEmptyTextSchema,
+);
+const notesInputSchema = byteBoundedTextSchema("notes", QUEST_INPUT_LIMITS.notesBytes);
+const verdictNotesInputSchema = byteBoundedTextSchema(
+  "verdict_notes",
+  QUEST_INPUT_LIMITS.notesBytes,
+);
+const predictedFilesInputSchema = fileListInputSchema("predicted_files");
+const actualFilesSchema = fileListInputSchema("actual_files").transform((files) =>
+  [...new Set(files)].sort(),
+);
+const summaryInputSchema = byteBoundedTextSchema(
+  "summary",
+  QUEST_INPUT_LIMITS.summaryBytes,
+  nonEmptyTextSchema,
+);
+
+export function questInputTooLargeMessage(error: unknown): string | undefined {
+  if (!(error instanceof z.ZodError)) {
+    return undefined;
+  }
+  const issue = error.issues.find(({ message }) => message.startsWith(inputTooLargePrefix));
+  return issue?.message.slice(inputTooLargePrefix.length);
+}
+
 // Unified open status is part of the Convex wire contract; deploy and migrate the matching backend
 // before releasing a client that no longer understands ready.
 export const STORE_SCHEMA_VERSION = 10;
 export const MAX_LEASE_TTL_MINUTES = 100_000_000;
 const leaseTtlMinutesSchema = z.int().positive().max(MAX_LEASE_TTL_MINUTES);
 
-const sessionGuildSchema = nonEmptyTextSchema.nullable().optional();
+const sessionGuildSchema = inlineTextInputSchema("session_guild").nullable().optional();
 const sessionAttributionFields = {
-  session_model: nonEmptyTextSchema.optional(),
-  session_effort: nonEmptyTextSchema.optional(),
+  session_model: inlineTextInputSchema("session_model").optional(),
+  session_effort: inlineTextInputSchema("session_effort").optional(),
 };
-const actualFilesSchema = z
-  .array(nonEmptyTextSchema)
-  .transform((files) => [...new Set(files)].sort());
 
 export const storeCompatibilityResultSchema = z.discriminatedUnion("outcome", [
   z.strictObject({
@@ -49,10 +167,20 @@ export const newQuestSchema = questSchema
     updated_at: true,
   })
   .extend({
+    area: inlineTextInputSchema("area").nullable(),
+    assignee: inlineTextInputSchema("assignee").nullable(),
     backfill: z.boolean().optional(),
+    description: descriptionInputSchema,
+    guild: inlineTextInputSchema("guild").nullable(),
     lease_expires_at: questSchema.shape.lease_expires_at.optional(),
     lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
+    opened_by: inlineTextInputSchema("opened_by"),
+    pr: inlineTextInputSchema("pr").nullable(),
+    predicted_files: predictedFilesInputSchema,
+    repo: inlineTextInputSchema("repo"),
     session_guild: sessionGuildSchema,
+    title: inlineTextInputSchema("title"),
+    verdict_notes: verdictNotesInputSchema.nullable(),
   });
 export type NewQuest = z.infer<typeof newQuestSchema>;
 
@@ -62,6 +190,8 @@ export const newEvidenceSchema = evidenceSchema
     created_at: true,
   })
   .extend({
+    added_by: inlineTextInputSchema("added_by"),
+    filename: evidenceFilenameInputSchema,
     lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     session_guild: sessionGuildSchema,
   });
@@ -89,7 +219,7 @@ export const acceptQuestInputSchema = z.strictObject({
   lane_conflict_acknowledged: z.array(laneConflictReferenceSchema).optional(),
   lane_conflict_override: z.literal(true).optional(),
   lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
-  owner: nonEmptyTextSchema,
+  owner: inlineTextInputSchema("owner"),
   ...sessionAttributionFields,
   session_guild: sessionGuildSchema,
 });
@@ -129,7 +259,7 @@ export type AcceptResult = z.infer<typeof acceptResultSchema>;
 export const touchQuestInputSchema = z.strictObject({
   id: displayIdSchema,
   lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
-  owner: nonEmptyTextSchema,
+  owner: inlineTextInputSchema("owner"),
   ...sessionAttributionFields,
   session_guild: sessionGuildSchema,
 });
@@ -138,12 +268,12 @@ export type TouchQuestInput = z.infer<typeof touchQuestInputSchema>;
 const verdictTransitionSchema = z
   .strictObject({
     action: z.literal("verdict"),
-    actor: nonEmptyTextSchema,
+    actor: inlineTextInputSchema("actor"),
     lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     ...sessionAttributionFields,
     session_guild: sessionGuildSchema,
     verdict: verdictSchema,
-    notes: z.string().nullable(),
+    notes: notesInputSchema.nullable(),
     retest: z.boolean(),
     duplicate_of: displayIdSchema.nullable(),
   })
@@ -160,17 +290,17 @@ const verdictTransitionSchema = z
 
 const signoffTransitionSchema = z.strictObject({
   action: z.literal("signoff"),
-  actor: nonEmptyTextSchema,
+  actor: inlineTextInputSchema("actor"),
   lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
   ...sessionAttributionFields,
   session_guild: sessionGuildSchema,
-  notes: z.string().nullable(),
+  notes: notesInputSchema.nullable(),
 });
 
 export const questTransitionSchema = z.union([
   z.strictObject({
     action: z.literal("abandon"),
-    actor: nonEmptyTextSchema,
+    actor: inlineTextInputSchema("actor"),
     lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     ...sessionAttributionFields,
     session_guild: sessionGuildSchema,
@@ -178,20 +308,20 @@ export const questTransitionSchema = z.union([
   verdictTransitionSchema,
   z.strictObject({
     action: z.literal("turnin"),
-    actor: nonEmptyTextSchema,
+    actor: inlineTextInputSchema("actor"),
     actual_files: actualFilesSchema.optional(),
     lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     ...sessionAttributionFields,
     session_guild: sessionGuildSchema,
     // Non-code tasks may turn in with evidence only; DATA-MODEL keeps both fields nullable.
-    pr: nonEmptyTextSchema.nullable(),
+    pr: inlineTextInputSchema("pr").nullable(),
     // Keep older CLI clients and persisted turnin event replays valid; agents should supply it.
-    summary: nonEmptyTextSchema.optional(),
+    summary: summaryInputSchema.optional(),
   }),
   z
     .strictObject({
       action: z.literal("complete"),
-      actor: nonEmptyTextSchema,
+      actor: inlineTextInputSchema("actor"),
       lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
       ...sessionAttributionFields,
       session_guild: sessionGuildSchema,
@@ -209,35 +339,35 @@ export const questTransitionSchema = z.union([
   signoffTransitionSchema,
   z.strictObject({
     action: z.literal("reopen"),
-    actor: nonEmptyTextSchema,
+    actor: inlineTextInputSchema("actor"),
     lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     ...sessionAttributionFields,
     session_guild: sessionGuildSchema,
-    notes: nonEmptyTextSchema,
+    notes: byteBoundedTextSchema("notes", QUEST_INPUT_LIMITS.notesBytes, nonEmptyTextSchema),
   }),
   z.strictObject({
     action: z.literal("cancel"),
-    actor: nonEmptyTextSchema,
+    actor: inlineTextInputSchema("actor"),
     lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     ...sessionAttributionFields,
     session_guild: sessionGuildSchema,
-    reason: nonEmptyTextSchema,
+    reason: byteBoundedTextSchema("reason", QUEST_INPUT_LIMITS.notesBytes, nonEmptyTextSchema),
   }),
   z.strictObject({
     action: z.literal("update"),
-    actor: nonEmptyTextSchema,
+    actor: inlineTextInputSchema("actor"),
     lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
     ...sessionAttributionFields,
     session_guild: sessionGuildSchema,
     changes: z
       .strictObject({
-        title: nonEmptyTextSchema.optional(),
-        description: z.string().optional(),
-        area: nonEmptyTextSchema.nullable().optional(),
+        title: inlineTextInputSchema("title").optional(),
+        description: descriptionInputSchema.optional(),
+        area: inlineTextInputSchema("area").nullable().optional(),
         priority: z.int().min(1).max(3).optional(),
-        guild: nonEmptyTextSchema.nullable().optional(),
-        verdict_notes: z.string().nullable().optional(),
-        predicted_files: z.array(nonEmptyTextSchema).optional(),
+        guild: inlineTextInputSchema("guild").nullable().optional(),
+        verdict_notes: verdictNotesInputSchema.nullable().optional(),
+        predicted_files: predictedFilesInputSchema.optional(),
       })
       .refine(
         (changes) => Object.values(changes).some((value) => value !== undefined),
@@ -262,7 +392,7 @@ export type SignoffBatchResult = z.infer<typeof signoffBatchResultSchema>;
 
 export const chainMutationSchema = z.strictObject({
   link: newChainSchema,
-  actor: nonEmptyTextSchema,
+  actor: inlineTextInputSchema("actor"),
   lease_ttl_minutes: leaseTtlMinutesSchema.optional(),
   session_guild: sessionGuildSchema,
 });
