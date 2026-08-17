@@ -16,6 +16,7 @@ import { ConvexStore } from "./adapter";
 import { ConvexBackupDatabase } from "./backup";
 import { ConvexBlobStore } from "./blob-store";
 import { closeConvexClientPair, convexApi, createConvexClientPair } from "./client";
+import { parseConvexEventPage } from "./pagination";
 import { MINIMUM_QUEST_CLIENT_PROTOCOL } from "./protocol";
 
 const deployment = process.env["QUEST_CONVEX_TEST_URL"];
@@ -483,7 +484,7 @@ if (deployment === undefined || authToken === undefined) {
   );
 
   test.serial(
-    "Convex paginated dumps round-trip more than 8192 events by count and value size",
+    "Convex paginated reads round-trip more than 8192 events by count and value size",
     async () => {
       const clients = createConvexClientPair(deployment, { authToken });
       const store = new ConvexStore(deployment, { clients });
@@ -586,6 +587,18 @@ if (deployment === undefined || authToken === undefined) {
         ).rejects.toThrow("CONVEX_SNAPSHOT_CHANGED");
 
         await store.replaceAll(expected);
+        const queriedEvents = await store.queryEvents({ after_id: 0 });
+        expect(queriedEvents).toHaveLength(8_193);
+        expect(queriedEvents[0]?.id).toBe(1);
+        expect(queriedEvents.at(-1)?.id).toBe(8_193);
+        await expect(
+          clients.http.query(convexApi.queryEvents, {
+            auth_token: authToken,
+            client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+            filter: { after_id: 8_190 },
+            lease_cutoff: await store.serverTime(),
+          }),
+        ).resolves.toEqual(events.slice(8_190));
         await expect(
           clients.http.mutation(convexApi.acceptQuestAndExport, {
             auth_token: authToken,
@@ -650,6 +663,32 @@ if (deployment === undefined || authToken === undefined) {
         await store.rollbackRestore(rollbackToken);
         rollbackToken = undefined;
         expect((await store.exportAll()).events).toHaveLength(8_193);
+
+        const eventCutoff = await store.serverTime();
+        const firstEventPage = parseConvexEventPage(
+          await clients.http.query(convexApi.queryEvents, {
+            auth_token: authToken,
+            client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+            cursor: null,
+            filter: { after_id: 0 },
+            lease_cutoff: eventCutoff,
+          }),
+        );
+        expect(firstEventPage.next_cursor).not.toBeNull();
+        await store.transition(1, {
+          action: "update",
+          actor: "contract/tester",
+          changes: { area: "changed-after-first-event-page" },
+        });
+        await expect(
+          clients.http.query(convexApi.queryEvents, {
+            auth_token: authToken,
+            client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+            cursor: firstEventPage.next_cursor,
+            filter: { after_id: 0 },
+            lease_cutoff: eventCutoff,
+          }),
+        ).rejects.toThrow("CONVEX_SNAPSHOT_CHANGED");
       } finally {
         if (rollbackToken !== undefined) {
           await store.rollbackRestore(rollbackToken).catch(() => undefined);

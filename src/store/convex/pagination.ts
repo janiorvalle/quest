@@ -16,6 +16,43 @@ import {
 
 export const CONVEX_DUMP_PAGE_MAX_ITEMS = 1_024;
 export const CONVEX_DUMP_PAGE_MAX_BYTES = 512 * 1_024;
+export const CONVEX_EVENT_PAGE_MAX_ITEMS = 512;
+export const CONVEX_EVENT_PAGE_MAX_BYTES = 512 * 1_024;
+
+export interface ConvexEventPage {
+  readonly items: readonly Event[];
+  readonly next_cursor: string | null;
+}
+
+export interface ConvexEventCursor {
+  readonly version: 1;
+  readonly database_cursor: string | null;
+  readonly snapshot_generation: number;
+}
+
+const convexEventCursorSchema = z.strictObject({
+  version: z.literal(1),
+  database_cursor: z.string().nullable(),
+  snapshot_generation: z.int().nonnegative(),
+});
+
+export function encodeConvexEventCursor(cursor: ConvexEventCursor): string {
+  return JSON.stringify(convexEventCursorSchema.parse(cursor));
+}
+
+export function decodeConvexEventCursor(cursor: string): ConvexEventCursor {
+  return convexEventCursorSchema.parse(JSON.parse(cursor));
+}
+
+export function parseConvexEventPage(value: unknown): ConvexEventPage {
+  const page = z
+    .object({
+      items: z.array(eventSchema),
+      next_cursor: z.string().nullable(),
+    })
+    .parse(value);
+  return { items: page.items, next_cursor: page.next_cursor };
+}
 
 export const convexDumpSectionSchema = z.enum(["quests", "evidence", "chains", "events"]);
 export type ConvexDumpSection = z.infer<typeof convexDumpSectionSchema>;

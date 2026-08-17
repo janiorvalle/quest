@@ -70,11 +70,17 @@ import { legacyReadySnapshot } from "../src/store/convex/legacy-fingerprint";
 import {
   CONVEX_DUMP_PAGE_MAX_BYTES,
   CONVEX_DUMP_PAGE_MAX_ITEMS,
+  CONVEX_EVENT_PAGE_MAX_BYTES,
+  CONVEX_EVENT_PAGE_MAX_ITEMS,
   type ConvexDumpCursor,
   type ConvexDumpPage,
+  type ConvexEventCursor,
+  type ConvexEventPage,
   type ConvexRestorePage,
   decodeConvexDumpCursor,
+  decodeConvexEventCursor,
   encodeConvexDumpCursor,
+  encodeConvexEventCursor,
   nextConvexDumpSection,
   parseConvexRestorePage,
 } from "../src/store/convex/pagination";
@@ -848,6 +854,123 @@ const dumpPaginationOptions = (cursor: string | null) => ({
   maximumRowsRead: CONVEX_DUMP_PAGE_MAX_ITEMS,
   numItems: CONVEX_DUMP_PAGE_MAX_ITEMS,
 });
+
+const eventPaginationOptions = (cursor: string | null) => ({
+  cursor,
+  maximumBytesRead: CONVEX_EVENT_PAGE_MAX_BYTES,
+  maximumRowsRead: CONVEX_EVENT_PAGE_MAX_ITEMS,
+  numItems: CONVEX_EVENT_PAGE_MAX_ITEMS,
+});
+
+type ParsedEventFilter = ReturnType<typeof eventFilterSchema.parse>;
+
+function eventMatchesFilter(
+  event: Event,
+  quest: Quest | undefined,
+  filter: ParsedEventFilter,
+): boolean {
+  return (
+    quest !== undefined &&
+    (filter.repo === undefined || quest.repo === filter.repo) &&
+    (filter.quest_id === undefined || event.quest_id === filter.quest_id) &&
+    (filter.after_id === undefined || event.id > filter.after_id) &&
+    (filter.since === undefined || Date.parse(event.at) >= Date.parse(filter.since)) &&
+    (filter.until === undefined || Date.parse(event.at) <= Date.parse(filter.until)) &&
+    (filter.actor === undefined || event.actor === filter.actor) &&
+    (filter.action === undefined || event.action === filter.action) &&
+    (filter.area === undefined || quest.area === filter.area)
+  );
+}
+
+async function readLegacyEventQuery(
+  ctx: QueryContext,
+  filter: ParsedEventFilter,
+): Promise<Event[]> {
+  const documents =
+    filter.after_id === undefined
+      ? await ctx.db.query("events").collect()
+      : await ctx.db
+          .query("events")
+          .withIndex("by_display_id", (query) => query.gt("id", filter.after_id ?? 0))
+          .order("asc")
+          .collect();
+  const events = documents.map(parseEventDocument).sort((left, right) => left.id - right.id);
+  const questsById = await questsForEvents(ctx, events);
+  return events.filter((event) =>
+    eventMatchesFilter(event, questsById.get(event.quest_id), filter),
+  );
+}
+
+async function questsForEvents(
+  ctx: QueryContext,
+  events: readonly Event[],
+): Promise<ReadonlyMap<number, Quest>> {
+  const questIds = [...new Set(events.map((event) => event.quest_id))];
+  const quests = await Promise.all(questIds.map((id) => findQuestRecord(ctx, id)));
+  return new Map(
+    quests.flatMap((quest) =>
+      quest === null ? [] : ([[quest.id, parseQuestDocument(quest)]] as const),
+    ),
+  );
+}
+
+function parseEventCursor(cursor: string): ConvexEventCursor {
+  try {
+    return decodeConvexEventCursor(cursor);
+  } catch {
+    return failQuestDomain(
+      "CONVEX_SNAPSHOT_CURSOR_INVALID",
+      "the Convex event cursor is invalid or belongs to another deployment; restart the event read and retry with the first cursor it returns",
+    );
+  }
+}
+
+async function eventCursor(ctx: QueryContext, cursor: string | null): Promise<ConvexEventCursor> {
+  const parsed =
+    cursor === null
+      ? {
+          version: 1 as const,
+          database_cursor: null,
+          snapshot_generation: await snapshotGeneration(ctx),
+        }
+      : parseEventCursor(cursor);
+  if ((await snapshotGeneration(ctx)) !== parsed.snapshot_generation) {
+    failQuestDomain(
+      "CONVEX_SNAPSHOT_CHANGED",
+      "the Convex store changed while its paginated events were being read; restart the event read to capture one complete consistency point",
+    );
+  }
+  return parsed;
+}
+
+async function readEventQueryPage(
+  ctx: QueryContext,
+  filter: ParsedEventFilter,
+  encodedCursor: string | null,
+): Promise<ConvexEventPage> {
+  const cursor = await eventCursor(ctx, encodedCursor);
+  const result = await ctx.db
+    .query("events")
+    .withIndex("by_display_id", (query) =>
+      filter.after_id === undefined ? query : query.gt("id", filter.after_id),
+    )
+    .order("asc")
+    .paginate(eventPaginationOptions(cursor.database_cursor));
+  const events = result.page.map(parseEventDocument);
+  const questsById = await questsForEvents(ctx, events);
+  const items = events.filter((event) =>
+    eventMatchesFilter(event, questsById.get(event.quest_id), filter),
+  );
+  return {
+    items,
+    next_cursor: result.isDone
+      ? null
+      : encodeConvexEventCursor({
+          ...cursor,
+          database_cursor: result.continueCursor,
+        }),
+  };
+}
 
 async function readDumpPage(ctx: QueryContext, cursor: ConvexDumpCursor): Promise<ConvexDumpPage> {
   switch (cursor.section) {
@@ -2622,6 +2745,7 @@ export const events = queryGeneric({
 export const queryEvents = queryGeneric({
   args: {
     auth_token: v.optional(v.string()),
+    cursor: v.optional(v.union(v.string(), v.null())),
     filter: v.any(),
     lease_cutoff: v.string(),
     ...clientProtocolArgs,
@@ -2630,22 +2754,10 @@ export const queryEvents = queryGeneric({
     await requireMemberQueryActor(ctx, args);
     await requireNoPartialRestore(ctx);
     const filter = eventFilterSchema.parse(args.filter);
-    const quests = await readQuests(ctx, parseLeaseCutoff(args.lease_cutoff));
-    const byId = new Map(quests.map((quest) => [quest.id, quest]));
-    return (await readEvents(ctx)).filter((event) => {
-      const quest = byId.get(event.quest_id);
-      return (
-        quest !== undefined &&
-        (filter.repo === undefined || quest.repo === filter.repo) &&
-        (filter.quest_id === undefined || event.quest_id === filter.quest_id) &&
-        (filter.after_id === undefined || event.id > filter.after_id) &&
-        (filter.since === undefined || Date.parse(event.at) >= Date.parse(filter.since)) &&
-        (filter.until === undefined || Date.parse(event.at) <= Date.parse(filter.until)) &&
-        (filter.actor === undefined || event.actor === filter.actor) &&
-        (filter.action === undefined || event.action === filter.action) &&
-        (filter.area === undefined || quest.area === filter.area)
-      );
-    });
+    parseLeaseCutoff(args.lease_cutoff);
+    return args.cursor === undefined
+      ? readLegacyEventQuery(ctx, filter)
+      : readEventQueryPage(ctx, filter, args.cursor);
   },
 });
 
