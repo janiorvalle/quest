@@ -111,22 +111,32 @@ async function writePowerShellChecksums(directory: string, artifact: string): Pr
 async function createFailingPowerShellArtifact(): Promise<{
   readonly artifact: string;
   readonly checksums: string;
+  readonly expectedOutput: string;
+  readonly installVersion: string;
 }> {
   const directory = join(temporaryDirectory, "powershell-failing");
   if (process.platform !== "win32") {
-    return createPowerShellArtifact(
+    const fixture = await createPowerShellArtifact(
       directory,
       "#!/bin/sh\nprintf 'store is broken; run quest migrate\\n' >&2\nexit 7\n",
     );
+    return {
+      ...fixture,
+      expectedOutput: "store is broken; run quest migrate",
+      installVersion: version,
+    };
   }
 
+  const installVersion = `${version}-mismatch`;
   await mkdir(directory, { recursive: true });
-  const artifact = join(directory, `quest-${version}-windows-x64.exe`);
-  await copyFile(
-    join(process.env["SystemRoot"] ?? "C:\\Windows", "System32", "whoami.exe"),
+  const artifact = join(directory, `quest-${installVersion}-windows-x64.exe`);
+  await copyFile(installerEnvironment.QUEST_INSTALL_ARTIFACT, artifact);
+  return {
     artifact,
-  );
-  return { artifact, checksums: await writePowerShellChecksums(directory, artifact) };
+    checksums: await writePowerShellChecksums(directory, artifact),
+    expectedOutput: `quest ${version}`,
+    installVersion,
+  };
 }
 
 async function runPowerShellFailureSmoke(): Promise<void> {
@@ -160,13 +170,12 @@ async function runPowerShellFailureSmoke(): Promise<void> {
     QUEST_INSTALL_ARTIFACT: failingFixture.artifact,
     QUEST_INSTALL_CHECKSUMS: failingFixture.checksums,
     QUEST_INSTALL_DIR: join(temporaryDirectory, "powershell-failing-bin"),
+    QUEST_INSTALL_VERSION: failingFixture.installVersion,
   });
   if (failing.exitCode === 0) {
     throw new Error("install.ps1 accepted an executable that failed its version smoke test");
   }
-  const expectedOutput =
-    process.platform === "win32" ? "ERROR" : "store is broken; run quest migrate";
-  if (!failing.output.includes(expectedOutput)) {
+  if (!failing.output.includes(failingFixture.expectedOutput)) {
     throw new Error(`install.ps1 hid the smoke-test output: ${failing.output.trim()}`);
   }
   if (!failing.output.toLowerCase().includes("retry the installer")) {
