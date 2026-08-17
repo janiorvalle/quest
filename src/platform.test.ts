@@ -51,6 +51,71 @@ test("working-directory validation accepts directories and rejects files", async
   }
 });
 
+describe("Windows executable replacement", () => {
+  test("renames the running binary aside before moving the new binary into place", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-windows-upgrade-"));
+    const destination = join(directory, "quest.exe");
+    const previousExecutable = `${destination}.previous`;
+    const stagingDirectory = join(directory, ".quest-upgrade-current");
+    const stagedExecutable = join(stagingDirectory, "quest.exe");
+    try {
+      await mkdir(stagingDirectory);
+      await writeFile(destination, "old binary");
+      await writeFile(stagedExecutable, "new binary");
+      const platform = createPlatform({
+        environment: {},
+        homeDirectory: windowsHome,
+        platform: "win32",
+      });
+
+      await expect(
+        platform.replaceExecutable?.({
+          destination,
+          previousExecutable,
+          stagedExecutable,
+          temporaryDirectory: stagingDirectory,
+        }),
+      ).resolves.toBe("replaced");
+      expect(await readFile(destination, "utf8")).toBe("new binary");
+      expect(await readFile(previousExecutable, "utf8")).toBe("old binary");
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  test("leaves both binaries in place and gives an exact PowerShell command when the move fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "quest-windows-upgrade-failure-"));
+    const destination = join(directory, "quest.exe");
+    const previousExecutable = `${destination}.previous`;
+    const stagingDirectory = join(directory, ".quest-upgrade-current");
+    const stagedExecutable = join(stagingDirectory, "quest.exe");
+    try {
+      await mkdir(stagingDirectory);
+      await writeFile(destination, "old binary");
+      const platform = createPlatform({
+        environment: {},
+        homeDirectory: windowsHome,
+        platform: "win32",
+      });
+
+      await expect(
+        platform.replaceExecutable?.({
+          destination,
+          previousExecutable,
+          stagedExecutable,
+          temporaryDirectory: stagingDirectory,
+        }),
+      ).rejects.toThrow(
+        `the previous binary remains at ${previousExecutable} and the new binary remains at ${stagedExecutable}. Exit every quest process, then finish the upgrade in PowerShell with: Move-Item -LiteralPath '${stagedExecutable}' -Destination '${destination}' -Force`,
+      );
+      expect(await readFile(previousExecutable, "utf8")).toBe("old binary");
+      await expect(stat(destination)).rejects.toThrow();
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+});
+
 describe("process holder inspection", () => {
   test("does not pass missing optional paths to lsof", async () => {
     const directory = await mkdtemp(join(tmpdir(), "quest-process-probe-"));

@@ -359,61 +359,36 @@ async function defaultCommandRunner(command: PlatformCommand): Promise<void> {
   }
 }
 
-function encodePowerShellValue(value: string): string {
-  return Buffer.from(value, "utf8").toString("base64");
+function powerShellLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
 }
 
-function windowsExecutableReplacementScript(options: ExecutableReplacementOptions): string {
-  const destination = encodePowerShellValue(options.destination);
-  const stagedExecutable = encodePowerShellValue(options.stagedExecutable);
-  const temporaryDirectory = encodePowerShellValue(options.temporaryDirectory);
-  const previousExecutable = encodePowerShellValue(options.previousExecutable ?? "");
-  return `
-$ErrorActionPreference = "Stop"
-function Decode([string]$value) {
-  return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($value))
-}
-$destination = Decode "${destination}"
-$stagedExecutable = Decode "${stagedExecutable}"
-$temporaryDirectory = Decode "${temporaryDirectory}"
-$previousExecutable = Decode "${previousExecutable}"
-$parentId = ${process.pid}
-while (Get-Process -Id $parentId -ErrorAction SilentlyContinue) {
-  Start-Sleep -Milliseconds 100
-}
-try {
-  if (Test-Path -LiteralPath $destination) {
-    Remove-Item -Force $destination
-  }
-  Move-Item -Force $stagedExecutable $destination
-} catch {
-  if ($previousExecutable -and (Test-Path -LiteralPath $previousExecutable)) {
-    Copy-Item -Force $previousExecutable $destination
-  }
-  throw
-} finally {
-  Remove-Item -Recurse -Force $temporaryDirectory -ErrorAction SilentlyContinue
-}
-`;
-}
-
-function scheduleWindowsExecutableReplacement(
+async function replaceWindowsExecutable(
   options: ExecutableReplacementOptions,
 ): Promise<ExecutableReplacementOutcome> {
-  const script = windowsExecutableReplacementScript(options);
-  const encodedScript = Buffer.from(script, "utf16le").toString("base64");
-  const child = spawn(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodedScript],
-    { detached: true, stdio: "ignore", windowsHide: true },
-  );
-  return new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("spawn", () => {
-      child.unref();
-      resolve("scheduled");
-    });
-  });
+  let previousWasRenamed = false;
+  try {
+    if (options.previousExecutable !== undefined) {
+      await rename(options.destination, options.previousExecutable);
+      previousWasRenamed = true;
+    }
+    await rename(options.stagedExecutable, options.destination);
+    return "replaced";
+  } catch (error) {
+    const moveNewBinary = `Move-Item -LiteralPath ${powerShellLiteral(options.stagedExecutable)} -Destination ${powerShellLiteral(options.destination)} -Force`;
+    const finishCommand = previousWasRenamed
+      ? moveNewBinary
+      : options.previousExecutable === undefined
+        ? moveNewBinary
+        : `Move-Item -LiteralPath ${powerShellLiteral(options.destination)} -Destination ${powerShellLiteral(options.previousExecutable)} -Force; ${moveNewBinary}`;
+    const state = previousWasRenamed
+      ? `the previous binary remains at ${options.previousExecutable} and the new binary remains at ${options.stagedExecutable}`
+      : `the installed binary remains at ${options.destination} and the new binary remains at ${options.stagedExecutable}`;
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Windows could not replace ${options.destination}; ${state}. Exit every quest process, then finish the upgrade in PowerShell with: ${finishCommand} (${detail})`,
+    );
+  }
 }
 
 function runAndWait(
@@ -1585,7 +1560,7 @@ export function createPlatform(options: PlatformModuleOptions = {}): PlatformMod
     openEvidence: (filePath) => runCommand(createEvidenceOpenCommand(filePath)),
     urlOpenCommand: createUrlOpenCommand,
     openUrl: (url) => runCommand(createUrlOpenCommand(url)),
-    ...(name === "win32" ? { replaceExecutable: scheduleWindowsExecutableReplacement } : {}),
+    ...(name === "win32" ? { replaceExecutable: replaceWindowsExecutable } : {}),
     isInstallDirectoryOnPath,
     addInstallDirectoryToPath,
   };
