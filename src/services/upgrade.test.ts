@@ -294,7 +294,7 @@ describe("upgrade service", () => {
       JSON.stringify({
         destination: "/install/quest.exe",
         previousExecutable: "/install/quest.exe.previous",
-        stagedExecutable: "/install/.quest-upgrade-123/quest.exe",
+        stagedExecutable: join("/install", ".quest-upgrade-123", "quest.exe"),
         temporaryDirectory: "/install/.quest-upgrade-123",
       }),
     ]);
@@ -307,6 +307,7 @@ describe("upgrade service", () => {
     const artifact = new TextEncoder().encode("quest 0.8.1");
     const checksum = createHash("sha256").update(artifact).digest("hex");
     const { calls, fileSystem } = fakeFileSystem();
+    const stagedExecutable = join("/install", ".quest-upgrade-123", "quest.exe");
     const operations = createUpgradeOperations({
       architecture: "x64",
       executablePath: "/install/quest.exe",
@@ -329,10 +330,10 @@ describe("upgrade service", () => {
     });
 
     await expect(operations.install("0.8.0")).rejects.toThrow(
-      "Move-Item -LiteralPath '/install/.quest-upgrade-123/quest.exe' -Destination '/install/quest.exe' -Force",
+      `Move-Item -LiteralPath '${stagedExecutable}' -Destination '/install/quest.exe' -Force`,
     );
     expect(calls).not.toContain("rmdir:/install/.quest-upgrade-123");
-    expect(calls).not.toContain("rm:/install/.quest-upgrade-123/quest.exe");
+    expect(calls).not.toContain(`rm:${stagedExecutable}`);
   });
 
   test("keeps a successful binary upgrade successful when skill refresh throws", async () => {
