@@ -13,6 +13,7 @@ import {
   sessionAttributionText,
   signoffGroupHeader,
   signoffListEntries,
+  visibleAreaTabs,
   wrapText,
 } from "./components";
 import { DENSE_THEME, TAVERN_THEME } from "./theme";
@@ -80,6 +81,54 @@ const detail: QuestLogDetail = {
   ],
   sessionAttribution: null,
 };
+
+describe("area tab window", () => {
+  const tabs = ["all", "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf"].map(
+    (label, index) => ({ count: index + 1, key: label, label }),
+  );
+
+  test("keeps the active tab in a whole-tab window with overflow markers", () => {
+    expect(visibleAreaTabs(tabs, 5, 31)).toEqual({
+      activeIndex: 5,
+      compactActive: false,
+      end: 6,
+      leadingOverflow: true,
+      start: 4,
+      trailingOverflow: true,
+      width: 22,
+    });
+    expect(visibleAreaTabs(tabs, 6, 31)).toEqual({
+      activeIndex: 6,
+      compactActive: false,
+      end: 8,
+      leadingOverflow: true,
+      start: 5,
+      trailingOverflow: false,
+      width: 31,
+    });
+  });
+
+  test("prioritizes the active tab and falls back to one highlighted marker at tiny widths", () => {
+    expect(visibleAreaTabs(tabs, 5, 8)).toEqual({
+      activeIndex: 5,
+      compactActive: false,
+      end: 6,
+      leadingOverflow: false,
+      start: 5,
+      trailingOverflow: false,
+      width: 8,
+    });
+    expect(visibleAreaTabs(tabs, 5, 1)).toEqual({
+      activeIndex: 5,
+      compactActive: true,
+      end: 6,
+      leadingOverflow: false,
+      start: 5,
+      trailingOverflow: false,
+      width: 1,
+    });
+  });
+});
 
 describe("detail pane layout", () => {
   test("formats only the session attribution fields that are present", () => {

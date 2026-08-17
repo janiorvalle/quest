@@ -223,6 +223,251 @@ export interface AreaTab {
   readonly label: string;
 }
 
+export interface AreaTabsWindow {
+  readonly activeIndex: number;
+  readonly compactActive: boolean;
+  readonly end: number;
+  readonly leadingOverflow: boolean;
+  readonly start: number;
+  readonly trailingOverflow: boolean;
+  readonly width: number;
+}
+
+const TAB_OVERFLOW_WIDTH = 1;
+
+function areaTabWidth(tab: AreaTab): number {
+  return stringWidth(tab.label) + stringWidth(String(tab.count)) + 3;
+}
+
+function areaTabsWindowWidth(tabs: readonly AreaTab[], start: number, end: number): number {
+  const leadingOverflow = start > 0;
+  const trailingOverflow = end < tabs.length;
+  const tabWidth = tabs.slice(start, end).reduce((total, tab) => total + areaTabWidth(tab), 0);
+  const segmentCount = end - start + Number(leadingOverflow) + Number(trailingOverflow);
+  return (
+    tabWidth +
+    Number(leadingOverflow) * TAB_OVERFLOW_WIDTH +
+    Number(trailingOverflow) * TAB_OVERFLOW_WIDTH +
+    Math.max(0, segmentCount - 1)
+  );
+}
+
+interface AreaTabsRange {
+  readonly end: number;
+  readonly start: number;
+}
+
+function areaTabsWindow(
+  tabs: readonly AreaTab[],
+  activeIndex: number,
+  range: AreaTabsRange,
+  compactActive = false,
+): AreaTabsWindow {
+  return {
+    activeIndex,
+    compactActive,
+    end: range.end,
+    leadingOverflow: !compactActive && range.start > 0,
+    start: range.start,
+    trailingOverflow: !compactActive && range.end < tabs.length,
+    width: compactActive ? TAB_OVERFLOW_WIDTH : areaTabsWindowWidth(tabs, range.start, range.end),
+  };
+}
+
+function expandAreaTabsRange(
+  tabs: readonly AreaTab[],
+  range: AreaTabsRange,
+  side: "left" | "right",
+): AreaTabsRange | null {
+  if (side === "left") {
+    return range.start === 0 ? null : { start: range.start - 1, end: range.end };
+  }
+  return range.end === tabs.length ? null : { start: range.start, end: range.end + 1 };
+}
+
+function firstFittingAreaTabsRange(
+  tabs: readonly AreaTab[],
+  range: AreaTabsRange,
+  sides: readonly ("left" | "right")[],
+  width: number,
+): AreaTabsRange | null {
+  for (const side of sides) {
+    const candidate = expandAreaTabsRange(tabs, range, side);
+    if (candidate !== null && areaTabsWindowWidth(tabs, candidate.start, candidate.end) <= width) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function expandedAreaTabsRange(
+  tabs: readonly AreaTab[],
+  activeIndex: number,
+  width: number,
+): AreaTabsRange {
+  let range = { start: activeIndex, end: activeIndex + 1 };
+  let leftTabs = 0;
+  let rightTabs = 0;
+  for (;;) {
+    const sides =
+      leftTabs <= rightTabs ? (["left", "right"] as const) : (["right", "left"] as const);
+    const expanded = firstFittingAreaTabsRange(tabs, range, sides, width);
+    if (expanded === null) {
+      return range;
+    }
+    if (expanded.start < range.start) {
+      leftTabs += 1;
+    } else {
+      rightTabs += 1;
+    }
+    range = expanded;
+  }
+}
+
+export function visibleAreaTabs(
+  tabs: readonly AreaTab[],
+  activeIndex: number,
+  width: number,
+): AreaTabsWindow | null {
+  if (tabs.length === 0 || width <= 0) {
+    return null;
+  }
+  const clampedActiveIndex = Math.min(Math.max(0, activeIndex), tabs.length - 1);
+  const activeTab = tabs[clampedActiveIndex];
+  if (activeTab === undefined) {
+    return null;
+  }
+  const activeRange = { start: clampedActiveIndex, end: clampedActiveIndex + 1 };
+  if (areaTabWidth(activeTab) > width) {
+    return areaTabsWindow(tabs, clampedActiveIndex, activeRange, true);
+  }
+  if (areaTabsWindowWidth(tabs, activeRange.start, activeRange.end) > width) {
+    return {
+      activeIndex: clampedActiveIndex,
+      compactActive: false,
+      end: activeRange.end,
+      leadingOverflow: false,
+      start: activeRange.start,
+      trailingOverflow: false,
+      width: areaTabWidth(activeTab),
+    };
+  }
+  return areaTabsWindow(
+    tabs,
+    clampedActiveIndex,
+    expandedAreaTabsRange(tabs, clampedActiveIndex, width),
+  );
+}
+
+type AreaTabSegment =
+  | {
+      readonly direction: "leading" | "trailing";
+      readonly key: string;
+      readonly kind: "overflow";
+    }
+  | {
+      readonly active: boolean;
+      readonly compact: boolean;
+      readonly key: string;
+      readonly kind: "tab";
+      readonly tab: AreaTab;
+    };
+
+function areaTabSegments(
+  tabs: readonly AreaTab[],
+  window: AreaTabsWindow | null,
+): readonly AreaTabSegment[] {
+  if (window === null) {
+    return [];
+  }
+  const segments: AreaTabSegment[] = [];
+  if (window.leadingOverflow) {
+    segments.push({ direction: "leading", key: "leading-overflow", kind: "overflow" });
+  }
+  for (const [offset, tab] of tabs.slice(window.start, window.end).entries()) {
+    const index = window.start + offset;
+    segments.push({
+      active: index === window.activeIndex,
+      compact: index === window.activeIndex && window.compactActive,
+      key: tab.key,
+      kind: "tab",
+      tab,
+    });
+  }
+  if (window.trailingOverflow) {
+    segments.push({ direction: "trailing", key: "trailing-overflow", kind: "overflow" });
+  }
+  return segments;
+}
+
+function AreaTabOverflowView({
+  last,
+  segment,
+}: {
+  readonly last: boolean;
+  readonly segment: Extract<AreaTabSegment, { readonly kind: "overflow" }>;
+}) {
+  const theme = useQuestTheme();
+  return (
+    <box style={{ flexShrink: 0, height: 1, marginRight: last ? 0 : 1 }}>
+      <StaticText fg={theme.palette.textDim}>
+        {segment.direction === "leading" ? "<" : ">"}
+      </StaticText>
+    </box>
+  );
+}
+
+function AreaTabView({
+  last,
+  segment,
+}: {
+  readonly last: boolean;
+  readonly segment: Extract<AreaTabSegment, { readonly kind: "tab" }>;
+}) {
+  const theme = useQuestTheme();
+  return (
+    <box
+      style={{
+        backgroundColor: segment.active ? theme.palette.surface : theme.palette.background,
+        flexShrink: 0,
+        height: 1,
+        marginRight: last ? 0 : 1,
+        paddingLeft: segment.compact ? 0 : 1,
+        paddingRight: segment.compact ? 0 : 1,
+      }}
+    >
+      <StaticText>
+        <span fg={segment.active ? theme.palette.accent : theme.palette.textMuted}>
+          {segment.active ? (
+            <strong>{segment.compact ? ELLIPSIS : segment.tab.label}</strong>
+          ) : (
+            segment.tab.label
+          )}
+        </span>
+        {segment.compact ? null : (
+          <span
+            fg={segment.active ? theme.palette.textMuted : theme.palette.textDim}
+          >{` ${segment.tab.count}`}</span>
+        )}
+      </StaticText>
+    </box>
+  );
+}
+
+function AreaTabSegmentView({
+  last,
+  segment,
+}: {
+  readonly last: boolean;
+  readonly segment: AreaTabSegment;
+}) {
+  return segment.kind === "overflow" ? (
+    <AreaTabOverflowView last={last} segment={segment} />
+  ) : (
+    <AreaTabView last={last} segment={segment} />
+  );
+}
+
 export function TabsRow({
   activeIndex,
   scope,
@@ -236,6 +481,28 @@ export function TabsRow({
 }) {
   const theme = useQuestTheme();
   const hint = `tab · scope: ${scope}`;
+  const contentWidth = Math.max(0, width - 2);
+  const clampedActiveIndex = Math.min(Math.max(0, activeIndex), tabs.length - 1);
+  const activeTab = tabs[clampedActiveIndex];
+  const activeWidth = activeTab === undefined ? 0 : areaTabWidth(activeTab);
+  const activeWithOverflowWidth =
+    activeTab === undefined
+      ? 0
+      : areaTabsWindowWidth(tabs, clampedActiveIndex, clampedActiveIndex + 1);
+  const minimumTabsWidth =
+    activeWithOverflowWidth <= contentWidth
+      ? activeWithOverflowWidth
+      : activeWidth <= contentWidth
+        ? activeWidth
+        : Math.min(TAB_OVERFLOW_WIDTH, contentWidth);
+  const hintWidth = Math.min(
+    stringWidth(hint),
+    Math.max(0, contentWidth - minimumTabsWidth - (minimumTabsWidth > 0 ? 1 : 0)),
+  );
+  const hintOuterWidth = hintWidth === 0 ? 0 : hintWidth + 1;
+  const tabsWidth = Math.max(0, contentWidth - hintOuterWidth);
+  const window = visibleAreaTabs(tabs, activeIndex, tabsWidth);
+  const segments = areaTabSegments(tabs, window);
   return (
     <box
       style={{
@@ -249,35 +516,28 @@ export function TabsRow({
         width: "100%",
       }}
     >
-      <box style={{ flexDirection: "row", flexGrow: 1, flexShrink: 1, overflow: "hidden" }}>
-        {tabs.map((tab, index) => {
-          const active = index === activeIndex;
-          return (
-            <box
-              key={tab.key}
-              style={{
-                backgroundColor: active ? theme.palette.surface : theme.palette.background,
-                height: 1,
-                marginRight: 1,
-                paddingLeft: 1,
-                paddingRight: 1,
-              }}
-            >
-              <StaticText>
-                <span fg={active ? theme.palette.accent : theme.palette.textMuted}>
-                  {active ? <strong>{tab.label}</strong> : tab.label}
-                </span>
-                <span
-                  fg={active ? theme.palette.textMuted : theme.palette.textDim}
-                >{` ${tab.count}`}</span>
-              </StaticText>
-            </box>
-          );
-        })}
+      <box
+        style={{
+          flexDirection: "row",
+          flexGrow: 1,
+          flexShrink: 0,
+          overflow: "hidden",
+          width: tabsWidth,
+        }}
+      >
+        {segments.map((segment, index) => (
+          <AreaTabSegmentView
+            key={segment.key}
+            last={index === segments.length - 1}
+            segment={segment}
+          />
+        ))}
       </box>
-      <box style={{ flexShrink: 0, paddingLeft: 1 }}>
-        <StaticText fg={theme.palette.textDim}>{fit(hint, Math.max(1, width - 2))}</StaticText>
-      </box>
+      {hintWidth === 0 ? null : (
+        <box style={{ flexShrink: 0, paddingLeft: 1, width: hintOuterWidth }}>
+          <StaticText fg={theme.palette.textDim}>{fit(hint, hintWidth)}</StaticText>
+        </box>
+      )}
     </box>
   );
 }
