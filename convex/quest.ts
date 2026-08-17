@@ -89,6 +89,7 @@ const failureArgs = { ...clientProtocolArgs, test_failure: v.optional(v.boolean(
 type QuestDomainErrorCode =
   | "BACKUP_FULL_RESTORE_FENCED"
   | "CONVEX_RESTORE_IN_PROGRESS"
+  | "CONVEX_RESTORE_CLEANUP_REQUIRED"
   | "CONVEX_RESTORE_PRECONDITION_FAILED"
   | "CONVEX_RESTORE_SESSION_MISSING"
   | "CONVEX_RESTORE_STAGE_CHANGED"
@@ -175,6 +176,8 @@ type RestoreStageTable =
   | "restore_staged_events"
   | "restore_staged_pages";
 const RESTORE_LEASE_DURATION_MS = 10 * 60 * 1_000;
+const RESTORE_MUTATION_MAXIMUM_BYTES_READ = 2 * 1_024 * 1_024;
+const RESTORE_MUTATION_MAXIMUM_ROWS_READ = 256;
 
 async function nextDocumentId(
   ctx: MutationContext,
@@ -606,6 +609,16 @@ async function appendEvent(
     throw new Error("test event append failure requested");
   }
   await ctx.db.insert("events", parsed);
+  const quest = parseQuestDocument(await requireQuestRecord(ctx, questId));
+  const revision = await ctx.db
+    .query("repository_revisions")
+    .withIndex("by_repo", (query) => query.eq("repo", quest.repo))
+    .unique();
+  if (revision === null) {
+    await ctx.db.insert("repository_revisions", { repo: quest.repo, value: 1 });
+  } else {
+    await ctx.db.patch(revision._id, { value: revision.value + 1 });
+  }
 }
 
 async function addDuplicateLink(
@@ -990,7 +1003,20 @@ async function unacknowledgedLaneConflict(
   };
 }
 
-async function clearRestoreStage(ctx: MutationContext, token: string): Promise<void> {
+function restoreMutationPaginationOptions() {
+  return {
+    cursor: null,
+    maximumBytesRead: RESTORE_MUTATION_MAXIMUM_BYTES_READ,
+    maximumRowsRead: RESTORE_MUTATION_MAXIMUM_ROWS_READ,
+    numItems: RESTORE_MUTATION_MAXIMUM_ROWS_READ,
+  };
+}
+
+async function requireRestoreStageEmpty(
+  ctx: MutationContext,
+  token: string,
+  retryAction: string,
+): Promise<void> {
   const tables: readonly RestoreStageTable[] = [
     "restore_staged_pages",
     "restore_staged_events",
@@ -999,12 +1025,15 @@ async function clearRestoreStage(ctx: MutationContext, token: string): Promise<v
     "restore_staged_quests",
   ];
   for (const table of tables) {
-    const documents = await ctx.db
+    const document = await ctx.db
       .query(table)
       .withIndex("by_token", (query) => query.eq("token", token))
-      .collect();
-    for (const document of documents) {
-      await ctx.db.delete(document._id);
+      .first();
+    if (document !== null) {
+      failQuestDomain(
+        "CONVEX_RESTORE_CLEANUP_REQUIRED",
+        `Convex restore ${token} still has staged pages; call releaseRestore with that token until it succeeds, then ${retryAction}`,
+      );
     }
   }
 }
@@ -1018,13 +1047,17 @@ async function clearRestoreStagePage(ctx: MutationContext, token: string): Promi
     "restore_staged_quests",
   ];
   for (const table of tables) {
-    const documents = await ctx.db
+    const firstDocument = await ctx.db
       .query(table)
       .withIndex("by_token", (query) => query.eq("token", token))
-      .take(512);
-    if (documents.length === 0) {
+      .first();
+    if (firstDocument === null) {
       continue;
     }
+    const { page: documents } = await ctx.db
+      .query(table)
+      .withIndex("by_token", (query) => query.eq("token", token))
+      .paginate(restoreMutationPaginationOptions());
     for (const document of documents) {
       await ctx.db.delete(document._id);
     }
@@ -1318,8 +1351,8 @@ async function requireNoRestoreLease(ctx: MutationContext): Promise<void> {
         `Convex restore ${lease.token} expired during its ${lease.commit_phase} phase; resume commitRestore with that token until it reports committed before retrying this write`,
       );
     }
+    await requireRestoreStageEmpty(ctx, lease.token, "retry this write");
     await restoreMigrationFencesAfterRestore(ctx, lease.token, lease.committed === true);
-    await clearRestoreStage(ctx, lease.token);
     await ctx.db.delete(lease._id);
     return;
   }
@@ -1400,10 +1433,13 @@ async function deleteRestoreDestinationPage(ctx: MutationContext): Promise<boole
     "counters",
   ];
   for (const table of tables) {
-    const documents = await ctx.db.query(table).take(512);
-    if (documents.length === 0) {
+    const firstDocument = await ctx.db.query(table).first();
+    if (firstDocument === null) {
       continue;
     }
+    const { page: documents } = await ctx.db
+      .query(table)
+      .paginate(restoreMutationPaginationOptions());
     for (const document of documents) {
       await ctx.db.delete(document._id);
     }
@@ -1413,11 +1449,15 @@ async function deleteRestoreDestinationPage(ctx: MutationContext): Promise<boole
 }
 
 async function copyRestoreStagePage(ctx: MutationContext, token: string): Promise<boolean> {
-  const quests = await ctx.db
+  const firstQuest = await ctx.db
     .query("restore_staged_quests")
     .withIndex("by_token", (query) => query.eq("token", token))
-    .take(256);
-  if (quests.length > 0) {
+    .first();
+  if (firstQuest !== null) {
+    const { page: quests } = await ctx.db
+      .query("restore_staged_quests")
+      .withIndex("by_token", (query) => query.eq("token", token))
+      .paginate(restoreMutationPaginationOptions());
     for (const document of quests) {
       await ctx.db.insert("quests", parseQuestDocument(document));
       await ctx.db.delete(document._id);
@@ -1425,11 +1465,15 @@ async function copyRestoreStagePage(ctx: MutationContext, token: string): Promis
     return false;
   }
 
-  const evidence = await ctx.db
+  const firstEvidence = await ctx.db
     .query("restore_staged_evidence")
     .withIndex("by_token", (query) => query.eq("token", token))
-    .take(256);
-  if (evidence.length > 0) {
+    .first();
+  if (firstEvidence !== null) {
+    const { page: evidence } = await ctx.db
+      .query("restore_staged_evidence")
+      .withIndex("by_token", (query) => query.eq("token", token))
+      .paginate(restoreMutationPaginationOptions());
     for (const document of evidence) {
       await ctx.db.insert("evidence", parseEvidenceDocument(document));
       await ctx.db.delete(document._id);
@@ -1437,11 +1481,15 @@ async function copyRestoreStagePage(ctx: MutationContext, token: string): Promis
     return false;
   }
 
-  const chains = await ctx.db
+  const firstChain = await ctx.db
     .query("restore_staged_chains")
     .withIndex("by_token", (query) => query.eq("token", token))
-    .take(256);
-  if (chains.length > 0) {
+    .first();
+  if (firstChain !== null) {
+    const { page: chains } = await ctx.db
+      .query("restore_staged_chains")
+      .withIndex("by_token", (query) => query.eq("token", token))
+      .paginate(restoreMutationPaginationOptions());
     for (const document of chains) {
       await ctx.db.insert("chains", parseChainDocument(document));
       await ctx.db.delete(document._id);
@@ -1449,11 +1497,15 @@ async function copyRestoreStagePage(ctx: MutationContext, token: string): Promis
     return false;
   }
 
-  const events = await ctx.db
+  const firstEvent = await ctx.db
     .query("restore_staged_events")
     .withIndex("by_token", (query) => query.eq("token", token))
-    .take(256);
-  if (events.length > 0) {
+    .first();
+  if (firstEvent !== null) {
+    const { page: events } = await ctx.db
+      .query("restore_staged_events")
+      .withIndex("by_token", (query) => query.eq("token", token))
+      .paginate(restoreMutationPaginationOptions());
     for (const document of events) {
       await ctx.db.insert("events", parseEventDocument(document));
       await ctx.db.delete(document._id);
@@ -1472,9 +1524,11 @@ async function markMigrationFencesCommitted(
   const recoveryEventHighWater = await eventHighWater(ctx);
   for (const fence of fences) {
     if (fence.lease_token === token) {
+      const recoveryRepositoryRevision = await repositoryRevision(ctx, fence.repo);
       await ctx.db.patch(fence._id, {
         committed: true,
         recovery_event_high_water: recoveryEventHighWater,
+        recovery_repository_revision: recoveryRepositoryRevision,
         recovery_cutoff: recoveryCutoff,
       });
     }
@@ -1486,6 +1540,33 @@ async function findMigrationFence(ctx: MutationContext, repo: string) {
     .query("migration_fences")
     .withIndex("by_repo", (query) => query.eq("repo", repo))
     .unique();
+}
+
+async function repositoryRevision(ctx: QueryContext, repo: string): Promise<number> {
+  const revision = await ctx.db
+    .query("repository_revisions")
+    .withIndex("by_repo", (query) => query.eq("repo", repo))
+    .unique();
+  return revision?.value ?? 0;
+}
+
+async function migrationFenceRecoveryFields(
+  ctx: QueryContext,
+  input: {
+    readonly committed: boolean | undefined;
+    readonly leaseCutoff: string;
+    readonly repo: string;
+  },
+) {
+  if (input.committed !== true) {
+    return { committed: false } as const;
+  }
+  return {
+    committed: true,
+    recovery_cutoff: input.leaseCutoff,
+    recovery_event_high_water: await eventHighWater(ctx),
+    recovery_repository_revision: await repositoryRevision(ctx, input.repo),
+  } as const;
 }
 
 async function restoreMigrationFencesAfterRestore(
@@ -1554,7 +1635,7 @@ async function clearExpiredFenceRecoveryRestore(
     pendingLease.token,
     pendingLease.committed === true,
   );
-  await clearRestoreStage(ctx, pendingLease.token);
+  await requireRestoreStageEmpty(ctx, pendingLease.token, `retry recovery for repository ${repo}`);
   await ctx.db.delete(pendingLease._id);
   return pendingLease.committed === true;
 }
@@ -1564,6 +1645,7 @@ function isLegacyMigrationFence(fence: {
   readonly recovery_cutoff?: string;
   readonly recovery_event_high_water?: number;
   readonly recovery_hash?: string;
+  readonly recovery_repository_revision?: number;
   readonly unfenced?: boolean;
 }): boolean {
   return (
@@ -1571,6 +1653,7 @@ function isLegacyMigrationFence(fence: {
     fence.recovery_cutoff === undefined &&
     fence.recovery_event_high_water === undefined &&
     fence.recovery_hash === undefined &&
+    fence.recovery_repository_revision === undefined &&
     fence.unfenced === undefined
   );
 }
@@ -1579,11 +1662,21 @@ async function verifyCommittedFenceSnapshot(
   ctx: MutationContext,
   repo: string,
   recoveryHash: string | undefined,
+  recoveryRepositoryRevision: number | undefined,
   recoveryEventHighWater: number | undefined,
   recoveryCutoff: string | undefined,
   isUnfenced: boolean,
 ): Promise<void> {
   if (isUnfenced) {
+    return;
+  }
+  if (recoveryRepositoryRevision !== undefined) {
+    if ((await repositoryRevision(ctx, repo)) !== recoveryRepositoryRevision) {
+      failQuestDomain(
+        "MIGRATION_FENCE_RECOVERY_BLOCKED",
+        `repository ${repo} changed after its committed migration; inspect the destination and routing before retrying`,
+      );
+    }
     return;
   }
   if (recoveryEventHighWater !== undefined) {
@@ -1639,7 +1732,11 @@ async function recoverCommittedMigrationFence(
   if (existing.committed !== true) {
     return undefined;
   }
-  if (existing.recovery_hash === undefined && existing.recovery_event_high_water === undefined) {
+  if (
+    existing.recovery_hash === undefined &&
+    existing.recovery_event_high_water === undefined &&
+    existing.recovery_repository_revision === undefined
+  ) {
     failQuestDomain(
       "MIGRATION_FENCE_STATUS_UNKNOWN",
       `repository ${repo} has a committed fence without a recovery fingerprint; verify routing and use the owning migration session or a privileged deployment recovery before retrying`,
@@ -1675,12 +1772,13 @@ async function recoverCommittedMigrationFence(
     ctx,
     repo,
     existing.recovery_hash,
+    existing.recovery_repository_revision,
     existing.recovery_event_high_water,
     existing.recovery_cutoff,
     existing.unfenced === true,
   );
   if (lease !== null) {
-    await clearRestoreStage(ctx, lease.token);
+    await requireRestoreStageEmpty(ctx, lease.token, `retry recovery for repository ${repo}`);
     await ctx.db.delete(lease._id);
   }
   await ctx.db.delete(existing._id);
@@ -2819,18 +2917,17 @@ export const fenceRepository = mutationGeneric({
       );
     }
     if (existing === null) {
-      const committed = lease.committed === true;
-      const recoveryEventHighWater = committed ? await eventHighWater(ctx) : undefined;
+      const recovery = await migrationFenceRecoveryFields(ctx, {
+        committed: lease.committed,
+        leaseCutoff: lease.lease_cutoff,
+        repo,
+      });
       await ctx.db.insert("migration_fences", {
         repo,
         target_backend: args.target_backend,
         created_at: now(),
         lease_token: args.token,
-        committed,
-        ...(recoveryEventHighWater === undefined
-          ? {}
-          : { recovery_event_high_water: recoveryEventHighWater }),
-        ...(committed ? { recovery_cutoff: lease.lease_cutoff } : {}),
+        ...recovery,
         unfenced: false,
       });
     }
@@ -2910,7 +3007,7 @@ export const recoverRepositoryFence = mutationGeneric({
     }
     if (isLegacyMigrationFence(existing)) {
       await verifyLegacyFenceSnapshot(ctx, repo, lease.expected_hash, lease.lease_cutoff);
-      await clearRestoreStage(ctx, lease.token);
+      await requireRestoreStageEmpty(ctx, lease.token, `retry recovery for repository ${repo}`);
       await ctx.db.delete(lease._id);
       await ctx.db.delete(existing._id);
       return true;
@@ -2921,7 +3018,7 @@ export const recoverRepositoryFence = mutationGeneric({
         `repository ${repo} has a fence whose commit status cannot be proven; inspect routing and deployment state before retrying`,
       );
     }
-    await clearRestoreStage(ctx, lease.token);
+    await requireRestoreStageEmpty(ctx, lease.token, `retry recovery for repository ${repo}`);
     await ctx.db.delete(lease._id);
 
     await ctx.db.delete(existing._id);
@@ -2971,7 +3068,9 @@ export const recoverMigrationFenceForRestore = mutationGeneric({
     }
     if (
       existing.committed !== true ||
-      (existing.recovery_hash === undefined && existing.recovery_event_high_water === undefined)
+      (existing.recovery_hash === undefined &&
+        existing.recovery_event_high_water === undefined &&
+        existing.recovery_repository_revision === undefined)
     ) {
       failQuestDomain(
         "MIGRATION_FENCE_STATUS_UNKNOWN",
@@ -2982,6 +3081,7 @@ export const recoverMigrationFenceForRestore = mutationGeneric({
       ctx,
       repo,
       existing.recovery_hash,
+      existing.recovery_repository_revision,
       existing.recovery_event_high_water,
       existing.recovery_cutoff,
       false,
@@ -3020,7 +3120,10 @@ export const commitRestore = mutationGeneric({
         "MIGRATION_CONCURRENT_WRITE",
         "the Convex store changed during a fence-only migration commit; retry the migration",
       );
-      await clearRestoreStage(ctx, args.token);
+      if (!(await clearRestoreStagePage(ctx, args.token))) {
+        await ctx.db.patch(lease._id, { expires_at: restoreLeaseExpiry(now()) });
+        return { status: "pending" as const };
+      }
       const committedEventHighWater = await eventHighWater(ctx);
       await ctx.db.patch(lease._id, {
         expires_at: restoreLeaseExpiry(now()),

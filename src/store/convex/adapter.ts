@@ -67,12 +67,45 @@ interface RealtimeSubscription {
   unsubscribe(): void;
 }
 
+const RESTORE_WRITE_RETRY_LIMIT = 8;
+const RESTORE_WRITE_RETRY_START_MS = 125;
+
 function realtimeWatchError(error: unknown): Error {
   return error instanceof Error
     ? error
     : new Error(
         "[CONVEX_WATCH_FAILED] the live Convex query stopped responding; check the deployment connection and retry",
       );
+}
+
+function isConvexWriteRateLimit(error: unknown): boolean {
+  return error instanceof Error && /TooManyWrites|too many writes per second/i.test(error.message);
+}
+
+function retryDelay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function retryRestoreWrite<T>(operation: () => Promise<T>): Promise<T> {
+  let delay = RESTORE_WRITE_RETRY_START_MS;
+  for (let attempt = 0; attempt <= RESTORE_WRITE_RETRY_LIMIT; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error: unknown) {
+      if (!isConvexWriteRateLimit(error)) {
+        throw error;
+      }
+      if (attempt === RESTORE_WRITE_RETRY_LIMIT) {
+        throw new Error(
+          "[CONVEX_RESTORE_RATE_LIMITED] Convex kept rejecting paged restore writes after retries; wait for the deployment write budget to recover, then retry the restore with the same snapshot",
+          { cause: error },
+        );
+      }
+      await retryDelay(delay);
+      delay *= 2;
+    }
+  }
+  throw new Error("unreachable Convex restore retry state");
 }
 
 function leaseRefreshDelay(
@@ -1140,26 +1173,33 @@ export class ConvexStore implements QuestStore {
     }
     const pages = createConvexRestorePages(parsed);
     for (const page of pages) {
-      await this.#clients.http.mutation(convexApi.uploadRestorePage, {
+      await retryRestoreWrite(() =>
+        this.#clients.http.mutation(convexApi.uploadRestorePage, {
+          ...authTokenInput(this.#clients),
+          token,
+          page,
+        }),
+      );
+    }
+    const replacementHash = await restoreManifestFingerprint(pages);
+    await retryRestoreWrite(() =>
+      this.#clients.http.mutation(convexApi.activateRestore, {
         ...authTokenInput(this.#clients),
         token,
-        page,
-      });
-    }
-    await this.#clients.http.mutation(convexApi.activateRestore, {
-      ...authTokenInput(this.#clients),
-      token,
-      replacement_hash: await restoreManifestFingerprint(pages),
-    });
+        replacement_hash: replacementHash,
+      }),
+    );
     return parsed;
   }
 
   async commitRestore(token: string): Promise<QuestDump> {
     while (true) {
-      const committed = await this.#clients.http.mutation(convexApi.commitRestore, {
-        ...authTokenInput(this.#clients),
-        token,
-      });
+      const committed = await retryRestoreWrite(() =>
+        this.#clients.http.mutation(convexApi.commitRestore, {
+          ...authTokenInput(this.#clients),
+          token,
+        }),
+      );
       if (committed === null) {
         return this.exportAll();
       }
@@ -1175,10 +1215,12 @@ export class ConvexStore implements QuestStore {
 
   async releaseRestore(token: string): Promise<void> {
     while (
-      (await this.#clients.http.mutation(convexApi.releaseRestore, {
-        ...authTokenInput(this.#clients),
-        token,
-      })) === false
+      (await retryRestoreWrite(() =>
+        this.#clients.http.mutation(convexApi.releaseRestore, {
+          ...authTokenInput(this.#clients),
+          token,
+        }),
+      )) === false
     ) {
       // Each mutation stays below Convex's transaction read/write limits.
     }
@@ -1187,10 +1229,12 @@ export class ConvexStore implements QuestStore {
 
   async rollbackRestore(token: string): Promise<void> {
     while (
-      (await this.#clients.http.mutation(convexApi.rollbackRestore, {
-        ...authTokenInput(this.#clients),
-        token,
-      })) === false
+      (await retryRestoreWrite(() =>
+        this.#clients.http.mutation(convexApi.rollbackRestore, {
+          ...authTokenInput(this.#clients),
+          token,
+        }),
+      )) === false
     ) {
       // Each mutation stays below Convex's transaction read/write limits.
     }

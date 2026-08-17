@@ -444,7 +444,7 @@ if (deployment === undefined || authToken === undefined) {
         action: "update",
         detail: {
           sequence: index + 1,
-          ...(index < 12 ? { payload: "v".repeat(64_000) } : {}),
+          ...(index < 64 ? { payload: "v".repeat(300_000) } : {}),
         },
       }));
       const expected: QuestDump = {
@@ -454,6 +454,7 @@ if (deployment === undefined || authToken === undefined) {
         chains: [],
         events,
       };
+      let rollbackToken: string | undefined;
       try {
         await store.replaceAll(emptyDump);
         const initial = await store.exportAllWithCutoff();
@@ -551,7 +552,23 @@ if (deployment === undefined || authToken === undefined) {
         await restore.activate();
         await restore.commit();
         expect((await store.exportAll()).events).toHaveLength(8_193);
+
+        const rollbackSource = await store.exportAllWithCutoff();
+        rollbackToken = await store.beginRestore(
+          rollbackSource.dump,
+          rollbackSource.lease_cutoff,
+          "full-backup",
+          rollbackSource.event_high_water,
+        );
+        await store.activateRestore(rollbackToken, expected);
+        await store.rollbackRestore(rollbackToken);
+        rollbackToken = undefined;
+        expect((await store.exportAll()).events).toHaveLength(8_193);
       } finally {
+        if (rollbackToken !== undefined) {
+          await store.rollbackRestore(rollbackToken).catch(() => undefined);
+          await store.releaseRestore(rollbackToken).catch(() => undefined);
+        }
         await store.replaceAll(emptyDump).catch(() => undefined);
         await rm(directory, { force: true, recursive: true });
         await closeConvexClientPair(clients);

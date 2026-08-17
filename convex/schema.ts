@@ -154,6 +154,11 @@ export default defineSchema({
     unfenced: v.optional(v.boolean()),
     recovery_restore_token: v.optional(v.string()),
     recovery_event_high_water: v.optional(v.number()),
+    recovery_repository_revision: v.optional(v.number()),
+  }).index("by_repo", ["repo"]),
+  repository_revisions: defineTable({
+    repo: v.string(),
+    value: v.number(),
   }).index("by_repo", ["repo"]),
   restore_staged_quests: defineTable({
     token: v.string(),
