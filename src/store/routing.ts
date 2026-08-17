@@ -603,6 +603,10 @@ export class FederatedQuestStore implements QuestStore {
     return Promise.reject(readOnlyMutationError());
   }
 
+  acceptQuestAndDetail(_input: AcceptQuestInput): ReturnType<QuestStore["acceptQuestAndDetail"]> {
+    return Promise.reject(readOnlyMutationError());
+  }
+
   acceptQuestAndExport(_input: AcceptQuestInput): ReturnType<QuestStore["acceptQuestAndExport"]> {
     return Promise.reject(readOnlyMutationError());
   }

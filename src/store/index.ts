@@ -28,6 +28,7 @@ export {
 } from "./convex";
 export { LocalBlobStore } from "./local-blob-store";
 export type {
+  AcceptQuestAndDetailResult,
   AcceptQuestAndExportResult,
   BackupDatabase,
   BackupDatabaseInspection,

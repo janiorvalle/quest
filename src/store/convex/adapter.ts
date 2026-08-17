@@ -35,6 +35,7 @@ import {
   touchQuestInputSchema,
 } from "../../schema";
 import type {
+  AcceptQuestAndDetailResult,
   FederatedFullSnapshot,
   FederatedReadSnapshot,
   FederatedSnapshotWatchListener,
@@ -118,6 +119,40 @@ function isMissingFencedRepositoriesQuery(error: unknown): boolean {
       error.message,
     )
   );
+}
+
+function acceptQuestAndDetailFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.trim();
+  return (
+    /(?:could not find|not found|does not exist|not a function).*acceptQuestAndDetail|acceptQuestAndDetail.*(?:could not find|not found|does not exist|not a function)/i.test(
+      message,
+    ) || /^\[Request ID: [0-9a-f]+\] Server Error$/i.test(message)
+  );
+}
+
+function detailSnapshotFromDump(dump: QuestDump, id: number): QuestDetailSnapshot {
+  const quest = dump.quests.find((candidate) => candidate.id === id);
+  if (quest === undefined) {
+    throw new Error(
+      `[LEGACY_CLAIM_DETAIL_MISSING] quest ${id} was accepted but the fallback snapshot did not contain it; deploy the current Quest backend and retry`,
+    );
+  }
+  const chains = dump.chains.filter((chain) => chain.quest_id === id || chain.target_id === id);
+  const relatedIds = new Set(
+    chains
+      .flatMap((chain) => [chain.quest_id, chain.target_id])
+      .filter((relatedId) => relatedId !== id),
+  );
+  return {
+    chains,
+    events: dump.events.filter((event) => event.quest_id === id),
+    evidence: dump.evidence.filter((evidence) => evidence.quest_id === id),
+    quest,
+    related_quests: dump.quests.filter((candidate) => relatedIds.has(candidate.id)),
+  };
 }
 
 type FederatedListSnapshotFailure = "confirmed-missing" | "opaque-server-error";
@@ -209,6 +244,30 @@ export class ConvexStore implements QuestStore {
         this.#consumeEventFailure(),
       ),
     );
+  }
+
+  async acceptQuestAndDetail(input: AcceptQuestInput): Promise<AcceptQuestAndDetailResult> {
+    const parsed = acceptQuestInputSchema.parse(input);
+    const mutationInput = testableMutation(
+      this.#clients,
+      addConfiguredLeaseTtl(parsed, this.#leaseTtlMinutes),
+      this.#consumeEventFailure(),
+    );
+    try {
+      return await this.#clients.http.mutation(convexApi.acceptQuestAndDetail, mutationInput);
+    } catch (error: unknown) {
+      if (!acceptQuestAndDetailFailure(error)) {
+        throw error;
+      }
+      const legacy = await this.#clients.http.mutation(
+        convexApi.acceptQuestAndExport,
+        mutationInput,
+      );
+      return {
+        acceptance: legacy.acceptance,
+        detail: detailSnapshotFromDump(legacy.snapshot, parsed.id),
+      };
+    }
   }
 
   async acceptQuestAndExport(input: AcceptQuestInput): Promise<PortAcceptQuestAndExportResult> {

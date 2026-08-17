@@ -93,6 +93,11 @@ export interface AcceptQuestAndExportResult {
   readonly snapshot: QuestDump;
 }
 
+export interface AcceptQuestAndDetailResult {
+  readonly acceptance: AcceptResult;
+  readonly detail: QuestDetailSnapshot;
+}
+
 export interface QuestStore {
   /**
    * Atomically validates the initial/backfilled state, allocates a never-reused display ID,
@@ -107,6 +112,9 @@ export interface QuestStore {
    * receives the current quest as a conflict.
    */
   acceptQuest(input: AcceptQuestInput): Promise<AcceptResult>;
+
+  /** Atomically accepts a quest and reads only the detail rows needed for its briefing package. */
+  acceptQuestAndDetail(input: AcceptQuestInput): Promise<AcceptQuestAndDetailResult>;
 
   /** Atomically accepts a quest and returns the same backend snapshot for the briefing package. */
   acceptQuestAndExport(input: AcceptQuestInput): Promise<AcceptQuestAndExportResult>;

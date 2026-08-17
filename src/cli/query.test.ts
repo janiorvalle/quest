@@ -11,7 +11,9 @@ import {
 } from "../output";
 import type { Config, NewQuest, QuestReport } from "../schema";
 import { newQuestSchema, questReportSchema } from "../schema";
-import { LocalBlobStore, SqliteStore } from "../store";
+import { compileQuestBrief, compileQuestBriefFromDump } from "../services/brief";
+import { showQuestDetail, showQuestDetailFromDump } from "../services/query";
+import { LocalBlobStore, type QuestStore, SqliteStore } from "../store";
 import type { QuestCliDependencies } from "./program";
 import { runQuestCli } from "./program";
 
@@ -42,6 +44,7 @@ interface QueryCliHarness {
     stdout: readonly string[];
   }>;
   readonly store: SqliteStore;
+  readonly setCliStore: (store: QuestStore) => void;
   readonly blobStore: LocalBlobStore;
   readonly stop: () => Promise<void>;
 }
@@ -51,6 +54,7 @@ async function createHarness(configOverride: Config = config): Promise<QueryCliH
   const stdout: string[] = [];
   const stderr: string[] = [];
   const store = new SqliteStore(join(directory, "quest.db"), { now: () => generatedAt });
+  let questStore: QuestStore = store;
   const blobStore = new LocalBlobStore(join(directory, "evidence"));
   const dependencies = {
     applicationVersion: "1.2.3",
@@ -74,7 +78,7 @@ async function createHarness(configOverride: Config = config): Promise<QueryCliH
       Promise.resolve({
         blobStore,
         clock: { now: () => Promise.resolve(generatedAt) },
-        questStore: store,
+        questStore,
       }),
     output: createCliOutputBoundary({
       stdout: (text) => stdout.push(text),
@@ -102,6 +106,9 @@ async function createHarness(configOverride: Config = config): Promise<QueryCliH
       };
     },
     store,
+    setCliStore(nextStore) {
+      questStore = nextStore;
+    },
     blobStore,
     async stop() {
       store.close();
@@ -340,6 +347,54 @@ describe("query CLI behavior", () => {
         throw new Error("materialization directory was not printed");
       }
       await rm(directoryLine.slice("Directory: ".length), { force: true, recursive: true });
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  test("show and brief use scoped detail reads when full exports are unavailable", async () => {
+    const harness = await createHarness();
+    try {
+      await seedFixture(harness.store);
+      const dump = await harness.store.exportAll();
+      const expectedShow = showQuestDetailFromDump(dump, { repo: "alpha" }, 1);
+      const expectedBrief = compileQuestBriefFromDump(dump, { repo: "alpha" }, 1);
+      let detailReads = 0;
+      let fullExports = 0;
+      const limitedStore = new Proxy(harness.store, {
+        get(target, property, receiver) {
+          if (property === "exportAll") {
+            return async () => {
+              fullExports += 1;
+              throw new Error("Convex export exceeded 8,192 events");
+            };
+          }
+          if (property === "readQuestDetail") {
+            return async (id: number) => {
+              detailReads += 1;
+              return target.readQuestDetail(id);
+            };
+          }
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      harness.setCliStore(limitedStore);
+
+      const scopedShow = await showQuestDetail(limitedStore, { repo: "alpha" }, 1);
+      const scopedBrief = await compileQuestBrief(limitedStore, { repo: "alpha" }, 1);
+
+      const shown = await harness.run(["show", "1", "--repo", "alpha", "--format", "json"]);
+      const brief = await harness.run(["brief", "1", "--repo", "alpha", "--format", "json"]);
+
+      expect(JSON.stringify(scopedShow)).toBe(JSON.stringify(expectedShow));
+      expect(JSON.stringify(scopedBrief)).toBe(JSON.stringify(expectedBrief));
+      expect(shown.code).toBe(EXIT_SUCCESS);
+      expect(shown.report?.data).toMatchObject({ quest: { id: 1, title: "Blocked open" } });
+      expect(brief.code).toBe(EXIT_SUCCESS);
+      expect(brief.report?.data).toMatchObject({ quest: { id: 1, title: "Blocked open" } });
+      expect(detailReads).toBe(4);
+      expect(fullExports).toBe(0);
     } finally {
       await harness.stop();
     }

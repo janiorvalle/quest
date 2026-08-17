@@ -631,15 +631,20 @@ describe("next CLI behavior", () => {
     }
   });
 
-  test("--claim --brief uses the atomic claim snapshot for its receipt and package", async () => {
+  test("--claim --brief uses the atomic scoped detail from its claim", async () => {
     const harness = await createHarness();
     try {
       const selected = await harness.addQuest("Brief race");
-      let exportCount = 0;
       let atomicClaims = 0;
+      let exportCount = 0;
       const racingStore = new Proxy(harness.store, {
         get(target, property, receiver) {
-          if (property !== "exportAll" && property !== "acceptQuestAndExport") {
+          if (
+            property !== "exportAll" &&
+            property !== "acceptQuestAndDetail" &&
+            property !== "acceptQuestAndExport" &&
+            property !== "readQuestDetail"
+          ) {
             const value = Reflect.get(target, property, receiver);
             return typeof value === "function" ? value.bind(target) : value;
           }
@@ -649,9 +654,25 @@ describe("next CLI behavior", () => {
               return target.exportAll();
             };
           }
-          return async (input: Parameters<QuestStore["acceptQuestAndExport"]>[0]) => {
-            atomicClaims += 1;
-            return target.acceptQuestAndExport(input);
+          if (property === "acceptQuestAndDetail") {
+            return async (input: Parameters<QuestStore["acceptQuestAndDetail"]>[0]) => {
+              atomicClaims += 1;
+              const accepted = await target.acceptQuestAndDetail(input);
+              await target.transition(selected, {
+                action: "update",
+                actor: identity,
+                changes: { title: "Changed after claim" },
+                session_guild: null,
+              });
+              return accepted;
+            };
+          }
+          return async () => {
+            throw new Error(
+              property === "acceptQuestAndExport"
+                ? "claim briefing must not request a full export"
+                : "claim briefing must not perform a follow-up detail read",
+            );
           };
         },
       });
@@ -668,8 +689,11 @@ describe("next CLI behavior", () => {
           quest: { id: selected, title: "Brief race" },
         },
       });
-      expect(exportCount).toBe(1);
+      expect(await harness.store.getQuest(selected)).toMatchObject({
+        title: "Changed after claim",
+      });
       expect(atomicClaims).toBe(1);
+      expect(exportCount).toBe(1);
     } finally {
       await harness.stop();
     }

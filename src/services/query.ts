@@ -184,12 +184,28 @@ export function showQuestDetailFromSnapshot(
   );
 }
 
+export async function readScopedQuestDetailSnapshot(
+  store: QuestStore,
+  scope: QuestScope,
+  id: number,
+): Promise<QuestDetailSnapshot> {
+  const quest = await store.getQuest(id);
+  if (quest === null || (scope.repo !== null && quest.repo !== scope.repo)) {
+    throw new QueryCommandError(`quest ${id} does not exist in the selected scope`);
+  }
+  return store.readQuestDetail(id);
+}
+
 export async function showQuestDetail(
   store: QuestStore,
   scope: QuestScope,
   id: number,
 ): Promise<QuestDetail> {
-  return showQuestDetailFromDump(await store.exportAll(), scope, id);
+  return showQuestDetailFromSnapshot(
+    await readScopedQuestDetailSnapshot(store, scope, id),
+    scope,
+    id,
+  );
 }
 
 export async function questStats(store: QuestStore, scope: QuestScope): Promise<QuestStats> {

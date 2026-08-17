@@ -361,3 +361,58 @@ describe("Convex reactive watches", () => {
     }
   });
 });
+
+describe("Convex atomic claim detail", () => {
+  test("falls back to the legacy atomic export during a rolling backend upgrade", async () => {
+    const { backfill: _backfill, ...storedQuestFields } = quest;
+    const acceptedQuest = questSchema.parse({
+      ...storedQuestFields,
+      assignee: "test",
+      created_at: timestamp,
+      id: 1,
+      lease_expires_at: null,
+      status: "accepted",
+      updated_at: timestamp,
+    });
+    const acceptance = {
+      lease_expires_at: null,
+      outcome: "accepted" as const,
+      quest: acceptedQuest,
+    };
+    const mutations: unknown[] = [];
+    const clients = {
+      http: {
+        mutation: async (mutation: unknown) => {
+          mutations.push(mutation);
+          if (mutation === convexApi.acceptQuestAndDetail) {
+            throw new Error("[Request ID: bfdf4caebe0312d8] Server Error");
+          }
+          return {
+            acceptance,
+            snapshot: {
+              chains: [],
+              events: [],
+              evidence: [],
+              quests: [acceptedQuest],
+              schema_version: STORE_SCHEMA_VERSION,
+            },
+          };
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.acceptQuestAndDetail({ id: 1, owner: "test" })).resolves.toEqual({
+      acceptance,
+      detail: {
+        chains: [],
+        events: [],
+        evidence: [],
+        quest: acceptedQuest,
+        related_quests: [],
+      },
+    });
+    expect(mutations).toEqual([convexApi.acceptQuestAndDetail, convexApi.acceptQuestAndExport]);
+  });
+});

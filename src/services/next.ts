@@ -1,10 +1,10 @@
 import { computeQuestPlan, isDispatchableQuest, type PlanLaneCluster } from "../domain";
 import type { Chain, LaneConflictReference, Quest, QuestScope } from "../schema";
 import type { QuestStore } from "../store";
-import { compileQuestBriefFromDump, type QuestBrief } from "./brief";
+import { compileQuestBriefFromSnapshot, type QuestBrief } from "./brief";
 import {
   acceptLifecycleQuest,
-  acceptLifecycleQuestWithSnapshot,
+  acceptLifecycleQuestWithDetail,
   LaneConflictCommandError,
   LifecycleCommandError,
   questGuildMatches,
@@ -373,7 +373,7 @@ export async function getNextQuest(
   };
 
   const accept = () =>
-    (includeBrief ? acceptLifecycleQuestWithSnapshot : acceptLifecycleQuest)(
+    (includeBrief ? acceptLifecycleQuestWithDetail : acceptLifecycleQuest)(
       store,
       scope,
       selectedQuest.id,
@@ -419,13 +419,13 @@ export async function getNextQuest(
   if (!accepted.changed) {
     return { ...result, brief: null };
   }
-  if (accepted.snapshot === undefined) {
+  if (accepted.detail === undefined) {
     throw new LifecycleCommandError(
-      `quest ${accepted.quest.id} was accepted without a transaction snapshot; retry the claim with a store that supports atomic briefing`,
+      `quest ${accepted.quest.id} was accepted without an atomic detail snapshot; retry the claim with a store that supports acceptQuestAndDetail`,
     );
   }
   return {
     ...result,
-    brief: compileQuestBriefFromDump(accepted.snapshot, scope, accepted.quest.id),
+    brief: compileQuestBriefFromSnapshot(accepted.detail, scope, accepted.quest.id),
   };
 }

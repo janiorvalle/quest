@@ -23,7 +23,7 @@ import type {
   QuestTransition,
 } from "../schema";
 import { newQuestSchema, questTransitionSchema } from "../schema";
-import type { BlobStore, QuestStore } from "../store";
+import type { BlobStore, QuestDetailSnapshot, QuestStore } from "../store";
 
 const DEDUP_CANDIDATE_SCORE = 0.6;
 
@@ -101,6 +101,7 @@ export interface QuestMutationResult {
   readonly changed: boolean;
   readonly evidence: readonly Evidence[];
   readonly forceRequired?: boolean;
+  readonly detail?: QuestDetailSnapshot;
   readonly lease_expires_at?: string | null;
   readonly quest: Quest;
   readonly snapshot?: QuestDump;
@@ -202,6 +203,7 @@ interface AcceptLifecycleQuestOptions {
 
 interface AcceptOperationResult {
   readonly acceptance: AcceptResult;
+  readonly detail?: QuestDetailSnapshot;
   readonly snapshot?: QuestDump;
 }
 
@@ -508,6 +510,18 @@ export async function acceptLifecycleQuestWithSnapshot(
   );
 }
 
+export async function acceptLifecycleQuestWithDetail(
+  store: QuestStore,
+  scope: QuestScope,
+  id: number,
+  owner: string,
+  options: AcceptLifecycleQuestOptions = {},
+): Promise<QuestMutationResult> {
+  return acceptLifecycleQuestWithOperation(store, scope, id, owner, options, (input) =>
+    store.acceptQuestAndDetail(input),
+  );
+}
+
 async function acceptLifecycleQuestWithOperation(
   store: QuestStore,
   scope: QuestScope,
@@ -636,9 +650,10 @@ async function acceptMismatchedGuild(
     }
     throwAcceptConflict(id, result);
   }
-  const snapshot = accepted.snapshot;
+  const { detail, snapshot } = accepted;
   return {
     changed: true,
+    ...(detail === undefined ? {} : { detail }),
     evidence: [],
     lease_expires_at: result.quest.lease_expires_at,
     quest: result.quest,
@@ -703,9 +718,10 @@ async function acceptMatchingGuild(
     }
     throwAcceptConflict(id, result);
   }
-  const snapshot = accepted.snapshot;
+  const { detail, snapshot } = accepted;
   return {
     changed: true,
+    ...(detail === undefined ? {} : { detail }),
     evidence: [],
     lease_expires_at: result.quest.lease_expires_at,
     quest: result.quest,
