@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { newQuestSchema, questSchema, STORE_SCHEMA_VERSION } from "../../schema";
+import { newQuestSchema, type QuestDump, questSchema, STORE_SCHEMA_VERSION } from "../../schema";
 import type { FederatedReadSnapshot } from "../port";
 import { ConvexStore } from "./adapter";
 import { type ConvexClientPair, convexApi } from "./client";
@@ -414,5 +414,228 @@ describe("Convex atomic claim detail", () => {
       },
     });
     expect(mutations).toEqual([convexApi.acceptQuestAndDetail, convexApi.acceptQuestAndExport]);
+  });
+});
+
+describe("Convex restore rolling upgrades", () => {
+  test("resumes replaceAll when a commit response is lost after deletion starts", async () => {
+    const empty: QuestDump = {
+      schema_version: STORE_SCHEMA_VERSION,
+      quests: [],
+      evidence: [],
+      chains: [],
+      events: [],
+    };
+    const mutations: unknown[] = [];
+    let commitAttempts = 0;
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.serverTime) {
+            return timestamp;
+          }
+          if (query === convexApi.activeRestore) {
+            return null;
+          }
+          return empty;
+        },
+        mutation: async (mutation: unknown) => {
+          mutations.push(mutation);
+          if (mutation === convexApi.beginRestore) {
+            return { status: "ready" };
+          }
+          if (mutation === convexApi.commitRestore) {
+            commitAttempts += 1;
+            if (commitAttempts === 1) {
+              throw new Error("connection closed after commit");
+            }
+            return { lease_cutoff: timestamp, status: "committed" };
+          }
+          if (mutation === convexApi.releaseRestore) {
+            return true;
+          }
+          return null;
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.replaceAll(empty)).resolves.toBeUndefined();
+
+    expect(commitAttempts).toBe(2);
+    expect(mutations).not.toContain(convexApi.rollbackRestore);
+    expect(mutations.at(-1)).toBe(convexApi.releaseRestore);
+  });
+
+  test("lets a fresh client discover and finish a partial restore", async () => {
+    const empty: QuestDump = {
+      schema_version: STORE_SCHEMA_VERSION,
+      quests: [],
+      evidence: [],
+      chains: [],
+      events: [],
+    };
+    const mutations: unknown[] = [];
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.activeRestore) {
+            return mutations.includes(convexApi.releaseRestore)
+              ? null
+              : { status: "deleting", token: "interrupted-token" };
+          }
+          return query === convexApi.serverTime ? timestamp : empty;
+        },
+        mutation: async (mutation: unknown) => {
+          mutations.push(mutation);
+          if (mutation === convexApi.commitRestore) {
+            return { lease_cutoff: timestamp, status: "committed" };
+          }
+          if (mutation === convexApi.releaseRestore) {
+            return true;
+          }
+          return null;
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.exportAll()).resolves.toEqual(empty);
+    expect(mutations).toEqual([convexApi.commitRestore, convexApi.releaseRestore]);
+  });
+
+  test("lets a fresh client discard an expired restore interrupted before commit", async () => {
+    const empty: QuestDump = {
+      schema_version: STORE_SCHEMA_VERSION,
+      quests: [],
+      evidence: [],
+      chains: [],
+      events: [],
+    };
+    const mutations: unknown[] = [];
+    const clients = {
+      http: {
+        query: async (query: unknown) =>
+          query === convexApi.activeRestore
+            ? { status: "expired", token: "interrupted-token" }
+            : empty,
+        mutation: async (mutation: unknown) => {
+          mutations.push(mutation);
+          return mutation === convexApi.releaseRestore;
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.resumeInterruptedRestore()).resolves.toBeTrue();
+    expect(mutations).toEqual([convexApi.releaseRestore]);
+  });
+
+  test("does not let a fresh client discard an unexpired restore", async () => {
+    const mutations: unknown[] = [];
+    const clients = {
+      http: {
+        query: async () => null,
+        mutation: async (mutation: unknown) => {
+          mutations.push(mutation);
+          return true;
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.resumeInterruptedRestore()).resolves.toBeFalse();
+    expect(mutations).toEqual([]);
+  });
+
+  test("uses the legacy monolithic restore only when the previous validator rejects paging", async () => {
+    const empty: QuestDump = {
+      schema_version: STORE_SCHEMA_VERSION,
+      quests: [],
+      evidence: [],
+      chains: [],
+      events: [],
+    };
+    const calls: Array<{ readonly args: Record<string, unknown>; readonly mutation: unknown }> = [];
+    const clients = {
+      http: {
+        mutation: async (mutation: unknown, args: Record<string, unknown>) => {
+          calls.push({ args, mutation });
+          if (mutation === convexApi.beginRestore && "expected_hash" in args) {
+            throw new Error(
+              "ArgumentValidationError: Object contains extra field expected_hash that is not in the validator",
+            );
+          }
+          if (mutation === convexApi.activateRestore) {
+            return args["dump"];
+          }
+          return null;
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    const token = await store.beginRestore(empty, timestamp, "migration", 0);
+    await expect(store.activateRestore(token, empty)).resolves.toEqual(empty);
+
+    expect(calls.map((call) => call.mutation)).toEqual([
+      convexApi.beginRestore,
+      convexApi.beginRestore,
+      convexApi.activateRestore,
+    ]);
+    expect(calls[1]?.args["expected_snapshot"]).toBe(JSON.stringify(empty));
+    expect(calls.some((call) => call.mutation === convexApi.uploadRestorePage)).toBeFalse();
+  });
+
+  test("rolls back a legacy restore when the backend upgrades before commit", async () => {
+    const empty: QuestDump = {
+      schema_version: STORE_SCHEMA_VERSION,
+      quests: [],
+      evidence: [],
+      chains: [],
+      events: [],
+    };
+    const mutations: unknown[] = [];
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.activeRestore) {
+            return null;
+          }
+          if (query === convexApi.serverTime) {
+            return timestamp;
+          }
+          return empty;
+        },
+        mutation: async (mutation: unknown, args: Record<string, unknown>) => {
+          mutations.push(mutation);
+          if (mutation === convexApi.beginRestore && "expected_hash" in args) {
+            throw new Error(
+              "ArgumentValidationError: Object contains extra field expected_hash that is not in the validator",
+            );
+          }
+          if (mutation === convexApi.activateRestore) {
+            return args["dump"];
+          }
+          if (mutation === convexApi.commitRestore) {
+            throw new Error(
+              "[CONVEX_MONOLITHIC_DUMP_UNSUPPORTED] this restore needs the current paging protocol",
+            );
+          }
+          return null;
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.replaceAll(empty)).rejects.toThrow("safely rolled it back");
+    expect(mutations.filter((mutation) => mutation === convexApi.commitRestore)).toHaveLength(1);
+    expect(mutations.at(-1)).toBe(convexApi.rollbackRestore);
   });
 });

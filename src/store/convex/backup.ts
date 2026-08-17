@@ -23,7 +23,8 @@ type ConvexRestoreStore = Pick<
   | "renewRestore"
   | "restoreStatus"
   | "rollbackRestore"
->;
+> &
+  Partial<Pick<ConvexStore, "resumeInterruptedRestore">>;
 
 async function releaseCommittedLease(store: ConvexRestoreStore, token: string): Promise<void> {
   let releaseError: unknown;
@@ -319,6 +320,7 @@ export class ConvexBackupDatabase implements BackupDatabase {
     repository?: string,
   ): Promise<BackupDatabaseRestoreSession> {
     this.#requireAbsolute(source, "snapshot path");
+    await this.#store.resumeInterruptedRestore?.();
     const replacement = (await readDump(source)).dump;
     const previousSnapshot = await this.#store.exportAllWithCutoff();
     const previous = previousSnapshot.dump;
@@ -337,7 +339,12 @@ export class ConvexBackupDatabase implements BackupDatabase {
     );
     let token: string | undefined;
     try {
-      token = await this.#store.beginRestore(previous, previousSnapshot.lease_cutoff, restoreKind);
+      token = await this.#store.beginRestore(
+        previous,
+        previousSnapshot.lease_cutoff,
+        restoreKind,
+        previousSnapshot.event_high_water,
+      );
       if (trimmedRepository !== undefined && trimmedRepository !== "") {
         await this.#store.recoverMigrationFenceForRestore(token, trimmedRepository);
       }

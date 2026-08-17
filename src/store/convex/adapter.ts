@@ -39,7 +39,6 @@ import type {
   FederatedFullSnapshot,
   FederatedReadSnapshot,
   FederatedSnapshotWatchListener,
-  AcceptQuestAndExportResult as PortAcceptQuestAndExportResult,
   QuestDetailSnapshot,
   QuestStore,
   QuestWatchListener,
@@ -48,16 +47,28 @@ import type {
 } from "../port";
 import {
   authTokenInput,
+  type ConvexActiveRestore,
   type ConvexClientPair,
   closeConvexClientPair,
   convexApi,
   convexClientProtocolInput,
   createConvexClientPair,
 } from "./client";
+import {
+  assembleConvexDump,
+  type ConvexDumpPage,
+  type ConvexRestorePage,
+  canonicalizeQuestDump,
+  createConvexRestorePages,
+  parseConvexDumpPage,
+} from "./pagination";
 
 interface RealtimeSubscription {
   unsubscribe(): void;
 }
+
+const RESTORE_WRITE_RETRY_LIMIT = 8;
+const RESTORE_WRITE_RETRY_START_MS = 125;
 
 function realtimeWatchError(error: unknown): Error {
   return error instanceof Error
@@ -65,6 +76,36 @@ function realtimeWatchError(error: unknown): Error {
     : new Error(
         "[CONVEX_WATCH_FAILED] the live Convex query stopped responding; check the deployment connection and retry",
       );
+}
+
+function isConvexWriteRateLimit(error: unknown): boolean {
+  return error instanceof Error && /TooManyWrites|too many writes per second/i.test(error.message);
+}
+
+function retryDelay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function retryRestoreWrite<T>(operation: () => Promise<T>): Promise<T> {
+  let delay = RESTORE_WRITE_RETRY_START_MS;
+  for (let attempt = 0; attempt <= RESTORE_WRITE_RETRY_LIMIT; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error: unknown) {
+      if (!isConvexWriteRateLimit(error)) {
+        throw error;
+      }
+      if (attempt === RESTORE_WRITE_RETRY_LIMIT) {
+        throw new Error(
+          "[CONVEX_RESTORE_RATE_LIMITED] Convex kept rejecting paged restore writes after retries; wait for the deployment write budget to recover, then retry the restore with the same snapshot",
+          { cause: error },
+        );
+      }
+      await retryDelay(delay);
+      delay *= 2;
+    }
+  }
+  throw new Error("unreachable Convex restore retry state");
 }
 
 function leaseRefreshDelay(
@@ -97,6 +138,7 @@ export interface ConvexStoreOptions {
 
 export interface ConvexExportSnapshot {
   readonly dump: QuestDump;
+  readonly event_high_water?: number;
   readonly lease_cutoff: string;
 }
 
@@ -112,12 +154,104 @@ function testableMutation<T>(
   };
 }
 
+async function snapshotFingerprint(snapshot: QuestDump): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(stableSerialize(canonicalizeQuestDump(snapshot))),
+  );
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function valueFingerprint(value: unknown): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(stableSerialize(value)),
+  );
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function restoreManifestFingerprint(pages: readonly ConvexRestorePage[]): Promise<string> {
+  const manifest = await Promise.all(
+    pages.map(async (page) => ({
+      page_index: page.page_index,
+      section: page.section,
+      item_count: page.items.length,
+      page_hash: await valueFingerprint(page),
+      high_water: page.items.reduce(
+        (highest, item) => ("id" in item ? Math.max(highest, item.id) : highest),
+        0,
+      ),
+    })),
+  );
+  return valueFingerprint({ version: 1, pages: manifest });
+}
+
+interface AssembledDumpPages {
+  readonly dump: QuestDump;
+  readonly event_high_water: number;
+}
+
+async function assembleDumpPages(
+  firstPage: unknown,
+  readNext: (cursor: string) => Promise<unknown>,
+): Promise<AssembledDumpPages> {
+  const legacyDump = questDumpSchema.safeParse(firstPage);
+  if (legacyDump.success) {
+    return {
+      dump: canonicalizeQuestDump(legacyDump.data),
+      event_high_water: legacyDump.data.events.reduce(
+        (highest, event) => Math.max(highest, event.id),
+        0,
+      ),
+    };
+  }
+  const pages: ConvexDumpPage[] = [];
+  let page = parseConvexDumpPage(firstPage);
+  while (true) {
+    pages.push(page);
+    if (page.next_cursor === null) {
+      return { dump: assembleConvexDump(pages), event_high_water: page.event_high_water };
+    }
+    const nextPage = parseConvexDumpPage(await readNext(page.next_cursor));
+    if (nextPage.event_high_water !== page.event_high_water) {
+      throw new Error(
+        "[CONVEX_SNAPSHOT_CHANGED] Convex returned pages from different consistency points; restart the export",
+      );
+    }
+    page = nextPage;
+  }
+}
+
+function isLegacyRestoreValidatorError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /(?:expected_hash|expected_event_high_water).*(?:extra|unexpected|validator|argument)|(?:extra|unexpected|validator|argument).*(?:expected_hash|expected_event_high_water)/i.test(
+      error.message,
+    )
+  );
+}
+
+function isMonolithicRestoreUnsupported(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("CONVEX_MONOLITHIC_DUMP_UNSUPPORTED");
+}
+
 function isMissingFencedRepositoriesQuery(error: unknown): boolean {
   return (
     error instanceof Error &&
     /(?:could not find|not found|does not exist|not a function).*fencedRepositories|fencedRepositories.*(?:could not find|not found|does not exist|not a function)/i.test(
       error.message,
     )
+  );
+}
+
+function isMissingActiveRestoreQuery(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return (
+    /(?:could not find|not found|does not exist|not a function).*activeRestore|activeRestore.*(?:could not find|not found|does not exist|not a function)/i.test(
+      error.message,
+    ) || /^\[Request ID: [0-9a-f]+\] Server Error$/i.test(error.message.trim())
   );
 }
 
@@ -214,6 +348,7 @@ export class ConvexStore implements QuestStore {
   readonly #leaseTtlMinutes: number;
   #failNextEventAppend = false;
   #federatedListSnapshotAvailable: boolean | undefined;
+  readonly #legacyRestoreTokens = new Set<string>();
 
   constructor(deployment: string, options: ConvexStoreOptions = {}) {
     this.deployment = deployment;
@@ -268,18 +403,6 @@ export class ConvexStore implements QuestStore {
         detail: detailSnapshotFromDump(legacy.snapshot, parsed.id),
       };
     }
-  }
-
-  async acceptQuestAndExport(input: AcceptQuestInput): Promise<PortAcceptQuestAndExportResult> {
-    const parsed = acceptQuestInputSchema.parse(input);
-    return this.#clients.http.mutation(
-      convexApi.acceptQuestAndExport,
-      testableMutation(
-        this.#clients,
-        addConfiguredLeaseTtl(parsed, this.#leaseTtlMinutes),
-        this.#consumeEventFailure(),
-      ),
-    );
   }
 
   async touchQuest(input: TouchQuestInput): Promise<Quest> {
@@ -423,9 +546,23 @@ export class ConvexStore implements QuestStore {
 
   async readFederatedFullSnapshot(): Promise<FederatedFullSnapshot> {
     try {
-      return await this.#clients.http.query(convexApi.federatedSnapshot, {
+      const first = await this.#clients.http.query(convexApi.federatedSnapshot, {
         ...authTokenInput(this.#clients),
       });
+      if ("dump" in first) {
+        return {
+          dump: questDumpSchema.parse(first.dump),
+          fencedRepositories: [...first.fencedRepositories],
+        };
+      }
+      const fencedRepositories = [...first.fencedRepositories];
+      const assembled = await assembleDumpPages(first, (cursor) =>
+        this.#clients.http.query(convexApi.federatedSnapshot, {
+          ...authTokenInput(this.#clients),
+          cursor,
+        }),
+      );
+      return { dump: assembled.dump, fencedRepositories };
     } catch (error: unknown) {
       if (isMissingFederatedSnapshotQuery(error)) {
         throw new Error(
@@ -530,7 +667,17 @@ export class ConvexStore implements QuestStore {
         : this.#clients.realtime.onUpdate(
             convexApi.federatedSnapshot,
             { ...authTokenInput(this.#clients) },
-            receiveSnapshot,
+            (snapshot) => {
+              if ("dump" in snapshot) {
+                receiveSnapshot(snapshot);
+              } else {
+                receiveError(
+                  new Error(
+                    "[FEDERATED_FULL_SNAPSHOT_WATCH_UNAVAILABLE] paginated full snapshots cannot be watched; deploy a backend with quest:federatedListSnapshot and retry",
+                  ),
+                );
+              }
+            },
             receiveError,
           );
     return {
@@ -599,10 +746,17 @@ export class ConvexStore implements QuestStore {
   }
 
   async exportAllRaw(): Promise<QuestDump> {
-    const dump = await this.#clients.http.query(convexApi.rawExportAll, {
+    const firstPage = await this.#clients.http.query(convexApi.rawExportAll, {
       ...authTokenInput(this.#clients),
     });
-    return questDumpSchema.parse(dump);
+    return (
+      await assembleDumpPages(firstPage, (cursor) =>
+        this.#clients.http.query(convexApi.rawExportAll, {
+          ...authTokenInput(this.#clients),
+          cursor,
+        }),
+      )
+    ).dump;
   }
 
   async serverTime(): Promise<string> {
@@ -611,17 +765,38 @@ export class ConvexStore implements QuestStore {
 
   async exportAllAt(leaseCutoff: string): Promise<QuestDump> {
     const parsedCutoff = questSchema.shape.updated_at.parse(leaseCutoff);
-    const dump = await this.#clients.http.query(convexApi.exportAll, {
+    const firstPage = await this.#clients.http.query(convexApi.exportAll, {
       ...authTokenInput(this.#clients),
       lease_cutoff: parsedCutoff,
     });
-    return questDumpSchema.parse(dump);
+    return (
+      await assembleDumpPages(firstPage, (cursor) =>
+        this.#clients.http.query(convexApi.exportAll, {
+          ...authTokenInput(this.#clients),
+          cursor,
+          lease_cutoff: parsedCutoff,
+        }),
+      )
+    ).dump;
   }
 
   async exportAllWithCutoff(): Promise<ConvexExportSnapshot> {
+    await this.resumeInterruptedRestore();
     const leaseCutoff = await this.serverTime();
+    const firstPage = await this.#clients.http.query(convexApi.exportAll, {
+      ...authTokenInput(this.#clients),
+      lease_cutoff: leaseCutoff,
+    });
+    const snapshot = await assembleDumpPages(firstPage, (cursor) =>
+      this.#clients.http.query(convexApi.exportAll, {
+        ...authTokenInput(this.#clients),
+        cursor,
+        lease_cutoff: leaseCutoff,
+      }),
+    );
     return {
-      dump: await this.exportAllAt(leaseCutoff),
+      dump: snapshot.dump,
+      event_high_water: snapshot.event_high_water,
       lease_cutoff: leaseCutoff,
     };
   }
@@ -722,11 +897,29 @@ export class ConvexStore implements QuestStore {
   }
 
   async replaceAll(dump: QuestDump): Promise<void> {
+    await this.resumeInterruptedRestore();
     const parsed = questDumpSchema.parse(dump);
-    await this.#clients.http.mutation(convexApi.replaceAll, {
-      ...authTokenInput(this.#clients),
-      dump: parsed,
-    });
+    const current = await this.exportAllWithCutoff();
+    const token = await this.beginRestore(
+      current.dump,
+      current.lease_cutoff,
+      "migration",
+      current.event_high_water,
+    );
+    let committed = false;
+    let commitStarted = false;
+    try {
+      await this.activateRestore(token, parsed);
+      commitStarted = true;
+      await this.#commitRestoreResolvingAmbiguity(token);
+      committed = true;
+    } finally {
+      if (committed) {
+        await this.releaseRestore(token);
+      } else if (!commitStarted) {
+        await this.rollbackRestore(token).catch(() => undefined);
+      }
+    }
   }
 
   async recoverMigrationFence(repository: string): Promise<boolean> {
@@ -745,6 +938,7 @@ export class ConvexStore implements QuestStore {
   }
 
   async beginMigration(expected: QuestDump): Promise<StoreMigrationSession> {
+    await this.resumeInterruptedRestore();
     const parsedExpected = questDumpSchema.parse(expected);
     const snapshot = await this.exportAllWithCutoff();
     if (stableSerialize(snapshot.dump) !== stableSerialize(parsedExpected)) {
@@ -755,7 +949,12 @@ export class ConvexStore implements QuestStore {
 
     let token: string;
     try {
-      token = await this.beginRestore(snapshot.dump, snapshot.lease_cutoff, "migration");
+      token = await this.beginRestore(
+        snapshot.dump,
+        snapshot.lease_cutoff,
+        "migration",
+        snapshot.event_high_water,
+      );
     } catch (error: unknown) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new Error(
@@ -874,25 +1073,7 @@ export class ConvexStore implements QuestStore {
         if (committed) {
           return;
         }
-        let committedDump: QuestDump;
-        try {
-          committedDump = await this.commitRestore(token);
-        } catch (error: unknown) {
-          try {
-            committedDump = await this.commitRestore(token);
-          } catch {
-            let status: Awaited<ReturnType<ConvexStore["restoreStatus"]>>;
-            try {
-              status = await this.restoreStatus(token);
-            } catch {
-              throw error;
-            }
-            if (status.status !== "committed") {
-              throw error;
-            }
-            committedDump = status.dump;
-          }
-        }
+        const committedDump = await this.#commitRestoreResolvingAmbiguity(token);
         committed = true;
         expectedSnapshot = questDumpSchema.parse(committedDump);
         replacement = expectedSnapshot;
@@ -906,17 +1087,41 @@ export class ConvexStore implements QuestStore {
     expected: QuestDump,
     leaseCutoff: string,
     restoreKind: "migration" | "full-backup" = "full-backup",
+    expectedEventHighWater?: number,
   ): Promise<string> {
     const token = crypto.randomUUID();
     const parsedExpected = questDumpSchema.parse(expected);
     const parsedCutoff = questSchema.shape.updated_at.parse(leaseCutoff);
-    await this.#clients.http.mutation(convexApi.beginRestore, {
-      ...authTokenInput(this.#clients),
-      token,
-      expected_snapshot: JSON.stringify(parsedExpected),
-      lease_cutoff: parsedCutoff,
-      ...(restoreKind === "full-backup" ? { restore_kind: "full-backup" } : {}),
-    });
+    const expectedHash = await snapshotFingerprint(parsedExpected);
+    try {
+      while (true) {
+        const result = await this.#clients.http.mutation(convexApi.beginRestore, {
+          ...authTokenInput(this.#clients),
+          token,
+          expected_hash: expectedHash,
+          expected_event_high_water:
+            expectedEventHighWater ??
+            parsedExpected.events.reduce((highest, event) => Math.max(highest, event.id), 0),
+          lease_cutoff: parsedCutoff,
+          ...(restoreKind === "full-backup" ? { restore_kind: "full-backup" } : {}),
+        });
+        if (result?.status !== "cleanup") {
+          break;
+        }
+      }
+    } catch (error: unknown) {
+      if (!isLegacyRestoreValidatorError(error)) {
+        throw error;
+      }
+      await this.#clients.http.mutation(convexApi.beginRestore, {
+        ...authTokenInput(this.#clients),
+        token,
+        expected_snapshot: JSON.stringify(parsedExpected),
+        lease_cutoff: parsedCutoff,
+        ...(restoreKind === "full-backup" ? { restore_kind: "full-backup" } : {}),
+      });
+      this.#legacyRestoreTokens.add(token);
+    }
     return token;
   }
 
@@ -927,50 +1132,164 @@ export class ConvexStore implements QuestStore {
     });
   }
 
-  restoreStatus(
+  async restoreStatus(
     token: string,
   ): Promise<
     | { readonly status: "active" | "missing" }
     | { readonly status: "committed"; readonly dump: QuestDump }
   > {
-    return this.#clients.http.query(convexApi.restoreStatus, {
+    const status = await this.#clients.http.query(convexApi.restoreStatus, {
       ...authTokenInput(this.#clients),
       token,
     });
+    if (status.status !== "committed") {
+      return status;
+    }
+    if ("dump" in status) {
+      return { status: "committed", dump: questDumpSchema.parse(status.dump) };
+    }
+    return { status: "committed", dump: await this.exportAllAt(status.lease_cutoff) };
   }
 
   async activateRestore(token: string, replacement: QuestDump): Promise<QuestDump> {
-    const activated = await this.#clients.http.mutation(convexApi.activateRestore, {
-      ...authTokenInput(this.#clients),
-      token,
-      dump: questDumpSchema.parse(replacement),
-    });
-    return questDumpSchema.parse(activated);
+    const parsed = canonicalizeQuestDump(replacement);
+    if (this.#legacyRestoreTokens.has(token)) {
+      const activated = await this.#clients.http.mutation(convexApi.activateRestore, {
+        ...authTokenInput(this.#clients),
+        token,
+        dump: parsed,
+      });
+      return questDumpSchema.parse(activated);
+    }
+    const pages = createConvexRestorePages(parsed);
+    for (const page of pages) {
+      await retryRestoreWrite(() =>
+        this.#clients.http.mutation(convexApi.uploadRestorePage, {
+          ...authTokenInput(this.#clients),
+          token,
+          page,
+        }),
+      );
+    }
+    const replacementHash = await restoreManifestFingerprint(pages);
+    await retryRestoreWrite(() =>
+      this.#clients.http.mutation(convexApi.activateRestore, {
+        ...authTokenInput(this.#clients),
+        token,
+        replacement_hash: replacementHash,
+      }),
+    );
+    return parsed;
   }
 
   async commitRestore(token: string): Promise<QuestDump> {
-    const committed = await this.#clients.http.mutation(convexApi.commitRestore, {
-      ...authTokenInput(this.#clients),
-      token,
-    });
-    if (committed === null) {
-      return this.exportAll();
+    while (true) {
+      const committed = await retryRestoreWrite(() =>
+        this.#clients.http.mutation(convexApi.commitRestore, {
+          ...authTokenInput(this.#clients),
+          token,
+        }),
+      );
+      if (committed === null) {
+        return this.exportAll();
+      }
+      if ("schema_version" in committed) {
+        return questDumpSchema.parse(committed);
+      }
+      if (committed.status === "pending") {
+        continue;
+      }
+      return this.exportAllAt(committed.lease_cutoff);
     }
-    return questDumpSchema.parse(committed);
   }
 
   async releaseRestore(token: string): Promise<void> {
-    await this.#clients.http.mutation(convexApi.releaseRestore, {
-      ...authTokenInput(this.#clients),
-      token,
-    });
+    while (
+      (await retryRestoreWrite(() =>
+        this.#clients.http.mutation(convexApi.releaseRestore, {
+          ...authTokenInput(this.#clients),
+          token,
+        }),
+      )) === false
+    ) {
+      // Each mutation stays below Convex's transaction read/write limits.
+    }
+    this.#legacyRestoreTokens.delete(token);
   }
 
   async rollbackRestore(token: string): Promise<void> {
-    await this.#clients.http.mutation(convexApi.rollbackRestore, {
-      ...authTokenInput(this.#clients),
-      token,
-    });
+    while (
+      (await retryRestoreWrite(() =>
+        this.#clients.http.mutation(convexApi.rollbackRestore, {
+          ...authTokenInput(this.#clients),
+          token,
+        }),
+      )) === false
+    ) {
+      // Each mutation stays below Convex's transaction read/write limits.
+    }
+    this.#legacyRestoreTokens.delete(token);
+  }
+
+  async resumeInterruptedRestore(): Promise<boolean> {
+    let active: ConvexActiveRestore | null;
+    try {
+      active = await this.#activeRestore();
+    } catch (error: unknown) {
+      if (isMissingActiveRestoreQuery(error)) {
+        return false;
+      }
+      throw error;
+    }
+    if (active === null) {
+      return false;
+    }
+    if (active.status === "expired") {
+      await this.releaseRestore(active.token);
+      return true;
+    }
+    if (active.status !== "committed") {
+      await this.#commitRestoreResolvingAmbiguity(active.token);
+    }
+    await this.releaseRestore(active.token);
+    return true;
+  }
+
+  #activeRestore() {
+    return this.#clients.http.query(convexApi.activeRestore, authTokenInput(this.#clients));
+  }
+
+  async #commitRestoreResolvingAmbiguity(token: string): Promise<QuestDump> {
+    let firstError: unknown;
+    try {
+      return await this.commitRestore(token);
+    } catch (error: unknown) {
+      firstError = error;
+    }
+    if (this.#legacyRestoreTokens.has(token) && isMonolithicRestoreUnsupported(firstError)) {
+      await this.rollbackRestore(token);
+      throw new Error(
+        "[CONVEX_MONOLITHIC_DUMP_UNSUPPORTED] the backend upgraded while this legacy restore was staged; Quest safely rolled it back before changing the destination, so retry with the current CLI",
+        { cause: firstError },
+      );
+    }
+    try {
+      return await this.commitRestore(token);
+    } catch {
+      let status: Awaited<ReturnType<ConvexStore["restoreStatus"]>>;
+      try {
+        status = await this.restoreStatus(token);
+      } catch {
+        throw firstError;
+      }
+      if (status.status === "committed") {
+        return status.dump;
+      }
+      throw new Error(
+        `[CONVEX_RESTORE_COMMIT_UNRESOLVED] Convex restore ${token} may have started committing; retry commitRestore with this token until it reports committed, and do not roll it back`,
+        { cause: firstError },
+      );
+    }
   }
 
   async close(): Promise<void> {

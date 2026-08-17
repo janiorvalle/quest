@@ -18,7 +18,6 @@ import type {
   NewEvidence,
   NewQuest,
   Quest,
-  QuestDump,
   QuestScope,
   QuestTransition,
 } from "../schema";
@@ -104,7 +103,6 @@ export interface QuestMutationResult {
   readonly detail?: QuestDetailSnapshot;
   readonly lease_expires_at?: string | null;
   readonly quest: Quest;
-  readonly snapshot?: QuestDump;
   readonly warnings: readonly string[];
 }
 
@@ -204,7 +202,6 @@ interface AcceptLifecycleQuestOptions {
 interface AcceptOperationResult {
   readonly acceptance: AcceptResult;
   readonly detail?: QuestDetailSnapshot;
-  readonly snapshot?: QuestDump;
 }
 
 type AcceptOperation = (input: AcceptQuestInput) => Promise<AcceptOperationResult>;
@@ -498,18 +495,6 @@ export async function acceptLifecycleQuest(
   }));
 }
 
-export async function acceptLifecycleQuestWithSnapshot(
-  store: QuestStore,
-  scope: QuestScope,
-  id: number,
-  owner: string,
-  options: AcceptLifecycleQuestOptions = {},
-): Promise<QuestMutationResult> {
-  return acceptLifecycleQuestWithOperation(store, scope, id, owner, options, (input) =>
-    store.acceptQuestAndExport(input),
-  );
-}
-
 export async function acceptLifecycleQuestWithDetail(
   store: QuestStore,
   scope: QuestScope,
@@ -650,14 +635,13 @@ async function acceptMismatchedGuild(
     }
     throwAcceptConflict(id, result);
   }
-  const { detail, snapshot } = accepted;
+  const { detail } = accepted;
   return {
     changed: true,
     ...(detail === undefined ? {} : { detail }),
     evidence: [],
     lease_expires_at: result.quest.lease_expires_at,
     quest: result.quest,
-    ...(snapshot === undefined ? {} : { snapshot }),
     warnings: [`${warning} (override accepted)`],
   };
 }
@@ -718,14 +702,13 @@ async function acceptMatchingGuild(
     }
     throwAcceptConflict(id, result);
   }
-  const { detail, snapshot } = accepted;
+  const { detail } = accepted;
   return {
     changed: true,
     ...(detail === undefined ? {} : { detail }),
     evidence: [],
     lease_expires_at: result.quest.lease_expires_at,
     quest: result.quest,
-    ...(snapshot === undefined ? {} : { snapshot }),
     warnings: [],
   };
 }

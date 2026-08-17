@@ -168,7 +168,12 @@ if (deployment === undefined || authToken === undefined) {
         await primary.replaceAll(emptyDump);
         await primary.addQuest(quest);
         const previous = await primary.exportAllWithCutoff();
-        token = await primary.beginRestore(previous.dump, previous.lease_cutoff);
+        token = await primary.beginRestore(
+          previous.dump,
+          previous.lease_cutoff,
+          "full-backup",
+          previous.event_high_water,
+        );
         await primary.activateRestore(token, emptyDump);
         await expect(concurrent.addQuest({ ...quest, title: "blocked" })).rejects.toThrow(
           "restore is in progress",
@@ -187,6 +192,80 @@ if (deployment === undefined || authToken === undefined) {
       }
     },
   );
+
+  test.serial("a fresh Convex client resumes an interrupted paginated restore", async () => {
+    const primaryClients = createConvexClientPair(deployment, { authToken });
+    const freshClients = createConvexClientPair(deployment, { authToken });
+    const primary = new ConvexStore(deployment, { clients: primaryClients });
+    const fresh = new ConvexStore(deployment, { clients: freshClients });
+    let token: string | undefined;
+    try {
+      await primary.replaceAll(emptyDump);
+      const previous = await primary.exportAllWithCutoff();
+      token = await primary.beginRestore(
+        previous.dump,
+        previous.lease_cutoff,
+        "full-backup",
+        previous.event_high_water,
+      );
+      await primary.activateRestore(token, emptyDump);
+      await expect(
+        primaryClients.http.mutation(convexApi.commitRestore, {
+          auth_token: authToken,
+          client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+          token,
+        }),
+      ).resolves.toEqual({ status: "pending" });
+
+      expect(await fresh.exportAll()).toEqual(emptyDump);
+      token = undefined;
+      await expect(
+        freshClients.http.query(convexApi.activeRestore, {
+          auth_token: authToken,
+          client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+        }),
+      ).resolves.toBeNull();
+    } finally {
+      if (token !== undefined) {
+        await primary.commitRestore(token).catch(() => undefined);
+        await primary.releaseRestore(token).catch(() => undefined);
+      }
+      await fresh.replaceAll(emptyDump).catch(() => undefined);
+      await closeConvexClientPair(primaryClients);
+      await closeConvexClientPair(freshClients);
+    }
+  });
+
+  test.serial("a fresh Convex client cannot cancel a live restore before commit", async () => {
+    const primaryClients = createConvexClientPair(deployment, { authToken });
+    const freshClients = createConvexClientPair(deployment, { authToken });
+    const primary = new ConvexStore(deployment, { clients: primaryClients });
+    const fresh = new ConvexStore(deployment, { clients: freshClients });
+    let token: string | undefined;
+    try {
+      await primary.replaceAll(emptyDump);
+      const previous = await primary.exportAllWithCutoff();
+      token = await primary.beginRestore(
+        previous.dump,
+        previous.lease_cutoff,
+        "full-backup",
+        previous.event_high_water,
+      );
+      await primary.activateRestore(token, emptyDump);
+
+      expect(await fresh.resumeInterruptedRestore()).toBeFalse();
+      expect(await fresh.exportAll()).toEqual(previous.dump);
+      await primary.rollbackRestore(token);
+      token = undefined;
+    } finally {
+      if (token !== undefined) {
+        await primary.releaseRestore(token).catch(() => undefined);
+      }
+      await fresh.replaceAll(emptyDump).catch(() => undefined);
+      await closeConvexClientPair(primaryClients);
+      await closeConvexClientPair(freshClients);
+    }
+  });
 
   test.serial("ConvexBlobStore snapshots caller bytes before upload", async () => {
     const clients = createConvexClientPair(deployment, { authToken });
@@ -401,5 +480,186 @@ if (deployment === undefined || authToken === undefined) {
         await closeConvexClientPair(clients);
       }
     },
+  );
+
+  test.serial(
+    "Convex paginated dumps round-trip more than 8192 events by count and value size",
+    async () => {
+      const clients = createConvexClientPair(deployment, { authToken });
+      const store = new ConvexStore(deployment, { clients });
+      const directory = await mkdtemp(join(tmpdir(), "quest-convex-pagination-"));
+      const timestamp = "2026-08-17T00:00:00.000Z";
+      const quests: QuestDump["quests"] = Array.from({ length: 3 }, (_, index) => ({
+        id: index + 1,
+        repo: "convex-pagination",
+        area: "store",
+        kind: "bug",
+        title: `Large history ${index + 1}`,
+        description: "Convex pagination contract fixture",
+        opened_by: "contract/tester",
+        guild: null,
+        assignee: null,
+        status: "open",
+        verdict: null,
+        verdict_notes: null,
+        priority: 2,
+        pr: null,
+        predicted_files: [],
+        reopen_count: 0,
+        lease_expires_at: null,
+        created_at: timestamp,
+        updated_at: timestamp,
+      }));
+      const events: QuestDump["events"] = Array.from({ length: 8_193 }, (_, index) => ({
+        id: index + 1,
+        quest_id: (index % quests.length) + 1,
+        at: timestamp,
+        actor: "contract/tester",
+        action: "update",
+        detail: {
+          sequence: index + 1,
+          ...(index < 64 ? { payload: "v".repeat(300_000) } : {}),
+        },
+      }));
+      const expected: QuestDump = {
+        schema_version: STORE_SCHEMA_VERSION,
+        quests,
+        evidence: [],
+        chains: [],
+        events,
+      };
+      let rollbackToken: string | undefined;
+      try {
+        await store.replaceAll(emptyDump);
+        const initial = await store.exportAllWithCutoff();
+        const legacyToken = await store.beginRestore(
+          initial.dump,
+          initial.lease_cutoff,
+          "full-backup",
+          initial.event_high_water,
+        );
+        await expect(
+          clients.http.mutation(convexApi.activateRestore, {
+            auth_token: authToken,
+            client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+            token: legacyToken,
+            dump: emptyDump,
+          }),
+        ).rejects.toThrow("CONVEX_MONOLITHIC_DUMP_UNSUPPORTED");
+        await store.rollbackRestore(legacyToken);
+
+        const stabilityCutoff = await store.serverTime();
+        const firstStabilityPage = await clients.http.query(convexApi.exportAll, {
+          auth_token: authToken,
+          client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+          lease_cutoff: stabilityCutoff,
+        });
+        if (!("section" in firstStabilityPage) || firstStabilityPage.next_cursor === null) {
+          throw new Error("expected the empty snapshot to continue to its next section");
+        }
+        await store.addQuest({
+          repo: "convex-pagination",
+          area: "store",
+          kind: "bug",
+          title: "Concurrent snapshot write",
+          description: "Changes the event high-water mark between pages",
+          opened_by: "contract/tester",
+          guild: null,
+          assignee: null,
+          status: "open",
+          verdict: null,
+          verdict_notes: null,
+          priority: 2,
+          pr: null,
+          predicted_files: [],
+          reopen_count: 0,
+          lease_expires_at: null,
+          backfill: false,
+        });
+        await expect(
+          clients.http.query(convexApi.exportAll, {
+            auth_token: authToken,
+            client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+            cursor: firstStabilityPage.next_cursor,
+            lease_cutoff: stabilityCutoff,
+          }),
+        ).rejects.toThrow("CONVEX_SNAPSHOT_CHANGED");
+
+        await store.replaceAll(expected);
+        await expect(
+          clients.http.mutation(convexApi.acceptQuestAndExport, {
+            auth_token: authToken,
+            client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+            input: { id: 1, owner: "contract/tester", session_guild: null },
+          }),
+        ).rejects.toThrow("CONVEX_MONOLITHIC_DUMP_UNSUPPORTED");
+        expect((await store.getQuest(1))?.status).toBe("open");
+        expect((await store.exportAll()).events).toHaveLength(8_193);
+        expect((await store.readFederatedFullSnapshot()).dump.events).toHaveLength(8_193);
+        expect((await store.readQuestDetail(1)).events).toHaveLength(2_731);
+
+        const pageCutoff = await store.serverTime();
+        let page = await clients.http.query(convexApi.exportAll, {
+          auth_token: authToken,
+          client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+          lease_cutoff: pageCutoff,
+        });
+        while ("section" in page && page.section !== "events" && page.next_cursor !== null) {
+          page = await clients.http.query(convexApi.exportAll, {
+            auth_token: authToken,
+            client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+            cursor: page.next_cursor,
+            lease_cutoff: pageCutoff,
+          });
+        }
+        if (!("section" in page) || page.section !== "events") {
+          throw new Error("expected the paginated export to reach its events section");
+        }
+        expect(page.items.length).toBeLessThan(12);
+        expect(page.next_cursor).not.toBeNull();
+        const preRestoreCursor = page.next_cursor;
+        if (preRestoreCursor === null) {
+          throw new Error("expected an in-flight cursor before replacing the store");
+        }
+
+        const backupPath = join(directory, "large.json");
+        const backup = new ConvexBackupDatabase(join(directory, "live.json"), store);
+        expect((await backup.createSnapshot(backupPath)).dump.events).toHaveLength(8_193);
+        await store.replaceAll(emptyDump);
+        await expect(
+          clients.http.query(convexApi.exportAll, {
+            auth_token: authToken,
+            client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+            cursor: preRestoreCursor,
+            lease_cutoff: pageCutoff,
+          }),
+        ).rejects.toThrow("CONVEX_SNAPSHOT_CHANGED");
+        const restore = await backup.restoreSnapshot(backupPath, "large-round-trip");
+        await restore.activate();
+        await restore.commit();
+        expect((await store.exportAll()).events).toHaveLength(8_193);
+
+        const rollbackSource = await store.exportAllWithCutoff();
+        rollbackToken = await store.beginRestore(
+          rollbackSource.dump,
+          rollbackSource.lease_cutoff,
+          "full-backup",
+          rollbackSource.event_high_water,
+        );
+        await store.activateRestore(rollbackToken, expected);
+        await store.rollbackRestore(rollbackToken);
+        rollbackToken = undefined;
+        expect((await store.exportAll()).events).toHaveLength(8_193);
+      } finally {
+        if (rollbackToken !== undefined) {
+          await store.rollbackRestore(rollbackToken).catch(() => undefined);
+          await store.releaseRestore(rollbackToken).catch(() => undefined);
+        }
+        await store.replaceAll(emptyDump).catch(() => undefined);
+        await rm(directory, { force: true, recursive: true });
+        await closeConvexClientPair(clients);
+      }
+    },
+    120_000,
   );
 }

@@ -57,7 +57,6 @@ export {
   type AddQuestResult,
   acceptLifecycleQuest,
   acceptLifecycleQuestWithDetail,
-  acceptLifecycleQuestWithSnapshot,
   addLifecycleQuest,
   type DuplicateCandidate,
   type EvidenceAttachmentRequest,

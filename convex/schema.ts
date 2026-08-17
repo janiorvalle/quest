@@ -105,12 +105,17 @@ export default defineSchema({
     .index("by_display_id", ["id"])
     .index("by_repo", ["repo"])
     .index("by_status", ["status"]),
-  evidence: defineTable(evidenceFields).index("by_quest_id", ["quest_id"]),
+  evidence: defineTable(evidenceFields)
+    .index("by_display_id", ["id"])
+    .index("by_quest_id", ["quest_id"]),
   chains: defineTable(chainFields)
+    .index("by_link", ["quest_id", "target_id", "type"])
     .index("by_quest_id", ["quest_id"])
     .index("by_target_id", ["target_id"]),
   members: defineTable(memberFields).index("by_name", ["name"]).index("by_status", ["status"]),
-  events: defineTable(eventFields).index("by_quest_id", ["quest_id"]),
+  events: defineTable(eventFields)
+    .index("by_display_id", ["id"])
+    .index("by_quest_id", ["quest_id"]),
   blobs: defineTable({
     sha256: v.string(),
     storage_id: v.id("_storage"),
@@ -128,6 +133,16 @@ export default defineSchema({
     activated: v.boolean(),
     replacement_hash: v.union(v.string(), v.null()),
     committed: v.optional(v.boolean()),
+    commit_phase: v.optional(v.union(v.literal("deleting"), v.literal("copying"))),
+    sequence_floor_quests: v.optional(v.number()),
+    sequence_floor_evidence: v.optional(v.number()),
+    sequence_floor_events: v.optional(v.number()),
+    sequence_floor_snapshot_generation: v.optional(v.number()),
+    replacement_high_water_quests: v.optional(v.number()),
+    replacement_high_water_evidence: v.optional(v.number()),
+    replacement_high_water_events: v.optional(v.number()),
+    expected_event_high_water: v.optional(v.number()),
+    committed_event_high_water: v.optional(v.number()),
   }).index("by_token", ["token"]),
   migration_fences: defineTable({
     repo: v.string(),
@@ -139,17 +154,54 @@ export default defineSchema({
     recovery_cutoff: v.optional(v.string()),
     unfenced: v.optional(v.boolean()),
     recovery_restore_token: v.optional(v.string()),
+    recovery_event_high_water: v.optional(v.number()),
+    recovery_repository_revision: v.optional(v.number()),
   }).index("by_repo", ["repo"]),
-  restore_staged_quests: defineTable({ token: v.string(), ...questFields }).index("by_token", [
-    "token",
-  ]),
-  restore_staged_evidence: defineTable({ token: v.string(), ...evidenceFields }).index("by_token", [
-    "token",
-  ]),
-  restore_staged_chains: defineTable({ token: v.string(), ...chainFields }).index("by_token", [
-    "token",
-  ]),
-  restore_staged_events: defineTable({ token: v.string(), ...eventFields }).index("by_token", [
-    "token",
-  ]),
+  repository_revisions: defineTable({
+    repo: v.string(),
+    value: v.number(),
+  }).index("by_repo", ["repo"]),
+  restore_staged_quests: defineTable({
+    token: v.string(),
+    page_index: v.optional(v.number()),
+    ...questFields,
+  })
+    .index("by_token", ["token"])
+    .index("by_token_and_id", ["token", "id"]),
+  restore_staged_evidence: defineTable({
+    token: v.string(),
+    page_index: v.optional(v.number()),
+    ...evidenceFields,
+  })
+    .index("by_token", ["token"])
+    .index("by_token_and_id", ["token", "id"]),
+  restore_staged_chains: defineTable({
+    token: v.string(),
+    page_index: v.optional(v.number()),
+    ...chainFields,
+  })
+    .index("by_token", ["token"])
+    .index("by_token_and_link", ["token", "quest_id", "target_id", "type"]),
+  restore_staged_events: defineTable({
+    token: v.string(),
+    page_index: v.optional(v.number()),
+    ...eventFields,
+  })
+    .index("by_token", ["token"])
+    .index("by_token_and_id", ["token", "id"]),
+  restore_staged_pages: defineTable({
+    token: v.string(),
+    page_index: v.number(),
+    section: v.union(
+      v.literal("quests"),
+      v.literal("evidence"),
+      v.literal("chains"),
+      v.literal("events"),
+    ),
+    item_count: v.number(),
+    page_hash: v.string(),
+    high_water: v.number(),
+  })
+    .index("by_token", ["token"])
+    .index("by_token_and_page", ["token", "page_index"]),
 });

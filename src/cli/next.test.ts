@@ -642,7 +642,6 @@ describe("next CLI behavior", () => {
           if (
             property !== "exportAll" &&
             property !== "acceptQuestAndDetail" &&
-            property !== "acceptQuestAndExport" &&
             property !== "readQuestDetail"
           ) {
             const value = Reflect.get(target, property, receiver);
@@ -668,11 +667,7 @@ describe("next CLI behavior", () => {
             };
           }
           return async () => {
-            throw new Error(
-              property === "acceptQuestAndExport"
-                ? "claim briefing must not request a full export"
-                : "claim briefing must not perform a follow-up detail read",
-            );
+            throw new Error("claim briefing must not perform a follow-up detail read");
           };
         },
       });
