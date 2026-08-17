@@ -1,5 +1,5 @@
-export const QUEST_CLIENT_PROTOCOL = 1;
-export const MINIMUM_QUEST_CLIENT_PROTOCOL = 1;
+export const QUEST_CLIENT_PROTOCOL = 2;
+export const MINIMUM_QUEST_CLIENT_PROTOCOL = 2;
 
 export type ClientProtocolInput = {
   readonly client_protocol?: number;

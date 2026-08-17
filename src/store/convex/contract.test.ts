@@ -402,4 +402,143 @@ if (deployment === undefined || authToken === undefined) {
       }
     },
   );
+
+  test.serial(
+    "Convex paginated dumps round-trip more than 8192 events by count and value size",
+    async () => {
+      const clients = createConvexClientPair(deployment, { authToken });
+      const store = new ConvexStore(deployment, { clients });
+      const directory = await mkdtemp(join(tmpdir(), "quest-convex-pagination-"));
+      const timestamp = "2026-08-17T00:00:00.000Z";
+      const quests: QuestDump["quests"] = Array.from({ length: 3 }, (_, index) => ({
+        id: index + 1,
+        repo: "convex-pagination",
+        area: "store",
+        kind: "bug",
+        title: `Large history ${index + 1}`,
+        description: "Convex pagination contract fixture",
+        opened_by: "contract/tester",
+        guild: null,
+        assignee: null,
+        status: "open",
+        verdict: null,
+        verdict_notes: null,
+        priority: 2,
+        pr: null,
+        predicted_files: [],
+        reopen_count: 0,
+        lease_expires_at: null,
+        created_at: timestamp,
+        updated_at: timestamp,
+      }));
+      const events: QuestDump["events"] = Array.from({ length: 8_193 }, (_, index) => ({
+        id: index + 1,
+        quest_id: (index % quests.length) + 1,
+        at: timestamp,
+        actor: "contract/tester",
+        action: "update",
+        detail: {
+          sequence: index + 1,
+          ...(index < 12 ? { payload: "v".repeat(64_000) } : {}),
+        },
+      }));
+      const expected: QuestDump = {
+        schema_version: STORE_SCHEMA_VERSION,
+        quests,
+        evidence: [],
+        chains: [],
+        events,
+      };
+      try {
+        await store.replaceAll(emptyDump);
+        const initial = await store.exportAllWithCutoff();
+        const legacyToken = await store.beginRestore(initial.dump, initial.lease_cutoff);
+        await expect(
+          clients.http.mutation(convexApi.activateRestore, {
+            auth_token: authToken,
+            client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+            token: legacyToken,
+            dump: emptyDump,
+          }),
+        ).rejects.toThrow("CONVEX_MONOLITHIC_DUMP_UNSUPPORTED");
+        await store.rollbackRestore(legacyToken);
+
+        const stabilityCutoff = await store.serverTime();
+        const firstStabilityPage = await clients.http.query(convexApi.exportAll, {
+          auth_token: authToken,
+          client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+          lease_cutoff: stabilityCutoff,
+        });
+        if (!("section" in firstStabilityPage) || firstStabilityPage.next_cursor === null) {
+          throw new Error("expected the empty snapshot to continue to its next section");
+        }
+        await store.addQuest({
+          repo: "convex-pagination",
+          area: "store",
+          kind: "bug",
+          title: "Concurrent snapshot write",
+          description: "Changes the event high-water mark between pages",
+          opened_by: "contract/tester",
+          guild: null,
+          assignee: null,
+          status: "open",
+          verdict: null,
+          verdict_notes: null,
+          priority: 2,
+          pr: null,
+          predicted_files: [],
+          reopen_count: 0,
+          lease_expires_at: null,
+          backfill: false,
+        });
+        await expect(
+          clients.http.query(convexApi.exportAll, {
+            auth_token: authToken,
+            client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+            cursor: firstStabilityPage.next_cursor,
+            lease_cutoff: stabilityCutoff,
+          }),
+        ).rejects.toThrow("CONVEX_SNAPSHOT_CHANGED");
+
+        await store.replaceAll(expected);
+        expect((await store.exportAll()).events).toHaveLength(8_193);
+        expect((await store.readFederatedFullSnapshot()).dump.events).toHaveLength(8_193);
+        expect((await store.readQuestDetail(1)).events).toHaveLength(2_731);
+
+        const pageCutoff = await store.serverTime();
+        let page = await clients.http.query(convexApi.exportAll, {
+          auth_token: authToken,
+          client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+          lease_cutoff: pageCutoff,
+        });
+        while ("section" in page && page.section !== "events" && page.next_cursor !== null) {
+          page = await clients.http.query(convexApi.exportAll, {
+            auth_token: authToken,
+            client_protocol: MINIMUM_QUEST_CLIENT_PROTOCOL,
+            cursor: page.next_cursor,
+            lease_cutoff: pageCutoff,
+          });
+        }
+        if (!("section" in page) || page.section !== "events") {
+          throw new Error("expected the paginated export to reach its events section");
+        }
+        expect(page.items.length).toBeLessThan(12);
+        expect(page.next_cursor).not.toBeNull();
+
+        const backupPath = join(directory, "large.json");
+        const backup = new ConvexBackupDatabase(join(directory, "live.json"), store);
+        expect((await backup.createSnapshot(backupPath)).dump.events).toHaveLength(8_193);
+        await store.replaceAll(emptyDump);
+        const restore = await backup.restoreSnapshot(backupPath, "large-round-trip");
+        await restore.activate();
+        await restore.commit();
+        expect((await store.exportAll()).events).toHaveLength(8_193);
+      } finally {
+        await store.replaceAll(emptyDump).catch(() => undefined);
+        await rm(directory, { force: true, recursive: true });
+        await closeConvexClientPair(clients);
+      }
+    },
+    120_000,
+  );
 }

@@ -54,6 +54,12 @@ import {
   convexClientProtocolInput,
   createConvexClientPair,
 } from "./client";
+import {
+  assembleConvexDump,
+  type ConvexDumpPage,
+  createConvexRestorePages,
+  parseConvexDumpPage,
+} from "./pagination";
 
 interface RealtimeSubscription {
   unsubscribe(): void;
@@ -110,6 +116,33 @@ function testableMutation<T>(
     input,
     ...(testFailure ? { test_failure: true } : {}),
   };
+}
+
+async function snapshotFingerprint(snapshot: QuestDump): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(stableSerialize(snapshot)),
+  );
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function assembleDumpPages(
+  firstPage: unknown,
+  readNext: (cursor: string) => Promise<unknown>,
+): Promise<QuestDump> {
+  const legacyDump = questDumpSchema.safeParse(firstPage);
+  if (legacyDump.success) {
+    return legacyDump.data;
+  }
+  const pages: ConvexDumpPage[] = [];
+  let page = parseConvexDumpPage(firstPage);
+  while (true) {
+    pages.push(page);
+    if (page.next_cursor === null) {
+      return assembleConvexDump(pages);
+    }
+    page = parseConvexDumpPage(await readNext(page.next_cursor));
+  }
 }
 
 function isMissingFencedRepositoriesQuery(error: unknown): boolean {
@@ -272,7 +305,7 @@ export class ConvexStore implements QuestStore {
 
   async acceptQuestAndExport(input: AcceptQuestInput): Promise<PortAcceptQuestAndExportResult> {
     const parsed = acceptQuestInputSchema.parse(input);
-    return this.#clients.http.mutation(
+    const result = await this.#clients.http.mutation(
       convexApi.acceptQuestAndExport,
       testableMutation(
         this.#clients,
@@ -280,6 +313,23 @@ export class ConvexStore implements QuestStore {
         this.#consumeEventFailure(),
       ),
     );
+    if ("schema_version" in result.snapshot) {
+      return { acceptance: result.acceptance, snapshot: questDumpSchema.parse(result.snapshot) };
+    }
+    const snapshotCursor = result.snapshot;
+    const firstPage = await this.#clients.http.query(convexApi.exportAll, {
+      ...authTokenInput(this.#clients),
+      cursor: snapshotCursor.cursor,
+      lease_cutoff: snapshotCursor.lease_cutoff,
+    });
+    const snapshot = await assembleDumpPages(firstPage, (cursor) =>
+      this.#clients.http.query(convexApi.exportAll, {
+        ...authTokenInput(this.#clients),
+        cursor,
+        lease_cutoff: snapshotCursor.lease_cutoff,
+      }),
+    );
+    return { acceptance: result.acceptance, snapshot };
   }
 
   async touchQuest(input: TouchQuestInput): Promise<Quest> {
@@ -423,9 +473,23 @@ export class ConvexStore implements QuestStore {
 
   async readFederatedFullSnapshot(): Promise<FederatedFullSnapshot> {
     try {
-      return await this.#clients.http.query(convexApi.federatedSnapshot, {
+      const first = await this.#clients.http.query(convexApi.federatedSnapshot, {
         ...authTokenInput(this.#clients),
       });
+      if ("dump" in first) {
+        return {
+          dump: questDumpSchema.parse(first.dump),
+          fencedRepositories: [...first.fencedRepositories],
+        };
+      }
+      const fencedRepositories = [...first.fencedRepositories];
+      const dump = await assembleDumpPages(first, (cursor) =>
+        this.#clients.http.query(convexApi.federatedSnapshot, {
+          ...authTokenInput(this.#clients),
+          cursor,
+        }),
+      );
+      return { dump, fencedRepositories };
     } catch (error: unknown) {
       if (isMissingFederatedSnapshotQuery(error)) {
         throw new Error(
@@ -530,7 +594,17 @@ export class ConvexStore implements QuestStore {
         : this.#clients.realtime.onUpdate(
             convexApi.federatedSnapshot,
             { ...authTokenInput(this.#clients) },
-            receiveSnapshot,
+            (snapshot) => {
+              if ("dump" in snapshot) {
+                receiveSnapshot(snapshot);
+              } else {
+                receiveError(
+                  new Error(
+                    "[FEDERATED_FULL_SNAPSHOT_WATCH_UNAVAILABLE] paginated full snapshots cannot be watched; deploy a backend with quest:federatedListSnapshot and retry",
+                  ),
+                );
+              }
+            },
             receiveError,
           );
     return {
@@ -599,10 +673,15 @@ export class ConvexStore implements QuestStore {
   }
 
   async exportAllRaw(): Promise<QuestDump> {
-    const dump = await this.#clients.http.query(convexApi.rawExportAll, {
+    const firstPage = await this.#clients.http.query(convexApi.rawExportAll, {
       ...authTokenInput(this.#clients),
     });
-    return questDumpSchema.parse(dump);
+    return assembleDumpPages(firstPage, (cursor) =>
+      this.#clients.http.query(convexApi.rawExportAll, {
+        ...authTokenInput(this.#clients),
+        cursor,
+      }),
+    );
   }
 
   async serverTime(): Promise<string> {
@@ -611,11 +690,17 @@ export class ConvexStore implements QuestStore {
 
   async exportAllAt(leaseCutoff: string): Promise<QuestDump> {
     const parsedCutoff = questSchema.shape.updated_at.parse(leaseCutoff);
-    const dump = await this.#clients.http.query(convexApi.exportAll, {
+    const firstPage = await this.#clients.http.query(convexApi.exportAll, {
       ...authTokenInput(this.#clients),
       lease_cutoff: parsedCutoff,
     });
-    return questDumpSchema.parse(dump);
+    return assembleDumpPages(firstPage, (cursor) =>
+      this.#clients.http.query(convexApi.exportAll, {
+        ...authTokenInput(this.#clients),
+        cursor,
+        lease_cutoff: parsedCutoff,
+      }),
+    );
   }
 
   async exportAllWithCutoff(): Promise<ConvexExportSnapshot> {
@@ -723,10 +808,20 @@ export class ConvexStore implements QuestStore {
 
   async replaceAll(dump: QuestDump): Promise<void> {
     const parsed = questDumpSchema.parse(dump);
-    await this.#clients.http.mutation(convexApi.replaceAll, {
-      ...authTokenInput(this.#clients),
-      dump: parsed,
-    });
+    const current = await this.exportAllWithCutoff();
+    const token = await this.beginRestore(current.dump, current.lease_cutoff, "migration");
+    let committed = false;
+    try {
+      await this.activateRestore(token, parsed);
+      await this.commitRestore(token);
+      committed = true;
+    } finally {
+      if (committed) {
+        await this.releaseRestore(token);
+      } else {
+        await this.rollbackRestore(token).catch(() => undefined);
+      }
+    }
   }
 
   async recoverMigrationFence(repository: string): Promise<boolean> {
@@ -910,13 +1005,19 @@ export class ConvexStore implements QuestStore {
     const token = crypto.randomUUID();
     const parsedExpected = questDumpSchema.parse(expected);
     const parsedCutoff = questSchema.shape.updated_at.parse(leaseCutoff);
-    await this.#clients.http.mutation(convexApi.beginRestore, {
-      ...authTokenInput(this.#clients),
-      token,
-      expected_snapshot: JSON.stringify(parsedExpected),
-      lease_cutoff: parsedCutoff,
-      ...(restoreKind === "full-backup" ? { restore_kind: "full-backup" } : {}),
-    });
+    const expectedHash = await snapshotFingerprint(parsedExpected);
+    while (true) {
+      const result = await this.#clients.http.mutation(convexApi.beginRestore, {
+        ...authTokenInput(this.#clients),
+        token,
+        expected_hash: expectedHash,
+        lease_cutoff: parsedCutoff,
+        ...(restoreKind === "full-backup" ? { restore_kind: "full-backup" } : {}),
+      });
+      if (result?.status !== "cleanup") {
+        break;
+      }
+    }
     return token;
   }
 
@@ -927,50 +1028,81 @@ export class ConvexStore implements QuestStore {
     });
   }
 
-  restoreStatus(
+  async restoreStatus(
     token: string,
   ): Promise<
     | { readonly status: "active" | "missing" }
     | { readonly status: "committed"; readonly dump: QuestDump }
   > {
-    return this.#clients.http.query(convexApi.restoreStatus, {
+    const status = await this.#clients.http.query(convexApi.restoreStatus, {
       ...authTokenInput(this.#clients),
       token,
     });
+    if (status.status !== "committed") {
+      return status;
+    }
+    if ("dump" in status) {
+      return { status: "committed", dump: questDumpSchema.parse(status.dump) };
+    }
+    return { status: "committed", dump: await this.exportAllAt(status.lease_cutoff) };
   }
 
   async activateRestore(token: string, replacement: QuestDump): Promise<QuestDump> {
-    const activated = await this.#clients.http.mutation(convexApi.activateRestore, {
+    const parsed = questDumpSchema.parse(replacement);
+    for (const page of createConvexRestorePages(parsed)) {
+      await this.#clients.http.mutation(convexApi.uploadRestorePage, {
+        ...authTokenInput(this.#clients),
+        token,
+        page,
+      });
+    }
+    await this.#clients.http.mutation(convexApi.activateRestore, {
       ...authTokenInput(this.#clients),
       token,
-      dump: questDumpSchema.parse(replacement),
+      replacement_hash: await snapshotFingerprint(parsed),
     });
-    return questDumpSchema.parse(activated);
+    return parsed;
   }
 
   async commitRestore(token: string): Promise<QuestDump> {
-    const committed = await this.#clients.http.mutation(convexApi.commitRestore, {
-      ...authTokenInput(this.#clients),
-      token,
-    });
-    if (committed === null) {
-      return this.exportAll();
+    while (true) {
+      const committed = await this.#clients.http.mutation(convexApi.commitRestore, {
+        ...authTokenInput(this.#clients),
+        token,
+      });
+      if (committed === null) {
+        return this.exportAll();
+      }
+      if ("schema_version" in committed) {
+        return questDumpSchema.parse(committed);
+      }
+      if (committed.status === "pending") {
+        continue;
+      }
+      return this.exportAllAt(committed.lease_cutoff);
     }
-    return questDumpSchema.parse(committed);
   }
 
   async releaseRestore(token: string): Promise<void> {
-    await this.#clients.http.mutation(convexApi.releaseRestore, {
-      ...authTokenInput(this.#clients),
-      token,
-    });
+    while (
+      (await this.#clients.http.mutation(convexApi.releaseRestore, {
+        ...authTokenInput(this.#clients),
+        token,
+      })) === false
+    ) {
+      // Each mutation stays below Convex's transaction read/write limits.
+    }
   }
 
   async rollbackRestore(token: string): Promise<void> {
-    await this.#clients.http.mutation(convexApi.rollbackRestore, {
-      ...authTokenInput(this.#clients),
-      token,
-    });
+    while (
+      (await this.#clients.http.mutation(convexApi.rollbackRestore, {
+        ...authTokenInput(this.#clients),
+        token,
+      })) === false
+    ) {
+      // Each mutation stays below Convex's transaction read/write limits.
+    }
   }
 
   async close(): Promise<void> {

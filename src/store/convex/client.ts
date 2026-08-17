@@ -43,6 +43,7 @@ import type {
   FederatedReadSnapshot,
   QuestDetailSnapshot,
 } from "../port";
+import type { ConvexDumpPage, ConvexRestorePage } from "./pagination";
 import { type ClientProtocolInput, clientProtocolInput } from "./protocol";
 
 type TestableMutation<T> = {
@@ -71,6 +72,27 @@ export interface ConvexReadyStatusMigrationResult {
   readonly unchanged: number;
 }
 
+export interface ConvexAcceptQuestAndExportResult {
+  readonly acceptance: AcceptResult;
+  readonly snapshot: {
+    readonly cursor: string;
+    readonly lease_cutoff: string;
+  };
+}
+
+export type ConvexRestoreStatus =
+  | { readonly status: "active" | "missing" }
+  | { readonly status: "committed"; readonly lease_cutoff: string };
+
+export interface ConvexCommitRestoreResult {
+  readonly status: "committed";
+  readonly lease_cutoff: string;
+}
+
+export interface ConvexPendingRestoreResult {
+  readonly status: "pending";
+}
+
 export const convexApi = {
   schemaVersion: makeFunctionReference<"query", ClientProtocolInput, number>("quest:schemaVersion"),
   serverTime: makeFunctionReference<"query", ClientProtocolInput, string>("quest:serverTime"),
@@ -95,7 +117,7 @@ export const convexApi = {
   acceptQuestAndExport: makeFunctionReference<
     "mutation",
     AuthenticatedMutation<AcceptQuestInput>,
-    AcceptQuestAndExportResult
+    ConvexAcceptQuestAndExportResult | AcceptQuestAndExportResult
   >("quest:acceptQuestAndExport"),
   touchQuest: makeFunctionReference<"mutation", AuthenticatedMutation<TouchQuestInput>, Quest>(
     "quest:touchQuest",
@@ -158,9 +180,11 @@ export const convexApi = {
     AuthTokenInput & { readonly repository?: string },
     FederatedReadSnapshot
   >("quest:federatedListSnapshot"),
-  federatedSnapshot: makeFunctionReference<"query", AuthTokenInput, FederatedFullSnapshot>(
-    "quest:federatedSnapshot",
-  ),
+  federatedSnapshot: makeFunctionReference<
+    "query",
+    AuthTokenInput & { readonly cursor?: string },
+    (ConvexDumpPage & { readonly fencedRepositories: readonly string[] }) | FederatedFullSnapshot
+  >("quest:federatedSnapshot"),
   events: makeFunctionReference<"query", AuthTokenInput & { readonly quest_id: number }, Event[]>(
     "quest:events",
   ),
@@ -171,10 +195,14 @@ export const convexApi = {
   >("quest:queryEvents"),
   exportAll: makeFunctionReference<
     "query",
-    AuthTokenInput & { readonly lease_cutoff: string },
-    QuestDump
+    AuthTokenInput & { readonly cursor?: string; readonly lease_cutoff: string },
+    ConvexDumpPage | QuestDump
   >("quest:exportAll"),
-  rawExportAll: makeFunctionReference<"query", AuthTokenInput, QuestDump>("quest:rawExportAll"),
+  rawExportAll: makeFunctionReference<
+    "query",
+    AuthTokenInput & { readonly cursor?: string },
+    ConvexDumpPage | QuestDump
+  >("quest:rawExportAll"),
   replaceAll: makeFunctionReference<
     "mutation",
     AuthTokenInput & { readonly dump: QuestDump },
@@ -184,11 +212,12 @@ export const convexApi = {
     "mutation",
     AuthTokenInput & {
       readonly token: string;
-      readonly expected_snapshot: string;
+      readonly expected_hash?: string;
+      readonly expected_snapshot?: string;
       readonly lease_cutoff: string;
       readonly restore_kind?: "full-backup";
     },
-    null
+    { readonly status: "cleanup" | "ready" } | null
   >("quest:beginRestore"),
   renewRestore: makeFunctionReference<
     "mutation",
@@ -198,16 +227,24 @@ export const convexApi = {
   restoreStatus: makeFunctionReference<
     "query",
     AuthTokenInput & { readonly token: string },
-    | { readonly status: "active" | "missing" }
-    | { readonly status: "committed"; readonly dump: QuestDump }
+    ConvexRestoreStatus | { readonly status: "committed"; readonly dump: QuestDump }
   >("quest:restoreStatus"),
+  uploadRestorePage: makeFunctionReference<
+    "mutation",
+    AuthTokenInput & {
+      readonly token: string;
+      readonly page: ConvexRestorePage;
+    },
+    null
+  >("quest:uploadRestorePage"),
   activateRestore: makeFunctionReference<
     "mutation",
     AuthTokenInput & {
       readonly token: string;
-      readonly dump: QuestDump;
+      readonly replacement_hash?: string;
+      readonly dump?: QuestDump;
     },
-    QuestDump
+    QuestDump | null
   >("quest:activateRestore"),
   fenceRepository: makeFunctionReference<
     "mutation",
@@ -236,17 +273,17 @@ export const convexApi = {
   commitRestore: makeFunctionReference<
     "mutation",
     AuthTokenInput & { readonly token: string },
-    QuestDump | null
+    ConvexCommitRestoreResult | ConvexPendingRestoreResult | QuestDump | null
   >("quest:commitRestore"),
   releaseRestore: makeFunctionReference<
     "mutation",
     AuthTokenInput & { readonly token: string },
-    null
+    boolean | null
   >("quest:releaseRestore"),
   rollbackRestore: makeFunctionReference<
     "mutation",
     AuthTokenInput & { readonly token: string },
-    null
+    boolean | null
   >("quest:rollbackRestore"),
   generateBlobUploadUrl: makeFunctionReference<"mutation", AuthTokenInput, string>(
     "blob:generateUploadUrl",
