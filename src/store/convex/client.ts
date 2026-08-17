@@ -42,7 +42,7 @@ import type {
   FederatedReadSnapshot,
   QuestDetailSnapshot,
 } from "../port";
-import type { ConvexDumpPage, ConvexRestorePage } from "./pagination";
+import type { ConvexDumpPage, ConvexEventPage, ConvexRestorePage } from "./pagination";
 import { type ClientProtocolInput, clientProtocolInput } from "./protocol";
 
 type TestableMutation<T> = {
@@ -191,8 +191,12 @@ export const convexApi = {
   ),
   queryEvents: makeFunctionReference<
     "query",
-    AuthTokenInput & { readonly filter: EventFilter; readonly lease_cutoff: string },
-    Event[]
+    AuthTokenInput & {
+      readonly cursor?: string | null;
+      readonly filter: EventFilter;
+      readonly lease_cutoff: string;
+    },
+    Event[] | ConvexEventPage
   >("quest:queryEvents"),
   exportAll: makeFunctionReference<
     "query",

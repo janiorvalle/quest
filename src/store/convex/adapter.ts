@@ -11,6 +11,7 @@ import {
   type EventFilter,
   type Evidence,
   eventFilterSchema,
+  eventSchema,
   federatedListDumpSchema,
   type NewEvidence,
   type NewQuest,
@@ -61,6 +62,7 @@ import {
   canonicalizeQuestDump,
   createConvexRestorePages,
   parseConvexDumpPage,
+  parseConvexEventPage,
 } from "./pagination";
 
 interface RealtimeSubscription {
@@ -69,6 +71,7 @@ interface RealtimeSubscription {
 
 const RESTORE_WRITE_RETRY_LIMIT = 8;
 const RESTORE_WRITE_RETRY_START_MS = 125;
+const EVENT_QUERY_SNAPSHOT_RETRY_LIMIT = 2;
 
 function realtimeWatchError(error: unknown): Error {
   return error instanceof Error
@@ -222,6 +225,20 @@ async function assembleDumpPages(
   }
 }
 
+async function assembleEventPages(
+  readPage: (cursor: string | null) => Promise<unknown>,
+): Promise<Event[]> {
+  const events: Event[] = [];
+  let page = parseConvexEventPage(await readPage(null));
+  while (true) {
+    events.push(...page.items);
+    if (page.next_cursor === null) {
+      return events;
+    }
+    page = parseConvexEventPage(await readPage(page.next_cursor));
+  }
+}
+
 function isLegacyRestoreValidatorError(error: unknown): boolean {
   return (
     error instanceof Error &&
@@ -229,6 +246,19 @@ function isLegacyRestoreValidatorError(error: unknown): boolean {
       error.message,
     )
   );
+}
+
+function isLegacyEventQueryValidatorError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /cursor.*(?:extra|unexpected|validator|argument)|(?:extra|unexpected|validator|argument).*cursor/i.test(
+      error.message,
+    )
+  );
+}
+
+function isEventQuerySnapshotChanged(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("CONVEX_SNAPSHOT_CHANGED");
 }
 
 function isMonolithicRestoreUnsupported(error: unknown): boolean {
@@ -734,11 +764,32 @@ export class ConvexStore implements QuestStore {
   async queryEvents(filter: EventFilter): Promise<Event[]> {
     const parsed = eventFilterSchema.parse(filter);
     const leaseCutoff = await this.serverTime();
-    return this.#clients.http.query(convexApi.queryEvents, {
+    const input = {
       ...authTokenInput(this.#clients),
       filter: parsed,
       lease_cutoff: leaseCutoff,
-    });
+    };
+    for (let attempt = 0; attempt <= EVENT_QUERY_SNAPSHOT_RETRY_LIMIT; attempt += 1) {
+      try {
+        return await assembleEventPages((cursor) =>
+          this.#clients.http.query(convexApi.queryEvents, {
+            ...input,
+            cursor,
+          }),
+        );
+      } catch (error: unknown) {
+        if (isLegacyEventQueryValidatorError(error)) {
+          return eventSchema
+            .array()
+            .parse(await this.#clients.http.query(convexApi.queryEvents, input));
+        }
+        if (isEventQuerySnapshotChanged(error) && attempt < EVENT_QUERY_SNAPSHOT_RETRY_LIMIT) {
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error("unreachable Convex event query retry state");
   }
 
   async exportAll(): Promise<QuestDump> {

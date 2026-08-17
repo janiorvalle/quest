@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { newQuestSchema, type QuestDump, questSchema, STORE_SCHEMA_VERSION } from "../../schema";
+import {
+  type Event,
+  newQuestSchema,
+  type QuestDump,
+  questSchema,
+  STORE_SCHEMA_VERSION,
+} from "../../schema";
 import type { FederatedReadSnapshot } from "../port";
 import { ConvexStore } from "./adapter";
 import { type ConvexClientPair, convexApi } from "./client";
@@ -414,6 +420,96 @@ describe("Convex atomic claim detail", () => {
       },
     });
     expect(mutations).toEqual([convexApi.acceptQuestAndDetail, convexApi.acceptQuestAndExport]);
+  });
+});
+
+describe("Convex event query pagination", () => {
+  const event = (id: number): Event => ({
+    id,
+    quest_id: 1,
+    at: timestamp,
+    actor: "pagination/tester",
+    action: "update",
+    detail: { id },
+  });
+
+  test("assembles every event page behind the store contract", async () => {
+    const queryArgs: Readonly<Record<string, unknown>>[] = [];
+    const clients = {
+      http: {
+        query: async (query: unknown, args: Readonly<Record<string, unknown>>) => {
+          if (query === convexApi.serverTime) {
+            return timestamp;
+          }
+          queryArgs.push(args);
+          return args["cursor"] === null
+            ? { items: [event(1)], next_cursor: "page-2" }
+            : { items: [event(2)], next_cursor: null };
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.queryEvents({ after_id: 0 })).resolves.toEqual([event(1), event(2)]);
+    expect(queryArgs.map((args) => args["cursor"])).toEqual([null, "page-2"]);
+    expect(queryArgs.map((args) => args["filter"])).toEqual([{ after_id: 0 }, { after_id: 0 }]);
+  });
+
+  test("restarts from page one when a write invalidates the event snapshot", async () => {
+    const cursors: unknown[] = [];
+    let pageTwoAttempts = 0;
+    const clients = {
+      http: {
+        query: async (query: unknown, args: Readonly<Record<string, unknown>>) => {
+          if (query === convexApi.serverTime) {
+            return timestamp;
+          }
+          const cursor = args["cursor"];
+          cursors.push(cursor);
+          if (cursor === null) {
+            return { items: [event(1)], next_cursor: "page-2" };
+          }
+          pageTwoAttempts += 1;
+          if (pageTwoAttempts === 1) {
+            throw new Error(
+              "[CONVEX_SNAPSHOT_CHANGED] the Convex store changed while its paginated events were being read",
+            );
+          }
+          return { items: [event(2)], next_cursor: null };
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.queryEvents({ after_id: 0 })).resolves.toEqual([event(1), event(2)]);
+    expect(cursors).toEqual([null, "page-2", null, "page-2"]);
+  });
+
+  test("retries without a cursor when an older backend rejects paging", async () => {
+    const queryArgs: Readonly<Record<string, unknown>>[] = [];
+    const clients = {
+      http: {
+        query: async (query: unknown, args: Readonly<Record<string, unknown>>) => {
+          if (query === convexApi.serverTime) {
+            return timestamp;
+          }
+          queryArgs.push(args);
+          if ("cursor" in args) {
+            throw new Error(
+              "ArgumentValidationError: Object contains extra field cursor that is not in the validator",
+            );
+          }
+          return [event(1)];
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.queryEvents({ after_id: 0 })).resolves.toEqual([event(1)]);
+    expect(queryArgs.map((args) => args["cursor"])).toEqual([null, undefined]);
   });
 });
 
