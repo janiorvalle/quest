@@ -17,6 +17,7 @@ export {
   type ConvexCompatibilityProbeOptions,
   createConvexStoreCompatibilityProbe,
 } from "./compatibility";
+export type { ConvexListPage } from "./pagination";
 export {
   type ClientProtocolInput,
   clientProtocolInput,

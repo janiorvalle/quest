@@ -41,7 +41,6 @@ import {
   eventFilterSchema,
   eventSchema,
   evidenceSchema,
-  federatedListDumpSchema,
   type LaneConflictReference,
   type NewEvidence,
   newEvidenceSchema,
@@ -49,16 +48,12 @@ import {
   QUEST_INPUT_TOO_LARGE_CODE,
   type Quest,
   type QuestDump,
-  type QuestFilter,
-  type QuestScope,
-  type QuestStats,
   type QuestTransition,
   questDumpSchema,
   questFilterSchema,
   questInputTooLargeMessage,
   questSchema,
   questScopeSchema,
-  questStatsSchema,
   questTransitionSchema,
   type SignoffBatchInput,
   type SignoffBatchResult,
@@ -78,11 +73,15 @@ import {
   type ConvexDumpPage,
   type ConvexEventCursor,
   type ConvexEventPage,
+  type ConvexListCursor,
+  type ConvexListPage,
   type ConvexRestorePage,
   decodeConvexDumpCursor,
   decodeConvexEventCursor,
+  decodeConvexListCursor,
   encodeConvexDumpCursor,
   encodeConvexEventCursor,
+  encodeConvexListCursor,
   nextConvexDumpSection,
   parseConvexRestorePage,
 } from "../src/store/convex/pagination";
@@ -200,6 +199,8 @@ const RESTORE_LEASE_DURATION_MS = 10 * 60 * 1_000;
 const RESTORE_MUTATION_MAXIMUM_BYTES_READ = 2 * 1_024 * 1_024;
 const RESTORE_MUTATION_MAXIMUM_ROWS_READ = 256;
 const SNAPSHOT_GENERATION_COUNTER = "snapshot_generation";
+const FENCE_GENERATION_COUNTER = "fence_generation";
+type ConvexListMode = ConvexListCursor["mode"];
 
 async function nextDocumentId(
   ctx: MutationContext,
@@ -531,85 +532,6 @@ function applyTransitionForMutation(
   return applyDomainGuardForMutation(() => applyTransition(current, transition, timestamp));
 }
 
-function filterQuests(
-  quests: readonly Quest[],
-  chains: readonly Chain[],
-  filter: QuestFilter,
-): Quest[] {
-  const statusById = new Map(quests.map((quest) => [quest.id, quest.status]));
-  const blockedIds = new Set<number>();
-  if (filter.blocked !== undefined) {
-    for (const link of chains) {
-      if (link.type === "requires" && statusById.get(link.target_id) !== "complete") {
-        blockedIds.add(link.quest_id);
-      }
-    }
-  }
-  return quests.filter(
-    (quest) =>
-      (filter.repo === undefined || quest.repo === filter.repo) &&
-      (filter.status === undefined || quest.status === filter.status) &&
-      (filter.area === undefined || quest.area === filter.area) &&
-      (filter.kind === undefined || quest.kind === filter.kind) &&
-      (filter.assignee === undefined || quest.assignee === filter.assignee) &&
-      (filter.blocked === undefined || blockedIds.has(quest.id) === filter.blocked),
-  );
-}
-
-function buildStats(quests: readonly Quest[], scope: QuestScope): QuestStats {
-  const repositories = new Map<
-    string,
-    {
-      total: number;
-      statusCounts: Map<string, number>;
-      verdictCounts: Map<string, number>;
-      reopenCount: number;
-      assigneeLoad: Map<string, number>;
-    }
-  >();
-  for (const quest of quests) {
-    if (scope.repo !== null && quest.repo !== scope.repo) {
-      continue;
-    }
-    const aggregate = repositories.get(quest.repo) ?? {
-      total: 0,
-      statusCounts: new Map<string, number>(),
-      verdictCounts: new Map<string, number>(),
-      reopenCount: 0,
-      assigneeLoad: new Map<string, number>(),
-    };
-    aggregate.total += 1;
-    aggregate.statusCounts.set(quest.status, (aggregate.statusCounts.get(quest.status) ?? 0) + 1);
-    if (quest.verdict !== null) {
-      aggregate.verdictCounts.set(
-        quest.verdict,
-        (aggregate.verdictCounts.get(quest.verdict) ?? 0) + 1,
-      );
-    }
-    aggregate.reopenCount += quest.reopen_count;
-    if (quest.assignee !== null) {
-      aggregate.assigneeLoad.set(
-        quest.assignee,
-        (aggregate.assigneeLoad.get(quest.assignee) ?? 0) + 1,
-      );
-    }
-    repositories.set(quest.repo, aggregate);
-  }
-  const stats = {
-    repos: [...repositories.entries()]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([repo, aggregate]) => ({
-        repo,
-        total: aggregate.total,
-        status_counts: Object.fromEntries(aggregate.statusCounts),
-        verdict_counts: Object.fromEntries(aggregate.verdictCounts),
-        reopen_count: aggregate.reopenCount,
-        assignee_load: Object.fromEntries(aggregate.assigneeLoad),
-      })),
-  } satisfies QuestStats;
-  return questStatsSchema.parse(stats);
-}
-
 async function appendEvent(
   ctx: MutationContext,
   questId: number,
@@ -748,6 +670,26 @@ async function snapshotGeneration(ctx: QueryContext): Promise<number> {
     .withIndex("by_name", (query) => query.eq("name", SNAPSHOT_GENERATION_COUNTER))
     .unique();
   return counter?.value ?? eventSequenceHighWater(ctx);
+}
+
+async function fenceGeneration(ctx: QueryContext): Promise<number> {
+  const counter = await ctx.db
+    .query("counters")
+    .withIndex("by_name", (query) => query.eq("name", FENCE_GENERATION_COUNTER))
+    .unique();
+  return counter?.value ?? 0;
+}
+
+async function advanceFenceGeneration(ctx: MutationContext): Promise<void> {
+  const counter = await ctx.db
+    .query("counters")
+    .withIndex("by_name", (query) => query.eq("name", FENCE_GENERATION_COUNTER))
+    .unique();
+  if (counter === null) {
+    await ctx.db.insert("counters", { name: FENCE_GENERATION_COUNTER, value: 1 });
+  } else {
+    await ctx.db.patch(counter._id, { value: counter.value + 1 });
+  }
 }
 
 async function advanceSnapshotGeneration(
@@ -1047,40 +989,167 @@ async function readDumpPage(ctx: QueryContext, cursor: ConvexDumpCursor): Promis
   }
 }
 
-async function createFederatedListDump(
-  ctx: QueryContext,
-  repository: string | undefined,
-  timestamp: string,
-) {
-  if (repository === undefined) {
-    return federatedListDumpSchema.parse({
-      schema_version: STORE_SCHEMA_VERSION,
-      quests: await readQuests(ctx, timestamp),
-      chains: await readChains(ctx),
-    });
-  }
+function firstListSection(mode: ConvexListMode): ConvexListCursor["section"] {
+  return mode === "fences" ? "fences" : "quests";
+}
 
-  const repositoryQuests = await readRepositoryQuests(ctx, repository, timestamp);
-  const repositoryQuestIds = new Set(repositoryQuests.map((quest) => quest.id));
-  const chains = (await readChains(ctx)).filter(
-    (chain) => repositoryQuestIds.has(chain.quest_id) || repositoryQuestIds.has(chain.target_id),
-  );
-  const relatedQuestIds = new Set(chains.flatMap((chain) => [chain.quest_id, chain.target_id]));
-  const relatedQuests = await Promise.all(
-    [...relatedQuestIds]
-      .filter((questId) => !repositoryQuestIds.has(questId))
-      .map(async (questId) =>
-        materializeExpiredLease(
-          parseQuestDocument(await requireQuestRecord(ctx, questId)),
-          timestamp,
-        ),
-      ),
-  );
-  return federatedListDumpSchema.parse({
-    schema_version: STORE_SCHEMA_VERSION,
-    quests: [...repositoryQuests, ...relatedQuests].sort((left, right) => left.id - right.id),
-    chains,
+function nextListSection(
+  mode: ConvexListMode,
+  section: ConvexListCursor["section"],
+): ConvexListCursor["section"] | undefined {
+  switch (mode) {
+    case "stats":
+    case "fences":
+      return undefined;
+    case "list":
+      return section === "quests" ? "chains" : undefined;
+    case "federated":
+      if (section === "quests") {
+        return "chains";
+      }
+      return section === "chains" ? "fences" : undefined;
+  }
+}
+
+async function createListCursor(
+  ctx: QueryContext,
+  mode: ConvexListMode,
+  leaseCutoff: string,
+  requestKey: string,
+): Promise<ConvexListCursor> {
+  await requireNoPartialRestore(ctx);
+  return {
+    version: 1,
+    mode,
+    section: firstListSection(mode),
+    database_cursor: null,
+    snapshot_generation: await snapshotGeneration(ctx),
+    fence_generation: await fenceGeneration(ctx),
+    lease_cutoff: leaseCutoff,
+    request_key: requestKey,
+  };
+}
+
+function parseListCursor(cursor: string): ConvexListCursor {
+  try {
+    return decodeConvexListCursor(cursor);
+  } catch {
+    return failQuestDomain(
+      "CONVEX_SNAPSHOT_CURSOR_INVALID",
+      "the Convex list cursor is invalid or belongs to another deployment; restart the read and retry with the first cursor it returns",
+    );
+  }
+}
+
+async function requireStableListCursor(
+  ctx: QueryContext,
+  cursor: ConvexListCursor,
+  mode: ConvexListMode,
+  leaseCutoff: string,
+  requestKey: string,
+): Promise<void> {
+  await requireNoPartialRestore(ctx);
+  if (
+    cursor.mode !== mode ||
+    cursor.lease_cutoff !== leaseCutoff ||
+    cursor.request_key !== requestKey
+  ) {
+    failQuestDomain(
+      "CONVEX_SNAPSHOT_CURSOR_INVALID",
+      "the Convex list cursor does not match this read; restart the read and keep its cursor with the same filter and lease cutoff",
+    );
+  }
+  if ((await snapshotGeneration(ctx)) !== cursor.snapshot_generation) {
+    failQuestDomain(
+      "CONVEX_SNAPSHOT_CHANGED",
+      "the Convex store changed while its paginated list was being read; restart the read to capture one complete consistency point",
+    );
+  }
+  if ((await fenceGeneration(ctx)) !== cursor.fence_generation) {
+    failQuestDomain(
+      "CONVEX_SNAPSHOT_CHANGED",
+      "Convex repository fences changed while its paginated list was being read; restart the read to capture one complete consistency point",
+    );
+  }
+}
+
+function nextListCursor(
+  cursor: ConvexListCursor,
+  continueCursor: string,
+  isDone: boolean,
+): string | null {
+  const section = isDone ? nextListSection(cursor.mode, cursor.section) : cursor.section;
+  if (section === undefined) {
+    return null;
+  }
+  return encodeConvexListCursor({
+    ...cursor,
+    section,
+    database_cursor: isDone ? null : continueCursor,
   });
+}
+
+async function readListPage(ctx: QueryContext, cursor: ConvexListCursor): Promise<ConvexListPage> {
+  switch (cursor.section) {
+    case "quests": {
+      const result = await ctx.db
+        .query("quests")
+        .withIndex("by_display_id")
+        .order("asc")
+        .paginate(dumpPaginationOptions(cursor.database_cursor));
+      return {
+        section: "quests",
+        items: result.page
+          .map(parseQuestDocument)
+          .map((quest) => materializeExpiredLease(quest, cursor.lease_cutoff)),
+        next_cursor: nextListCursor(cursor, result.continueCursor, result.isDone),
+        snapshot_generation: cursor.snapshot_generation,
+      };
+    }
+    case "chains": {
+      const result = await ctx.db
+        .query("chains")
+        .withIndex("by_link")
+        .order("asc")
+        .paginate(dumpPaginationOptions(cursor.database_cursor));
+      return {
+        section: "chains",
+        items: result.page.map(parseChainDocument),
+        next_cursor: nextListCursor(cursor, result.continueCursor, result.isDone),
+        snapshot_generation: cursor.snapshot_generation,
+      };
+    }
+    case "fences": {
+      const result = await ctx.db
+        .query("migration_fences")
+        .withIndex("by_repo")
+        .order("asc")
+        .paginate(dumpPaginationOptions(cursor.database_cursor));
+      return {
+        section: "fences",
+        items: result.page.filter((fence) => fence.unfenced !== true).map((fence) => fence.repo),
+        next_cursor: nextListCursor(cursor, result.continueCursor, result.isDone),
+        snapshot_generation: cursor.snapshot_generation,
+      };
+    }
+  }
+}
+
+async function listPageFor(
+  ctx: QueryContext,
+  input: {
+    readonly cursor: string | undefined;
+    readonly leaseCutoff: string;
+    readonly mode: ConvexListMode;
+    readonly requestKey: string;
+  },
+): Promise<ConvexListPage> {
+  const cursor =
+    input.cursor === undefined
+      ? await createListCursor(ctx, input.mode, input.leaseCutoff, input.requestKey)
+      : parseListCursor(input.cursor);
+  await requireStableListCursor(ctx, cursor, input.mode, input.leaseCutoff, input.requestKey);
+  return readListPage(ctx, cursor);
 }
 
 function hardLaneConflictsForQuest(
@@ -1122,19 +1191,33 @@ function hardLaneConflictsForQuest(
   );
 }
 
-async function readRepositoryQuests(
-  ctx: QueryContext,
-  repository: string,
+async function readLaneConflictQuests(
+  ctx: MutationContext,
+  current: Quest,
   timestamp: string,
 ): Promise<Quest[]> {
+  // ISO offsets can put an active lease on the preceding calendar day. Search one full
+  // offset window, then compare instants so legacy non-UTC timestamps remain correct.
+  const earliestPossibleActiveLease = new Date(
+    Date.parse(timestamp) - 24 * 60 * 60 * 1_000,
+  ).toISOString();
   const documents = await ctx.db
     .query("quests")
-    .withIndex("by_repo", (query) => query.eq("repo", repository))
+    .withIndex("by_repo_status_and_lease_expiry", (query) =>
+      query
+        .eq("repo", current.repo)
+        .eq("status", "accepted")
+        .gt("lease_expires_at", earliestPossibleActiveLease),
+    )
     .collect();
-  return documents
-    .map(parseQuestDocument)
-    .map((quest) => materializeExpiredLease(quest, timestamp))
-    .sort((left, right) => left.id - right.id);
+  return [
+    current,
+    ...documents
+      .map(parseQuestDocument)
+      .filter(
+        (quest) => quest.id !== current.id && !isLeaseExpired(quest.lease_expires_at, timestamp),
+      ),
+  ].sort((left, right) => left.id - right.id);
 }
 
 function laneConflictsMatch(
@@ -1160,7 +1243,7 @@ async function unacknowledgedLaneConflict(
     return null;
   }
   const laneConflicts = hardLaneConflictsForQuest(
-    await readRepositoryQuests(ctx, current.repo, timestamp),
+    await readLaneConflictQuests(ctx, current, timestamp),
     input.id,
     timestamp,
   );
@@ -1714,6 +1797,16 @@ async function findMigrationFence(ctx: MutationContext, repo: string) {
     .unique();
 }
 
+async function deleteMigrationFence(
+  ctx: MutationContext,
+  fence: NonNullable<Awaited<ReturnType<typeof findMigrationFence>>>,
+): Promise<void> {
+  await ctx.db.delete(fence._id);
+  if (fence.unfenced !== true) {
+    await advanceFenceGeneration(ctx);
+  }
+}
+
 async function repositoryRevision(ctx: QueryContext, repo: string): Promise<number> {
   const revision = await ctx.db
     .query("repository_revisions")
@@ -1746,21 +1839,28 @@ async function restoreMigrationFencesAfterRestore(
   token: string,
   committed: boolean,
 ): Promise<void> {
+  let changed = false;
   for (const fence of await ctx.db.query("migration_fences").collect()) {
     if (fence.recovery_restore_token === token) {
       if (committed) {
         await ctx.db.delete(fence._id);
+        changed = true;
         continue;
       }
       await ctx.db.patch(fence._id, {
         unfenced: false,
         recovery_restore_token: undefined,
       });
+      changed = true;
       continue;
     }
     if (fence.lease_token === token && !committed) {
       await ctx.db.delete(fence._id);
+      changed = true;
     }
+  }
+  if (changed) {
+    await advanceFenceGeneration(ctx);
   }
 }
 
@@ -1953,7 +2053,7 @@ async function recoverCommittedMigrationFence(
     await requireRestoreStageEmpty(ctx, lease.token, `retry recovery for repository ${repo}`);
     await ctx.db.delete(lease._id);
   }
-  await ctx.db.delete(existing._id);
+  await deleteMigrationFence(ctx, existing);
   return true;
 }
 
@@ -2615,30 +2715,38 @@ export const addEvidence = mutationGeneric({
 export const listQuests = queryGeneric({
   args: {
     auth_token: v.optional(v.string()),
+    cursor: v.optional(v.string()),
     filter: v.any(),
     lease_cutoff: v.string(),
     ...clientProtocolArgs,
   },
   handler: async (ctx, args) => {
     await requireMemberQueryActor(ctx, args);
-    await requireNoPartialRestore(ctx);
     const filter = questFilterSchema.parse(args.filter);
-    return filterQuests(
-      await readQuests(ctx, parseLeaseCutoff(args.lease_cutoff)),
-      await readChains(ctx),
-      filter,
-    );
+    const leaseCutoff = parseLeaseCutoff(args.lease_cutoff);
+    return listPageFor(ctx, {
+      cursor: args.cursor,
+      leaseCutoff,
+      mode: "list",
+      requestKey: stableSerialize(filter),
+    });
   },
 });
 
 export const fencedRepositories = queryGeneric({
-  args: { auth_token: v.optional(v.string()), ...clientProtocolArgs },
+  args: {
+    auth_token: v.optional(v.string()),
+    cursor: v.optional(v.string()),
+    ...clientProtocolArgs,
+  },
   handler: async (ctx, args) => {
     await requireMemberQueryActor(ctx, args);
-    return (await ctx.db.query("migration_fences").collect())
-      .filter((fence) => fence.unfenced !== true)
-      .map((fence) => fence.repo)
-      .sort();
+    return listPageFor(ctx, {
+      cursor: args.cursor,
+      leaseCutoff: "",
+      mode: "fences",
+      requestKey: "fences",
+    });
   },
 });
 
@@ -2665,21 +2773,22 @@ export const federatedSnapshot = queryGeneric({
 export const federatedListSnapshot = queryGeneric({
   args: {
     auth_token: v.optional(v.string()),
+    cursor: v.optional(v.string()),
     repository: v.optional(v.string()),
     ...clientProtocolArgs,
   },
   handler: async (ctx, args) => {
     await requireMemberQueryActor(ctx, args);
-    await requireNoPartialRestore(ctx);
     const repository =
       args.repository === undefined ? undefined : questSchema.shape.repo.parse(args.repository);
-    return {
-      dump: await createFederatedListDump(ctx, repository, now()),
-      fencedRepositories: (await ctx.db.query("migration_fences").collect())
-        .filter((fence) => fence.unfenced !== true)
-        .map((fence) => fence.repo)
-        .sort(),
-    };
+    const leaseCutoff =
+      args.cursor === undefined ? now() : parseListCursor(args.cursor).lease_cutoff;
+    return listPageFor(ctx, {
+      cursor: args.cursor,
+      leaseCutoff,
+      mode: "federated",
+      requestKey: stableSerialize(repository ?? null),
+    });
   },
 });
 
@@ -2739,17 +2848,20 @@ export const questDetail = queryGeneric({
 export const stats = queryGeneric({
   args: {
     auth_token: v.optional(v.string()),
+    cursor: v.optional(v.string()),
     scope: v.any(),
     lease_cutoff: v.string(),
     ...clientProtocolArgs,
   },
   handler: async (ctx, args) => {
     await requireMemberQueryActor(ctx, args);
-    await requireNoPartialRestore(ctx);
-    return buildStats(
-      await readQuests(ctx, parseLeaseCutoff(args.lease_cutoff)),
-      questScopeSchema.parse(args.scope),
-    );
+    const scope = questScopeSchema.parse(args.scope);
+    return listPageFor(ctx, {
+      cursor: args.cursor,
+      leaseCutoff: parseLeaseCutoff(args.lease_cutoff),
+      mode: "stats",
+      requestKey: stableSerialize(scope),
+    });
   },
 });
 
@@ -3125,6 +3237,7 @@ export const fenceRepository = mutationGeneric({
         ...recovery,
         unfenced: false,
       });
+      await advanceFenceGeneration(ctx);
     }
     return null;
   },
@@ -3146,7 +3259,10 @@ export const unfenceRepository = mutationGeneric({
           `repository ${repo} is fenced by another migration; use the owning migration token or recover it before retrying`,
         );
       }
-      await ctx.db.patch(existing._id, { unfenced: true });
+      if (existing.unfenced !== true) {
+        await ctx.db.patch(existing._id, { unfenced: true });
+        await advanceFenceGeneration(ctx);
+      }
     }
     return existing !== null;
   },
@@ -3177,7 +3293,7 @@ export const recoverRepositoryFence = mutationGeneric({
     const lease = await findRestoreLease(ctx);
     if (lease === null) {
       if (isLegacyMigrationFence(existing) || existing.committed === false) {
-        await ctx.db.delete(existing._id);
+        await deleteMigrationFence(ctx, existing);
         return true;
       }
       failQuestDomain(
@@ -3204,7 +3320,7 @@ export const recoverRepositoryFence = mutationGeneric({
       await verifyLegacyFenceSnapshot(ctx, repo, lease.expected_hash, lease.lease_cutoff);
       await requireRestoreStageEmpty(ctx, lease.token, `retry recovery for repository ${repo}`);
       await ctx.db.delete(lease._id);
-      await ctx.db.delete(existing._id);
+      await deleteMigrationFence(ctx, existing);
       return true;
     }
     if (lease.committed === true || existing.committed !== false) {
@@ -3216,7 +3332,7 @@ export const recoverRepositoryFence = mutationGeneric({
     await requireRestoreStageEmpty(ctx, lease.token, `retry recovery for repository ${repo}`);
     await ctx.db.delete(lease._id);
 
-    await ctx.db.delete(existing._id);
+    await deleteMigrationFence(ctx, existing);
     return true;
   },
 });
@@ -3285,6 +3401,7 @@ export const recoverMigrationFenceForRestore = mutationGeneric({
       unfenced: true,
       recovery_restore_token: token,
     });
+    await advanceFenceGeneration(ctx);
     return true;
   },
 });

@@ -54,6 +54,114 @@ export function parseConvexEventPage(value: unknown): ConvexEventPage {
   return { items: page.items, next_cursor: page.next_cursor };
 }
 
+export const convexListSectionSchema = z.enum(["quests", "chains", "fences"]);
+export type ConvexListSection = z.infer<typeof convexListSectionSchema>;
+
+export type ConvexListPage =
+  | {
+      readonly section: "quests";
+      readonly items: readonly Quest[];
+      readonly next_cursor: string | null;
+      readonly snapshot_generation: number;
+    }
+  | {
+      readonly section: "chains";
+      readonly items: readonly Chain[];
+      readonly next_cursor: string | null;
+      readonly snapshot_generation: number;
+    }
+  | {
+      readonly section: "fences";
+      readonly items: readonly string[];
+      readonly next_cursor: string | null;
+      readonly snapshot_generation: number;
+    };
+
+export interface ConvexListCursor {
+  readonly version: 1;
+  readonly mode: "federated" | "fences" | "list" | "stats";
+  readonly section: ConvexListSection;
+  readonly database_cursor: string | null;
+  readonly snapshot_generation: number;
+  readonly fence_generation: number;
+  readonly lease_cutoff: string;
+  readonly request_key: string;
+}
+
+const convexListCursorSchema = z.strictObject({
+  version: z.literal(1),
+  mode: z.enum(["federated", "fences", "list", "stats"]),
+  section: convexListSectionSchema,
+  database_cursor: z.string().nullable(),
+  snapshot_generation: z.int().nonnegative(),
+  fence_generation: z.int().nonnegative(),
+  lease_cutoff: z.string(),
+  request_key: z.string(),
+});
+
+export function encodeConvexListCursor(cursor: ConvexListCursor): string {
+  return JSON.stringify(convexListCursorSchema.parse(cursor));
+}
+
+export function decodeConvexListCursor(cursor: string): ConvexListCursor {
+  return convexListCursorSchema.parse(JSON.parse(cursor));
+}
+
+export function parseConvexListPage(value: unknown): ConvexListPage {
+  const envelope = z
+    .object({
+      section: convexListSectionSchema,
+      items: z.array(z.unknown()),
+      next_cursor: z.string().nullable(),
+      snapshot_generation: z.int().nonnegative(),
+    })
+    .parse(value);
+  switch (envelope.section) {
+    case "quests":
+      return {
+        ...envelope,
+        section: "quests",
+        items: z.array(questSchema).parse(envelope.items),
+      };
+    case "chains":
+      return {
+        ...envelope,
+        section: "chains",
+        items: z.array(chainSchema).parse(envelope.items),
+      };
+    case "fences":
+      return {
+        ...envelope,
+        section: "fences",
+        items: z.array(z.string()).parse(envelope.items),
+      };
+  }
+}
+
+export function assembleConvexListPages(pages: readonly ConvexListPage[]): {
+  readonly chains: readonly Chain[];
+  readonly fencedRepositories: readonly string[];
+  readonly quests: readonly Quest[];
+} {
+  const chains: Chain[] = [];
+  const fencedRepositories: string[] = [];
+  const quests: Quest[] = [];
+  for (const page of pages) {
+    switch (page.section) {
+      case "quests":
+        quests.push(...page.items);
+        break;
+      case "chains":
+        chains.push(...page.items);
+        break;
+      case "fences":
+        fencedRepositories.push(...page.items);
+        break;
+    }
+  }
+  return { chains, fencedRepositories: fencedRepositories.sort(), quests };
+}
+
 export const convexDumpSectionSchema = z.enum(["quests", "evidence", "chains", "events"]);
 export type ConvexDumpSection = z.infer<typeof convexDumpSectionSchema>;
 

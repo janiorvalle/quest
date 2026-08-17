@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConvexHttpClient } from "convex/browser";
 import { type NewQuest, type QuestDump, STORE_SCHEMA_VERSION } from "../../schema";
+import { getNextQuest } from "../../services";
 import {
   type BlobStoreFactory,
   defineBlobStoreContract,
@@ -137,6 +138,63 @@ if (deployment === undefined || authToken === undefined) {
     );
   }
   defineBlobStoreContract("ConvexBlobStore contract against local deployment", blobStoreFactory);
+
+  test.serial("Convex lane conflicts include active leases with timezone offsets", async () => {
+    const clients = createConvexClientPair(deployment, { authToken });
+    const store = new ConvexStore(deployment, { clients });
+    const member = await clients.http.mutation(convexApi.whoami, { auth_token: authToken });
+    const current = new Date();
+    const future = new Date(current.getTime() + 10 * 60 * 1_000);
+    const offsetLease = new Date(future.getTime() - 5 * 60 * 60 * 1_000)
+      .toISOString()
+      .replace("Z", "-05:00");
+    const sharedQuest = {
+      repo: "convex-offset-lease",
+      area: "store",
+      kind: "task" as const,
+      description: "Timezone offset lane conflict fixture",
+      opened_by: member.member,
+      guild: null,
+      verdict: null,
+      verdict_notes: null,
+      priority: 2,
+      pr: null,
+      predicted_files: ["src/shared.ts"],
+      reopen_count: 0,
+      created_at: current.toISOString(),
+      updated_at: current.toISOString(),
+    };
+    try {
+      await store.replaceAll({
+        ...emptyDump,
+        quests: [
+          {
+            ...sharedQuest,
+            id: 1,
+            title: "Active offset lease",
+            assignee: member.member,
+            status: "accepted",
+            lease_expires_at: offsetLease,
+          },
+          {
+            ...sharedQuest,
+            id: 2,
+            title: "Conflicting candidate",
+            assignee: null,
+            status: "open",
+            lease_expires_at: null,
+          },
+        ],
+      });
+
+      await expect(
+        store.acceptQuest({ id: 2, owner: member.member, lane_conflict_guard: true }),
+      ).resolves.toMatchObject({ outcome: "lane-conflict" });
+    } finally {
+      await store.replaceAll(emptyDump).catch(() => undefined);
+      await closeConvexClientPair(clients);
+    }
+  });
 
   test.serial(
     "Convex restore leases block concurrent writes and roll back atomically",
@@ -481,6 +539,116 @@ if (deployment === undefined || authToken === undefined) {
         await closeConvexClientPair(clients);
       }
     },
+  );
+
+  test.serial(
+    "Convex list surfaces and claims stay live past 8192 quests and chains",
+    async () => {
+      const clients = createConvexClientPair(deployment, { authToken });
+      const store = new ConvexStore(deployment, { clients });
+      const timestamp = "2026-08-17T00:00:00.000Z";
+      const itemCount = 8_193;
+      const member = await clients.http.mutation(convexApi.whoami, { auth_token: authToken });
+      const quests: QuestDump["quests"] = Array.from({ length: itemCount }, (_, index) => ({
+        id: index + 1,
+        repo: "convex-list-pagination",
+        area: `area-${index + 1}`,
+        kind: "task",
+        title: `Large list ${index + 1}`,
+        description: "Convex list pagination contract fixture",
+        opened_by: member.member,
+        guild: null,
+        assignee: null,
+        status: "open",
+        verdict: null,
+        verdict_notes: null,
+        priority: 2,
+        pr: null,
+        predicted_files: index === itemCount - 1 ? ["src/shared.ts"] : [],
+        reopen_count: 0,
+        lease_expires_at: null,
+        created_at: timestamp,
+        updated_at: timestamp,
+      }));
+      const chains: QuestDump["chains"] = quests.map((quest) => ({
+        quest_id: quest.id,
+        target_id: (quest.id % itemCount) + 1,
+        type: "duplicate-of",
+      }));
+      let subscription: Awaited<ReturnType<ConvexStore["watchFederatedSnapshot"]>> | undefined;
+      try {
+        await store.replaceAll({
+          schema_version: STORE_SCHEMA_VERSION,
+          quests,
+          evidence: [],
+          chains,
+          events: [],
+        });
+
+        expect(await store.listQuests({})).toHaveLength(itemCount);
+        expect(await store.stats({ repo: null })).toEqual({
+          repos: [
+            {
+              repo: "convex-list-pagination",
+              total: itemCount,
+              status_counts: { open: itemCount },
+              verdict_counts: {},
+              reopen_count: 0,
+              assignee_load: {},
+            },
+          ],
+        });
+        const snapshot = await store.readFederatedSnapshot();
+        expect(snapshot.dump.quests).toHaveLength(itemCount);
+        expect(snapshot.dump.chains).toHaveLength(itemCount);
+
+        const watched = new Promise<number>((resolve, reject) => {
+          const timeout = setTimeout(
+            () => reject(new Error("timed out waiting for the paginated viewer snapshot")),
+            10_000,
+          );
+          void store
+            .watchFederatedSnapshot(undefined, (value, error) => {
+              if (error !== undefined) {
+                clearTimeout(timeout);
+                reject(error);
+                return;
+              }
+              if (value.dump.quests.length === itemCount) {
+                clearTimeout(timeout);
+                resolve(value.dump.chains.length);
+              }
+            })
+            .then((value) => {
+              subscription = value;
+            })
+            .catch((error: unknown) => {
+              clearTimeout(timeout);
+              reject(error);
+            });
+        });
+        await expect(watched).resolves.toBe(itemCount);
+        await subscription?.unsubscribe();
+        subscription = undefined;
+
+        await store.replaceAll({
+          schema_version: STORE_SCHEMA_VERSION,
+          quests,
+          evidence: [],
+          chains: [],
+          events: [],
+        });
+        await expect(getNextQuest(store, { repo: null }, member.member)).resolves.toMatchObject({
+          claimed: true,
+          quest: { id: 1, status: "accepted" },
+        });
+      } finally {
+        await subscription?.unsubscribe();
+        await store.replaceAll(emptyDump).catch(() => undefined);
+        await closeConvexClientPair(clients);
+      }
+    },
+    60_000,
   );
 
   test.serial(

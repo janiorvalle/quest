@@ -104,6 +104,7 @@ export default defineSchema({
   quests: defineTable(questFields)
     .index("by_display_id", ["id"])
     .index("by_repo", ["repo"])
+    .index("by_repo_status_and_lease_expiry", ["repo", "status", "lease_expires_at"])
     .index("by_status", ["status"]),
   evidence: defineTable(evidenceFields)
     .index("by_display_id", ["id"])

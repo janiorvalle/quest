@@ -3,6 +3,7 @@ import {
   type AcceptQuestInput,
   type AcceptResult,
   acceptQuestInputSchema,
+  type Chain,
   type ChainMutation,
   type ChainRemovalResult,
   type ChainResult,
@@ -30,6 +31,7 @@ import {
   questTransitionSchema,
   type SignoffBatchInput,
   type SignoffBatchResult,
+  STORE_SCHEMA_VERSION,
   signoffBatchInputSchema,
   stableSerialize,
   type TouchQuestInput,
@@ -46,6 +48,7 @@ import type {
   StoreMigrationSession,
   WatchSubscription,
 } from "../port";
+import { statsForQuests } from "../routing";
 import {
   authTokenInput,
   type ConvexActiveRestore,
@@ -57,12 +60,15 @@ import {
 } from "./client";
 import {
   assembleConvexDump,
+  assembleConvexListPages,
   type ConvexDumpPage,
+  type ConvexListPage,
   type ConvexRestorePage,
   canonicalizeQuestDump,
   createConvexRestorePages,
   parseConvexDumpPage,
   parseConvexEventPage,
+  parseConvexListPage,
 } from "./pagination";
 
 interface RealtimeSubscription {
@@ -361,6 +367,86 @@ function projectFederatedListSnapshot(
   };
 }
 
+async function assembleListPages(
+  firstPage: ConvexListPage,
+  readPage: (cursor: string) => Promise<ConvexListPage>,
+) {
+  const pages = [parseConvexListPage(firstPage)];
+  const snapshotGeneration = pages[0]?.snapshot_generation;
+  let cursor = pages[0]?.next_cursor ?? null;
+  while (cursor !== null) {
+    const page = parseConvexListPage(await readPage(cursor));
+    if (page.snapshot_generation !== snapshotGeneration) {
+      throw new Error(
+        "[CONVEX_SNAPSHOT_CHANGED] Convex returned list pages from different consistency points; restart the read",
+      );
+    }
+    pages.push(page);
+    cursor = page.next_cursor;
+  }
+  return assembleConvexListPages(pages);
+}
+
+function filterConvexQuests(
+  quests: readonly Quest[],
+  chains: readonly Chain[],
+  filter: QuestFilter,
+): Quest[] {
+  const statusById = new Map(quests.map((quest) => [quest.id, quest.status]));
+  const blockedIds =
+    filter.blocked === undefined
+      ? undefined
+      : new Set(
+          chains
+            .filter(
+              (link) => link.type === "requires" && statusById.get(link.target_id) !== "complete",
+            )
+            .map((link) => link.quest_id),
+        );
+  return quests.filter(
+    (quest) =>
+      (filter.repo === undefined || quest.repo === filter.repo) &&
+      (filter.status === undefined || quest.status === filter.status) &&
+      (filter.area === undefined || quest.area === filter.area) &&
+      (filter.kind === undefined || quest.kind === filter.kind) &&
+      (filter.assignee === undefined || quest.assignee === filter.assignee) &&
+      (filter.blocked === undefined || blockedIds?.has(quest.id) === filter.blocked),
+  );
+}
+
+function federatedSnapshotFromPages(
+  assembled: Awaited<ReturnType<typeof assembleListPages>>,
+  repository: string | undefined,
+): FederatedReadSnapshot {
+  if (repository === undefined) {
+    return {
+      dump: federatedListDumpSchema.parse({
+        schema_version: STORE_SCHEMA_VERSION,
+        chains: assembled.chains,
+        quests: assembled.quests,
+      }),
+      fencedRepositories: assembled.fencedRepositories,
+    };
+  }
+  const repositoryQuestIds = new Set(
+    assembled.quests.filter((quest) => quest.repo === repository).map((quest) => quest.id),
+  );
+  const chains = assembled.chains.filter(
+    (chain) => repositoryQuestIds.has(chain.quest_id) || repositoryQuestIds.has(chain.target_id),
+  );
+  const relatedQuestIds = new Set(chains.flatMap((chain) => [chain.quest_id, chain.target_id]));
+  return {
+    dump: federatedListDumpSchema.parse({
+      schema_version: STORE_SCHEMA_VERSION,
+      chains,
+      quests: assembled.quests.filter(
+        (quest) => quest.repo === repository || relatedQuestIds.has(quest.id),
+      ),
+    }),
+    fencedRepositories: assembled.fencedRepositories,
+  };
+}
+
 function addConfiguredLeaseTtl<T extends { readonly lease_ttl_minutes?: number | undefined }>(
   input: T,
   leaseTtlMinutes: number,
@@ -516,18 +602,51 @@ export class ConvexStore implements QuestStore {
   async listQuests(filter: QuestFilter): Promise<Quest[]> {
     const parsed = questFilterSchema.parse(filter);
     const leaseCutoff = await this.serverTime();
-    return this.#clients.http.query(convexApi.listQuests, {
+    const input = {
       ...authTokenInput(this.#clients),
       filter: parsed,
       lease_cutoff: leaseCutoff,
-    });
+    };
+    const first = await this.#clients.http.query(convexApi.listQuests, input);
+    if (Array.isArray(first)) {
+      return first;
+    }
+    const assembled = await assembleListPages(first, (cursor) =>
+      this.#clients.http.query(convexApi.listQuests, { ...input, cursor }).then((page) => {
+        if (Array.isArray(page)) {
+          throw new Error(
+            "[CONVEX_LIST_PROTOCOL_CHANGED] the Convex deployment changed list protocols mid-read; restart the command after the deployment finishes",
+          );
+        }
+        return page;
+      }),
+    );
+    return filterConvexQuests(assembled.quests, assembled.chains, parsed);
   }
 
   async listFencedRepositories(): Promise<readonly string[]> {
     try {
-      return await this.#clients.http.query(convexApi.fencedRepositories, {
+      const input = {
         ...authTokenInput(this.#clients),
-      });
+      };
+      const first = await this.#clients.http.query(convexApi.fencedRepositories, input);
+      if (Array.isArray(first)) {
+        return first;
+      }
+      return (
+        await assembleListPages(first, (cursor) =>
+          this.#clients.http
+            .query(convexApi.fencedRepositories, { ...input, cursor })
+            .then((page) => {
+              if (Array.isArray(page)) {
+                throw new Error(
+                  "[CONVEX_LIST_PROTOCOL_CHANGED] the Convex deployment changed fence protocols mid-read; restart the command after the deployment finishes",
+                );
+              }
+              return page;
+            }),
+        )
+      ).fencedRepositories;
     } catch (error: unknown) {
       if (isMissingFencedRepositoriesQuery(error)) {
         throw new Error(
@@ -549,12 +668,31 @@ export class ConvexStore implements QuestStore {
       };
     }
     try {
-      const snapshot = await this.#clients.http.query(convexApi.federatedListSnapshot, {
+      const input = {
         ...authTokenInput(this.#clients),
         ...(repository === undefined
           ? {}
           : { repository: questSchema.shape.repo.parse(repository) }),
-      });
+      };
+      const first = await this.#clients.http.query(convexApi.federatedListSnapshot, input);
+      const snapshot =
+        "dump" in first
+          ? first
+          : federatedSnapshotFromPages(
+              await assembleListPages(first, (cursor) =>
+                this.#clients.http
+                  .query(convexApi.federatedListSnapshot, { ...input, cursor })
+                  .then((page) => {
+                    if ("dump" in page) {
+                      throw new Error(
+                        "[CONVEX_LIST_PROTOCOL_CHANGED] the Convex deployment changed viewer protocols mid-read; restart the viewer after the deployment finishes",
+                      );
+                    }
+                    return page;
+                  }),
+              ),
+              repository,
+            );
       this.#federatedListSnapshotAvailable = true;
       return { source: "list", snapshot };
     } catch (error: unknown) {
@@ -667,14 +805,50 @@ export class ConvexStore implements QuestStore {
       scheduleLeaseRefresh();
     };
 
-    const receiveSnapshot = (snapshot: FederatedReadSnapshot | FederatedFullSnapshot): void => {
+    const receiveSnapshot = (
+      snapshot: ConvexListPage | FederatedReadSnapshot | FederatedFullSnapshot,
+    ): void => {
       if (!active) {
         return;
       }
-      snapshotRevision += 1;
-      latestSnapshot = projectFederatedListSnapshot(snapshot);
-      listener(latestSnapshot);
-      scheduleLeaseRefresh();
+      const receivedRevision = ++snapshotRevision;
+      if ("dump" in snapshot) {
+        latestSnapshot = projectFederatedListSnapshot(snapshot);
+        listener(latestSnapshot);
+        scheduleLeaseRefresh();
+        return;
+      }
+      const input = {
+        ...authTokenInput(this.#clients),
+        ...(repository === undefined
+          ? {}
+          : { repository: questSchema.shape.repo.parse(repository) }),
+      };
+      void assembleListPages(snapshot, (cursor) =>
+        this.#clients.http
+          .query(convexApi.federatedListSnapshot, { ...input, cursor })
+          .then((page) => {
+            if ("dump" in page) {
+              throw new Error(
+                "[CONVEX_LIST_PROTOCOL_CHANGED] the Convex deployment changed viewer protocols mid-read; restart the viewer after the deployment finishes",
+              );
+            }
+            return page;
+          }),
+      )
+        .then((assembled) => {
+          if (!active || receivedRevision !== snapshotRevision) {
+            return;
+          }
+          latestSnapshot = federatedSnapshotFromPages(assembled, repository);
+          listener(latestSnapshot);
+          scheduleLeaseRefresh();
+        })
+        .catch((error: unknown) => {
+          if (receivedRevision === snapshotRevision) {
+            retryLeaseRefresh(error);
+          }
+        });
     };
     const receiveError = (error: unknown): void => {
       if (active) {
@@ -746,11 +920,30 @@ export class ConvexStore implements QuestStore {
   async stats(scope: QuestScope): Promise<QuestStats> {
     const parsed = questScopeSchema.parse(scope);
     const leaseCutoff = await this.serverTime();
-    return this.#clients.http.query(convexApi.stats, {
+    const input = {
       ...authTokenInput(this.#clients),
       scope: parsed,
       lease_cutoff: leaseCutoff,
-    });
+    };
+    const first = await this.#clients.http.query(convexApi.stats, input);
+    if ("repos" in first) {
+      return first;
+    }
+    const assembled = await assembleListPages(first, (cursor) =>
+      this.#clients.http.query(convexApi.stats, { ...input, cursor }).then((page) => {
+        if ("repos" in page) {
+          throw new Error(
+            "[CONVEX_LIST_PROTOCOL_CHANGED] the Convex deployment changed stats protocols mid-read; restart the command after the deployment finishes",
+          );
+        }
+        return page;
+      }),
+    );
+    return statsForQuests(
+      parsed.repo === null
+        ? assembled.quests
+        : assembled.quests.filter((quest) => quest.repo === parsed.repo),
+    );
   }
 
   async events(questId: number): Promise<Event[]> {
@@ -856,6 +1049,7 @@ export class ConvexStore implements QuestStore {
     const parsed = questFilterSchema.parse(filter);
     let subscribed = true;
     let leaseTimer: ReturnType<typeof setTimeout> | undefined;
+    let rebindTimer: ReturnType<typeof setTimeout> | undefined;
     let generation = 0;
     let subscription: RealtimeSubscription | undefined;
     let leaseSubscription: RealtimeSubscription | undefined;
@@ -866,10 +1060,14 @@ export class ConvexStore implements QuestStore {
         return;
       }
       listener(latestQuests, realtimeWatchError(error));
-      leaseTimer = setTimeout(() => {
+      if (rebindTimer !== undefined) {
+        clearTimeout(rebindTimer);
+      }
+      rebindTimer = setTimeout(() => {
+        rebindTimer = undefined;
         void bind().catch(retryBind);
       }, 1_000);
-      leaseTimer.unref?.();
+      rebindTimer.unref?.();
     };
 
     const bind = async (): Promise<void> => {
@@ -879,41 +1077,108 @@ export class ConvexStore implements QuestStore {
       }
       const boundAt = Date.now();
       const activeGeneration = ++generation;
+      let listPageRevision = 0;
+      let leasePageRevision = 0;
       const onError = (error: unknown): void => {
         if (subscribed && activeGeneration === generation) {
           listener(latestQuests, realtimeWatchError(error));
         }
       };
+      const readQuestPage = async (
+        value: ConvexListPage,
+        queryFilter: QuestFilter,
+      ): Promise<readonly Quest[]> => {
+        const input = {
+          ...authTokenInput(this.#clients),
+          filter: queryFilter,
+          lease_cutoff: leaseCutoff,
+        };
+        const assembled = await assembleListPages(value, (cursor) =>
+          this.#clients.http.query(convexApi.listQuests, { ...input, cursor }).then((page) => {
+            if (Array.isArray(page)) {
+              throw new Error(
+                "[CONVEX_LIST_PROTOCOL_CHANGED] the Convex deployment changed list protocols mid-read; restart the viewer after the deployment finishes",
+              );
+            }
+            return page;
+          }),
+        );
+        return filterConvexQuests(assembled.quests, assembled.chains, queryFilter);
+      };
       const nextSubscription = this.#clients.realtime.onUpdate(
         convexApi.listQuests,
         { ...authTokenInput(this.#clients), filter: parsed, lease_cutoff: leaseCutoff },
-        (quests) => {
-          if (!subscribed || activeGeneration !== generation) {
+        (value) => {
+          const receivedRevision = ++listPageRevision;
+          const receiveQuests = (quests: readonly Quest[]): void => {
+            if (
+              !subscribed ||
+              activeGeneration !== generation ||
+              receivedRevision !== listPageRevision
+            ) {
+              return;
+            }
+            latestQuests = quests;
+            listener(quests);
+          };
+          if (Array.isArray(value)) {
+            receiveQuests(value);
             return;
           }
-          latestQuests = quests;
-          listener(quests);
+          void readQuestPage(value, parsed)
+            .then(receiveQuests)
+            .catch((error: unknown) => {
+              if (
+                subscribed &&
+                activeGeneration === generation &&
+                receivedRevision === listPageRevision
+              ) {
+                retryBind(error);
+              }
+            });
         },
         onError,
       );
       const nextLeaseSubscription = this.#clients.realtime.onUpdate(
         convexApi.listQuests,
         { ...authTokenInput(this.#clients), filter: {}, lease_cutoff: leaseCutoff },
-        (quests) => {
-          if (!subscribed || activeGeneration !== generation) {
+        (value) => {
+          const receivedRevision = ++leasePageRevision;
+          const receiveQuests = (quests: readonly Quest[]): void => {
+            if (
+              !subscribed ||
+              activeGeneration !== generation ||
+              receivedRevision !== leasePageRevision
+            ) {
+              return;
+            }
+            if (leaseTimer !== undefined) {
+              clearTimeout(leaseTimer);
+            }
+            const delay = leaseRefreshDelay(quests, leaseCutoff, boundAt);
+            leaseTimer =
+              delay === null
+                ? undefined
+                : setTimeout(() => {
+                    void bind().catch(retryBind);
+                  }, delay);
+            leaseTimer?.unref?.();
+          };
+          if (Array.isArray(value)) {
+            receiveQuests(value);
             return;
           }
-          if (leaseTimer !== undefined) {
-            clearTimeout(leaseTimer);
-          }
-          const delay = leaseRefreshDelay(quests, leaseCutoff, boundAt);
-          leaseTimer =
-            delay === null
-              ? undefined
-              : setTimeout(() => {
-                  void bind().catch(retryBind);
-                }, delay);
-          leaseTimer?.unref?.();
+          void readQuestPage(value, {})
+            .then(receiveQuests)
+            .catch((error: unknown) => {
+              if (
+                subscribed &&
+                activeGeneration === generation &&
+                receivedRevision === leasePageRevision
+              ) {
+                retryBind(error);
+              }
+            });
         },
         onError,
       );
@@ -936,6 +1201,10 @@ export class ConvexStore implements QuestStore {
         if (leaseTimer !== undefined) {
           clearTimeout(leaseTimer);
           leaseTimer = undefined;
+        }
+        if (rebindTimer !== undefined) {
+          clearTimeout(rebindTimer);
+          rebindTimer = undefined;
         }
         subscription?.unsubscribe();
         leaseSubscription?.unsubscribe();

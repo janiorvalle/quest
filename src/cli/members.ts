@@ -6,6 +6,7 @@ import { normalizeConvexDeployment } from "../config";
 import { type CliOutputBoundary, EXIT_SUCCESS, type ExitCode, formatQuestReport } from "../output";
 import { type Config, questReportSchema } from "../schema";
 import {
+  type ConvexListPage,
   type ConvexMember,
   clientProtocolInput,
   convexApi,
@@ -529,6 +530,56 @@ export function isMembersCliRequest(
   );
 }
 
+async function pagedConvexRepositories(
+  deployment: string,
+  authToken: string,
+  leaseCutoff: string,
+  firstPage: ConvexListPage,
+): Promise<readonly string[]> {
+  const client = createConvexHttpClient(deployment);
+  const input = {
+    ...clientProtocolInput(),
+    auth_token: authToken,
+    lease_cutoff: leaseCutoff,
+    scope: { repo: null },
+  };
+  const repositories = new Set<string>();
+  let page = firstPage;
+  while (true) {
+    if (page.section === "quests") {
+      for (const quest of page.items) {
+        repositories.add(quest.repo);
+      }
+    }
+    if (page.next_cursor === null) {
+      return [...repositories].sort();
+    }
+    const next = await client.query(convexApi.stats, { ...input, cursor: page.next_cursor });
+    if ("repos" in next) {
+      throw new Error(
+        "[CONVEX_LIST_PROTOCOL_CHANGED] the Convex deployment changed stats protocols while discovering repositories; retry `quest join` after the deployment finishes",
+      );
+    }
+    page = next;
+  }
+}
+
+async function listConvexRepositories(
+  deployment: string,
+  authToken: string,
+): Promise<readonly string[]> {
+  const leaseCutoff = new Date().toISOString();
+  const stats = await createConvexHttpClient(deployment).query(convexApi.stats, {
+    ...clientProtocolInput(),
+    auth_token: authToken,
+    lease_cutoff: leaseCutoff,
+    scope: { repo: null },
+  });
+  return "repos" in stats
+    ? stats.repos.map((repository) => repository.repo)
+    : pagedConvexRepositories(deployment, authToken, leaseCutoff, stats);
+}
+
 export function createConvexOnboardingOperations(): ConvexOnboardingOperations {
   return {
     migrateReadyStatuses: (deployment, adminSecret) =>
@@ -569,14 +620,6 @@ export function createConvexOnboardingOperations(): ConvexOnboardingOperations {
         ...clientProtocolInput(),
         auth_token: authToken,
       }),
-    repositories: async (deployment, authToken) => {
-      const stats = await createConvexHttpClient(deployment).query(convexApi.stats, {
-        ...clientProtocolInput(),
-        auth_token: authToken,
-        lease_cutoff: new Date().toISOString(),
-        scope: { repo: null },
-      });
-      return stats.repos.map((repository) => repository.repo);
-    },
+    repositories: listConvexRepositories,
   };
 }
