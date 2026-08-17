@@ -607,10 +607,6 @@ export class FederatedQuestStore implements QuestStore {
     return Promise.reject(readOnlyMutationError());
   }
 
-  acceptQuestAndExport(_input: AcceptQuestInput): ReturnType<QuestStore["acceptQuestAndExport"]> {
-    return Promise.reject(readOnlyMutationError());
-  }
-
   touchQuest(_input: TouchQuestInput): Promise<Quest> {
     return Promise.reject(readOnlyMutationError());
   }

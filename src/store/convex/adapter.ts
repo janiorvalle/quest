@@ -39,7 +39,6 @@ import type {
   FederatedFullSnapshot,
   FederatedReadSnapshot,
   FederatedSnapshotWatchListener,
-  AcceptQuestAndExportResult as PortAcceptQuestAndExportResult,
   QuestDetailSnapshot,
   QuestStore,
   QuestWatchListener,
@@ -404,18 +403,6 @@ export class ConvexStore implements QuestStore {
         detail: detailSnapshotFromDump(legacy.snapshot, parsed.id),
       };
     }
-  }
-
-  async acceptQuestAndExport(input: AcceptQuestInput): Promise<PortAcceptQuestAndExportResult> {
-    const parsed = acceptQuestInputSchema.parse(input);
-    return this.#clients.http.mutation(
-      convexApi.acceptQuestAndExport,
-      testableMutation(
-        this.#clients,
-        addConfiguredLeaseTtl(parsed, this.#leaseTtlMinutes),
-        this.#consumeEventFailure(),
-      ),
-    );
   }
 
   async touchQuest(input: TouchQuestInput): Promise<Quest> {

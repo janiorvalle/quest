@@ -67,7 +67,6 @@ import {
 } from "../../schema";
 import type {
   AcceptQuestAndDetailResult,
-  AcceptQuestAndExportResult,
   BackupDatabaseInspection,
   FederatedFullSnapshot,
   FederatedReadSnapshot,
@@ -485,22 +484,6 @@ export class SqliteStore implements QuestStore {
       return {
         acceptance: this.#acceptQuest(parsed),
         detail: this.#readQuestDetail(parsed.id),
-      };
-    });
-    if (result.acceptance.outcome === "accepted") {
-      this.#emitWatchers();
-    }
-    return result;
-  }
-
-  async acceptQuestAndExport(input: AcceptQuestInput): Promise<AcceptQuestAndExportResult> {
-    const parsed = acceptQuestInputSchema.parse(input);
-    const result = this.#writeTransaction(() => {
-      const current = this.#requireStoredQuest(parsed.id);
-      this.#requireRepositoryUnfenced(current.repo);
-      return {
-        acceptance: this.#acceptQuest(parsed),
-        snapshot: this.#readQuestDump(),
       };
     });
     if (result.acceptance.outcome === "accepted") {

@@ -111,11 +111,6 @@ const nonconformingFactory: QuestStoreFactory = async (): Promise<QuestStoreHarn
       return { acceptance, detail: await store.readQuestDetail(input.id) };
     },
 
-    async acceptQuestAndExport(input): ReturnType<QuestStore["acceptQuestAndExport"]> {
-      const acceptance = await store.acceptQuest(input);
-      return { acceptance, snapshot: await store.exportAll() };
-    },
-
     async touchQuest(input): ReturnType<QuestStore["touchQuest"]> {
       return findQuest(input.id);
     },

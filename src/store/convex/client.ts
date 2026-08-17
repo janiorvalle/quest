@@ -37,7 +37,6 @@ import type {
 } from "../../schema";
 import type {
   AcceptQuestAndDetailResult,
-  AcceptQuestAndExportResult,
   Clock,
   FederatedFullSnapshot,
   FederatedReadSnapshot,
@@ -81,6 +80,11 @@ export interface ConvexActiveRestore {
   readonly token: string;
 }
 
+interface LegacyAcceptQuestAndExportResult {
+  readonly acceptance: AcceptResult;
+  readonly snapshot: QuestDump;
+}
+
 export interface ConvexCommitRestoreResult {
   readonly status: "committed";
   readonly lease_cutoff: string;
@@ -114,7 +118,7 @@ export const convexApi = {
   acceptQuestAndExport: makeFunctionReference<
     "mutation",
     AuthenticatedMutation<AcceptQuestInput>,
-    AcceptQuestAndExportResult
+    LegacyAcceptQuestAndExportResult
   >("quest:acceptQuestAndExport"),
   touchQuest: makeFunctionReference<"mutation", AuthenticatedMutation<TouchQuestInput>, Quest>(
     "quest:touchQuest",

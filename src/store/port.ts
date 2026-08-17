@@ -88,11 +88,6 @@ export interface QuestDetailSnapshot {
   readonly related_quests: readonly Quest[];
 }
 
-export interface AcceptQuestAndExportResult {
-  readonly acceptance: AcceptResult;
-  readonly snapshot: QuestDump;
-}
-
 export interface AcceptQuestAndDetailResult {
   readonly acceptance: AcceptResult;
   readonly detail: QuestDetailSnapshot;
@@ -115,9 +110,6 @@ export interface QuestStore {
 
   /** Atomically accepts a quest and reads only the detail rows needed for its briefing package. */
   acceptQuestAndDetail(input: AcceptQuestInput): Promise<AcceptQuestAndDetailResult>;
-
-  /** Atomically accepts a quest and returns the same backend snapshot for the briefing package. */
-  acceptQuestAndExport(input: AcceptQuestInput): Promise<AcceptQuestAndExportResult>;
 
   /** Atomically renews the owning quest lease and appends a touch event. */
   touchQuest(input: TouchQuestInput): Promise<Quest>;
