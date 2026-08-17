@@ -2818,7 +2818,7 @@ export const activeRestore = queryGeneric({
     if (lease.commit_phase !== undefined) {
       return { status: lease.commit_phase, token: lease.token };
     }
-    return null;
+    return { status: "staged" as const, token: lease.token };
   },
 });
 

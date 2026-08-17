@@ -1252,6 +1252,10 @@ export class ConvexStore implements QuestStore {
     if (active === null) {
       return false;
     }
+    if (active.status === "staged") {
+      await this.releaseRestore(active.token);
+      return true;
+    }
     if (active.status !== "committed") {
       await this.#commitRestoreResolvingAmbiguity(active.token);
     }

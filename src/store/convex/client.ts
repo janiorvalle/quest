@@ -77,7 +77,7 @@ export type ConvexRestoreStatus =
   | { readonly status: "committed"; readonly lease_cutoff: string };
 
 export interface ConvexActiveRestore {
-  readonly status: "committed" | "copying" | "deleting";
+  readonly status: "committed" | "copying" | "deleting" | "staged";
   readonly token: string;
 }
 

@@ -237,6 +237,36 @@ if (deployment === undefined || authToken === undefined) {
     }
   });
 
+  test.serial("a fresh Convex client clears a restore interrupted before commit", async () => {
+    const primaryClients = createConvexClientPair(deployment, { authToken });
+    const freshClients = createConvexClientPair(deployment, { authToken });
+    const primary = new ConvexStore(deployment, { clients: primaryClients });
+    const fresh = new ConvexStore(deployment, { clients: freshClients });
+    let token: string | undefined;
+    try {
+      await primary.replaceAll(emptyDump);
+      const previous = await primary.exportAllWithCutoff();
+      token = await primary.beginRestore(
+        previous.dump,
+        previous.lease_cutoff,
+        "full-backup",
+        previous.event_high_water,
+      );
+      await primary.activateRestore(token, emptyDump);
+
+      expect(await fresh.resumeInterruptedRestore()).toBeTrue();
+      token = undefined;
+      expect(await fresh.exportAll()).toEqual(previous.dump);
+    } finally {
+      if (token !== undefined) {
+        await primary.releaseRestore(token).catch(() => undefined);
+      }
+      await fresh.replaceAll(emptyDump).catch(() => undefined);
+      await closeConvexClientPair(primaryClients);
+      await closeConvexClientPair(freshClients);
+    }
+  });
+
   test.serial("ConvexBlobStore snapshots caller bytes before upload", async () => {
     const clients = createConvexClientPair(deployment, { authToken });
     const store = new ConvexBlobStore(deployment, { clients });
