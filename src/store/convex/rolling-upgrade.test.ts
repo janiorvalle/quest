@@ -100,15 +100,7 @@ if (deployment !== undefined && authToken !== undefined) {
           );
         }
 
-        let missingQueryError = "";
-        try {
-          await clients.http.query(convexApi.federatedListSnapshot, { auth_token: authToken });
-        } catch (error: unknown) {
-          missingQueryError = error instanceof Error ? error.message : String(error);
-        }
-        expect(missingQueryError).not.toBe("");
-
-        const legacySnapshot = await clients.http.query(convexApi.federatedSnapshot, {
+        const legacySnapshot = await clients.http.query(convexApi.federatedListSnapshot, {
           auth_token: authToken,
         });
         const rCycle: Array<{ readonly repository: string; readonly titles: readonly string[] }> =
@@ -133,9 +125,8 @@ if (deployment !== undefined && authToken !== undefined) {
             `${JSON.stringify(
               {
                 allRepositories,
-                fallback: "quest:federatedSnapshot",
+                fallback: "client_protocol omitted for strict main validators",
                 legacyPayloadBytes: Buffer.byteLength(JSON.stringify(legacySnapshot)),
-                missingQueryError,
                 rCycle,
               },
               null,

@@ -42,13 +42,14 @@ import type {
   FederatedReadSnapshot,
   QuestDetailSnapshot,
 } from "../port";
+import { type ClientProtocolInput, clientProtocolInput } from "./protocol";
 
 type TestableMutation<T> = {
   readonly input: T;
   readonly test_failure?: boolean;
 };
 
-type AuthTokenInput = {
+type AuthTokenInput = ClientProtocolInput & {
   readonly auth_token?: string;
 };
 
@@ -70,13 +71,11 @@ export interface ConvexReadyStatusMigrationResult {
 }
 
 export const convexApi = {
-  schemaVersion: makeFunctionReference<"query", Record<string, never>, number>(
-    "quest:schemaVersion",
-  ),
-  serverTime: makeFunctionReference<"query", Record<string, never>, string>("quest:serverTime"),
+  schemaVersion: makeFunctionReference<"query", ClientProtocolInput, number>("quest:schemaVersion"),
+  serverTime: makeFunctionReference<"query", ClientProtocolInput, string>("quest:serverTime"),
   migrateReadyStatuses: makeFunctionReference<
     "mutation",
-    { readonly admin_secret: string },
+    ClientProtocolInput & { readonly admin_secret: string },
     ConvexReadyStatusMigrationResult
   >("quest:migrateReadyStatuses"),
   addQuest: makeFunctionReference<"mutation", AuthenticatedMutation<NewQuest>, Quest>(
@@ -97,8 +96,7 @@ export const convexApi = {
   ),
   transition: makeFunctionReference<
     "mutation",
-    {
-      readonly auth_token?: string;
+    AuthTokenInput & {
       readonly id: number;
       readonly transition: QuestTransition;
       readonly test_failure?: boolean;
@@ -107,8 +105,7 @@ export const convexApi = {
   >("quest:transition"),
   signoffBatch: makeFunctionReference<
     "mutation",
-    {
-      readonly auth_token?: string;
+    AuthTokenInput & {
       readonly input: SignoffBatchInput;
       readonly test_failure?: boolean;
     },
@@ -129,64 +126,57 @@ export const convexApi = {
   ),
   listQuests: makeFunctionReference<
     "query",
-    { readonly auth_token?: string; readonly filter: QuestFilter; readonly lease_cutoff: string },
+    AuthTokenInput & { readonly filter: QuestFilter; readonly lease_cutoff: string },
     Quest[]
   >("quest:listQuests"),
   getQuest: makeFunctionReference<
     "query",
-    { readonly auth_token?: string; readonly id: number; readonly lease_cutoff: string },
+    AuthTokenInput & { readonly id: number; readonly lease_cutoff: string },
     Quest | null
   >("quest:getQuest"),
   questDetail: makeFunctionReference<
     "query",
-    { readonly auth_token?: string; readonly id: number },
+    AuthTokenInput & { readonly id: number },
     QuestDetailSnapshot
   >("quest:questDetail"),
   stats: makeFunctionReference<
     "query",
-    { readonly auth_token?: string; readonly scope: QuestScope; readonly lease_cutoff: string },
+    AuthTokenInput & { readonly scope: QuestScope; readonly lease_cutoff: string },
     QuestStats
   >("quest:stats"),
-  fencedRepositories: makeFunctionReference<"query", { readonly auth_token?: string }, string[]>(
+  fencedRepositories: makeFunctionReference<"query", AuthTokenInput, string[]>(
     "quest:fencedRepositories",
   ),
   federatedListSnapshot: makeFunctionReference<
     "query",
-    { readonly auth_token?: string; readonly repository?: string },
+    AuthTokenInput & { readonly repository?: string },
     FederatedReadSnapshot
   >("quest:federatedListSnapshot"),
-  federatedSnapshot: makeFunctionReference<
-    "query",
-    { readonly auth_token?: string },
-    FederatedFullSnapshot
-  >("quest:federatedSnapshot"),
-  events: makeFunctionReference<
-    "query",
-    { readonly auth_token?: string; readonly quest_id: number },
-    Event[]
-  >("quest:events"),
+  federatedSnapshot: makeFunctionReference<"query", AuthTokenInput, FederatedFullSnapshot>(
+    "quest:federatedSnapshot",
+  ),
+  events: makeFunctionReference<"query", AuthTokenInput & { readonly quest_id: number }, Event[]>(
+    "quest:events",
+  ),
   queryEvents: makeFunctionReference<
     "query",
-    { readonly auth_token?: string; readonly filter: EventFilter; readonly lease_cutoff: string },
+    AuthTokenInput & { readonly filter: EventFilter; readonly lease_cutoff: string },
     Event[]
   >("quest:queryEvents"),
   exportAll: makeFunctionReference<
     "query",
-    { readonly auth_token?: string; readonly lease_cutoff: string },
+    AuthTokenInput & { readonly lease_cutoff: string },
     QuestDump
   >("quest:exportAll"),
-  rawExportAll: makeFunctionReference<"query", { readonly auth_token?: string }, QuestDump>(
-    "quest:rawExportAll",
-  ),
+  rawExportAll: makeFunctionReference<"query", AuthTokenInput, QuestDump>("quest:rawExportAll"),
   replaceAll: makeFunctionReference<
     "mutation",
-    { readonly auth_token?: string; readonly dump: QuestDump },
+    AuthTokenInput & { readonly dump: QuestDump },
     null
   >("quest:replaceAll"),
   beginRestore: makeFunctionReference<
     "mutation",
-    {
-      readonly auth_token?: string;
+    AuthTokenInput & {
       readonly token: string;
       readonly expected_snapshot: string;
       readonly lease_cutoff: string;
@@ -196,19 +186,18 @@ export const convexApi = {
   >("quest:beginRestore"),
   renewRestore: makeFunctionReference<
     "mutation",
-    { readonly auth_token?: string; readonly token: string },
+    AuthTokenInput & { readonly token: string },
     null
   >("quest:renewRestore"),
   restoreStatus: makeFunctionReference<
     "query",
-    { readonly auth_token?: string; readonly token: string },
+    AuthTokenInput & { readonly token: string },
     | { readonly status: "active" | "missing" }
     | { readonly status: "committed"; readonly dump: QuestDump }
   >("quest:restoreStatus"),
   activateRestore: makeFunctionReference<
     "mutation",
-    {
-      readonly auth_token?: string;
+    AuthTokenInput & {
       readonly token: string;
       readonly dump: QuestDump;
     },
@@ -216,37 +205,41 @@ export const convexApi = {
   >("quest:activateRestore"),
   fenceRepository: makeFunctionReference<
     "mutation",
-    { readonly token: string; readonly repo: string; readonly target_backend: string },
+    ClientProtocolInput & {
+      readonly token: string;
+      readonly repo: string;
+      readonly target_backend: string;
+    },
     null
   >("quest:fenceRepository"),
   unfenceRepository: makeFunctionReference<
     "mutation",
-    { readonly token: string; readonly repo: string },
+    ClientProtocolInput & { readonly token: string; readonly repo: string },
     boolean
   >("quest:unfenceRepository"),
   recoverRepositoryFence: makeFunctionReference<
     "mutation",
-    { readonly auth_token?: string; readonly repo: string },
+    AuthTokenInput & { readonly repo: string },
     boolean
   >("quest:recoverRepositoryFence"),
   recoverMigrationFenceForRestore: makeFunctionReference<
     "mutation",
-    { readonly auth_token?: string; readonly token: string; readonly repo: string },
+    AuthTokenInput & { readonly token: string; readonly repo: string },
     boolean
   >("quest:recoverMigrationFenceForRestore"),
   commitRestore: makeFunctionReference<
     "mutation",
-    { readonly auth_token?: string; readonly token: string },
+    AuthTokenInput & { readonly token: string },
     QuestDump | null
   >("quest:commitRestore"),
   releaseRestore: makeFunctionReference<
     "mutation",
-    { readonly auth_token?: string; readonly token: string },
+    AuthTokenInput & { readonly token: string },
     null
   >("quest:releaseRestore"),
   rollbackRestore: makeFunctionReference<
     "mutation",
-    { readonly auth_token?: string; readonly token: string },
+    AuthTokenInput & { readonly token: string },
     null
   >("quest:rollbackRestore"),
   generateBlobUploadUrl: makeFunctionReference<"mutation", AuthTokenInput, string>(
@@ -254,8 +247,7 @@ export const convexApi = {
   ),
   finalizeBlobUpload: makeFunctionReference<
     "action",
-    {
-      readonly auth_token?: string;
+    AuthTokenInput & {
       readonly sha256: Sha256;
       readonly storage_id: string;
       readonly replace_existing?: boolean;
@@ -264,40 +256,40 @@ export const convexApi = {
   >("blob:finalizeUpload"),
   getBlobUrl: makeFunctionReference<
     "query",
-    { readonly auth_token?: string; readonly sha256: Sha256 },
+    AuthTokenInput & { readonly sha256: Sha256 },
     string | null
   >("blob:getUrl"),
-  hasBlob: makeFunctionReference<
-    "query",
-    { readonly auth_token?: string; readonly sha256: Sha256 },
-    boolean
-  >("blob:has"),
+  hasBlob: makeFunctionReference<"query", AuthTokenInput & { readonly sha256: Sha256 }, boolean>(
+    "blob:has",
+  ),
   membersInvite: makeFunctionReference<
     "mutation",
-    { readonly admin_secret: string; readonly name: string },
+    ClientProtocolInput & { readonly admin_secret: string; readonly name: string },
     { readonly member: string; readonly token: string }
   >("members:invite"),
   membersRotate: makeFunctionReference<
     "mutation",
-    { readonly admin_secret: string; readonly name: string },
+    ClientProtocolInput & { readonly admin_secret: string; readonly name: string },
     { readonly member: string; readonly old_key_expires_at: number; readonly token: string }
   >("members:rotate"),
   membersRemove: makeFunctionReference<
     "mutation",
-    { readonly admin_secret: string; readonly name: string },
+    ClientProtocolInput & { readonly admin_secret: string; readonly name: string },
     { readonly member: string; readonly revoked_keys: number }
   >("members:remove"),
-  membersList: makeFunctionReference<"query", { readonly admin_secret: string }, ConvexMember[]>(
-    "members:list",
-  ),
+  membersList: makeFunctionReference<
+    "query",
+    ClientProtocolInput & { readonly admin_secret: string },
+    ConvexMember[]
+  >("members:list"),
   join: makeFunctionReference<
     "mutation",
-    { readonly invite_token: string },
+    ClientProtocolInput & { readonly invite_token: string },
     { readonly member: string; readonly token: string }
   >("members:join"),
   whoami: makeFunctionReference<
     "mutation",
-    { readonly auth_token: string },
+    ClientProtocolInput & { readonly auth_token: string },
     { readonly member: string }
   >("members:whoami"),
 };
@@ -306,10 +298,37 @@ export interface ConvexClientPair {
   readonly http: NativeConvexHttpClient;
   readonly realtime: ConvexClient;
   readonly authToken?: string;
+  readonly protocol?: ConvexClientProtocol;
 }
 
-export function authTokenInput(clients: Pick<ConvexClientPair, "authToken">): AuthTokenInput {
-  return clients.authToken === undefined ? {} : { auth_token: clients.authToken };
+export interface ConvexClientProtocol {
+  input(): ClientProtocolInput;
+}
+
+class ConvexClientProtocolState implements ConvexClientProtocol {
+  #legacy = false;
+
+  input(): ClientProtocolInput {
+    return this.#legacy ? {} : clientProtocolInput();
+  }
+
+  selectLegacyProtocol(): void {
+    this.#legacy = true;
+  }
+}
+
+export function convexClientProtocolInput(
+  clients: Pick<ConvexClientPair, "protocol">,
+): ClientProtocolInput {
+  return clients.protocol?.input() ?? clientProtocolInput();
+}
+
+export function authTokenInput(
+  clients: Pick<ConvexClientPair, "authToken" | "protocol">,
+): AuthTokenInput {
+  return clients.authToken === undefined
+    ? convexClientProtocolInput(clients)
+    : { ...convexClientProtocolInput(clients), auth_token: clients.authToken };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -328,49 +347,92 @@ function normalizeConvexError(error: unknown): unknown {
   return new Error(`[${code}] ${message}`);
 }
 
+function withClientProtocol<Args extends readonly unknown[]>(args: Args): Args {
+  const [input, ...rest] = args;
+  return [
+    { ...(input as Readonly<Record<string, unknown>>), ...clientProtocolInput() },
+    ...rest,
+  ] as unknown as Args;
+}
+
+function withoutClientProtocol<Args extends readonly unknown[]>(args: Args): Args {
+  const [input, ...rest] = args;
+  const { client_protocol: _clientProtocol, ...legacyInput } = input as Readonly<
+    Record<string, unknown>
+  >;
+  return [legacyInput, ...rest] as unknown as Args;
+}
+
+function isUnsupportedClientProtocol(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /ArgumentValidationError[\s\S]*(?:extra field|not in the validator)[\s\S]*client_protocol|ArgumentValidationError[\s\S]*client_protocol[\s\S]*(?:extra field|not in the validator)/i.test(
+      error.message,
+    )
+  );
+}
+
 class QuestConvexHttpClient extends NativeConvexHttpClient {
+  readonly #protocol: ConvexClientProtocolState;
+
+  constructor(
+    address: string,
+    options: ConstructorParameters<typeof NativeConvexHttpClient>[1],
+    protocol: ConvexClientProtocolState,
+  ) {
+    super(address, options);
+    this.#protocol = protocol;
+  }
+
+  async #request<Args extends readonly unknown[], Result>(
+    args: Args,
+    request: (nextArgs: Args) => Promise<Result>,
+  ): Promise<Result> {
+    const nextArgs =
+      this.#protocol.input().client_protocol === undefined
+        ? withoutClientProtocol(args)
+        : withClientProtocol(args);
+    try {
+      return await request(nextArgs);
+    } catch (error: unknown) {
+      if (!isUnsupportedClientProtocol(error)) {
+        throw normalizeConvexError(error);
+      }
+      this.#protocol.selectLegacyProtocol();
+      try {
+        return await request(withoutClientProtocol(args));
+      } catch (retryError: unknown) {
+        throw normalizeConvexError(retryError);
+      }
+    }
+  }
+
   override async consistentQuery<Query extends FunctionReference<"query">>(
     query: Query,
     ...args: OptionalRestArgs<Query>
   ): Promise<FunctionReturnType<Query>> {
-    try {
-      return await super.consistentQuery(query, ...args);
-    } catch (error: unknown) {
-      throw normalizeConvexError(error);
-    }
+    return this.#request(args, (nextArgs) => super.consistentQuery(query, ...nextArgs));
   }
 
   override async query<Query extends FunctionReference<"query">>(
     query: Query,
     ...args: OptionalRestArgs<Query>
   ): Promise<FunctionReturnType<Query>> {
-    try {
-      return await super.query(query, ...args);
-    } catch (error: unknown) {
-      throw normalizeConvexError(error);
-    }
+    return this.#request(args, (nextArgs) => super.query(query, ...nextArgs));
   }
 
   override async mutation<Mutation extends FunctionReference<"mutation">>(
     mutation: Mutation,
     ...args: ArgsAndOptions<Mutation, HttpMutationOptions>
   ): Promise<FunctionReturnType<Mutation>> {
-    try {
-      return await super.mutation(mutation, ...args);
-    } catch (error: unknown) {
-      throw normalizeConvexError(error);
-    }
+    return this.#request(args, (nextArgs) => super.mutation(mutation, ...nextArgs));
   }
 
   override async action<Action extends FunctionReference<"action">>(
     action: Action,
     ...args: OptionalRestArgs<Action>
   ): Promise<FunctionReturnType<Action>> {
-    try {
-      return await super.action(action, ...args);
-    } catch (error: unknown) {
-      throw normalizeConvexError(error);
-    }
+    return this.#request(args, (nextArgs) => super.action(action, ...nextArgs));
   }
 }
 
@@ -406,11 +468,16 @@ export function createConvexHttpClient(
   options: ConvexHttpClientOptions = {},
 ): NativeConvexHttpClient {
   const deployment = requireConvexClientDeployment(address);
-  return new QuestConvexHttpClient(deployment, {
-    logger: false,
-    skipConvexDeploymentUrlCheck: true,
-    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
-  });
+  const protocol = new ConvexClientProtocolState();
+  return new QuestConvexHttpClient(
+    deployment,
+    {
+      logger: false,
+      skipConvexDeploymentUrlCheck: true,
+      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    },
+    protocol,
+  );
 }
 
 export function createConvexClientPair(
@@ -418,12 +485,21 @@ export function createConvexClientPair(
   options: { readonly authToken?: string } = {},
 ): ConvexClientPair {
   const deployment = requireConvexClientDeployment(address);
+  const protocol = new ConvexClientProtocolState();
   return {
-    http: createConvexHttpClient(deployment),
+    http: new QuestConvexHttpClient(
+      deployment,
+      {
+        logger: false,
+        skipConvexDeploymentUrlCheck: true,
+      },
+      protocol,
+    ),
     realtime: new ConvexClient(deployment, {
       logger: false,
       skipConvexDeploymentUrlCheck: true,
     }),
+    protocol,
     ...(options.authToken === undefined ? {} : { authToken: options.authToken }),
   };
 }
@@ -434,6 +510,6 @@ export async function closeConvexClientPair(clients: ConvexClientPair): Promise<
 
 export function createConvexClock(clients: ConvexClientPair): Clock {
   return {
-    now: () => clients.http.query(convexApi.serverTime, {}),
+    now: () => clients.http.query(convexApi.serverTime, convexClientProtocolInput(clients)),
   };
 }

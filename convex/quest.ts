@@ -71,8 +71,9 @@ import { assertAdminSecret } from "./admin";
 import { requireMemberActor, requireMemberQueryActor } from "./auth";
 import type schema from "./schema";
 
-const emptyArgs = {};
-const failureArgs = { test_failure: v.optional(v.boolean()) };
+const clientProtocolArgs = { client_protocol: v.optional(v.number()) };
+const emptyArgs = clientProtocolArgs;
+const failureArgs = { ...clientProtocolArgs, test_failure: v.optional(v.boolean()) };
 
 type QuestDomainErrorCode =
   | "BACKUP_FULL_RESTORE_FENCED"
@@ -1281,7 +1282,7 @@ export const schemaVersion = queryGeneric({
 });
 
 export const migrateReadyStatuses = mutationGeneric({
-  args: { admin_secret: v.string() },
+  args: { admin_secret: v.string(), ...clientProtocolArgs },
   handler: async (ctx, args) => {
     await assertAdminSecret(args.admin_secret);
     await requireNoRestoreLease(ctx);
@@ -1307,8 +1308,8 @@ export const serverTime = queryGeneric({
 export const addQuest = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
+    const actor = await requireMemberActor(ctx, args);
     await requireNoRestoreLease(ctx);
-    const actor = await requireMemberActor(ctx, args.auth_token);
     const parsed = newQuestSchema.parse(args.input);
     await requireRepositoryNotFenced(ctx, parsed.repo);
     if (!isValidBackfill(parsed)) {
@@ -1428,7 +1429,7 @@ async function accept(
 export const acceptQuest = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
-    const actor = await requireMemberActor(ctx, args.auth_token);
+    const actor = await requireMemberActor(ctx, args);
     const parsed = acceptQuestInputSchema.parse(args.input);
     return accept(ctx, { ...parsed, owner: actor }, args.test_failure);
   },
@@ -1437,7 +1438,7 @@ export const acceptQuest = mutationGeneric({
 export const acceptQuestAndExport = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
-    const actor = await requireMemberActor(ctx, args.auth_token);
+    const actor = await requireMemberActor(ctx, args);
     const parsed = acceptQuestInputSchema.parse(args.input);
     const acceptance = await accept(ctx, { ...parsed, owner: actor }, args.test_failure);
     // The port requires one atomic full snapshot here; pagination would change the provider contract.
@@ -1448,8 +1449,8 @@ export const acceptQuestAndExport = mutationGeneric({
 export const touchQuest = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
+    const actor = await requireMemberActor(ctx, args);
     await requireNoRestoreLease(ctx);
-    const actor = await requireMemberActor(ctx, args.auth_token);
     const parsed = touchQuestInputSchema.parse(args.input);
     const input = { ...parsed, owner: actor };
     const record = await requireQuestRecord(ctx, input.id);
@@ -1481,8 +1482,8 @@ export const touchQuest = mutationGeneric({
 export const transition = mutationGeneric({
   args: { auth_token: v.optional(v.string()), id: v.number(), transition: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
+    const actor = await requireMemberActor(ctx, args);
     await requireNoRestoreLease(ctx);
-    const actor = await requireMemberActor(ctx, args.auth_token);
     const id = questSchema.shape.id.parse(args.id);
     const parsedTransition = questTransitionSchema.parse(args.transition);
     const transitionInput = questTransitionSchema.parse({ ...parsedTransition, actor });
@@ -1735,8 +1736,8 @@ async function persistSignoffBatch(
 export const signoffBatch = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
+    const actor = await requireMemberActor(ctx, args);
     await requireNoRestoreLease(ctx);
-    const actor = await requireMemberActor(ctx, args.auth_token);
     const parsed = signoffBatchInputSchema.parse(args.input);
     const prepared = await prepareSignoffBatch(ctx, parsed, actor);
     return persistSignoffBatch(ctx, prepared, args.test_failure);
@@ -1746,8 +1747,8 @@ export const signoffBatch = mutationGeneric({
 export const addChainLink = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
+    const actor = await requireMemberActor(ctx, args);
     await requireNoRestoreLease(ctx);
-    const actor = await requireMemberActor(ctx, args.auth_token);
     const parsed = chainMutationSchema.parse(args.input);
     const input = chainMutationSchema.parse({ ...parsed, actor });
     const timestamp = now();
@@ -1801,8 +1802,8 @@ export const addChainLink = mutationGeneric({
 export const removeChainLink = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
+    const actor = await requireMemberActor(ctx, args);
     await requireNoRestoreLease(ctx);
-    const actor = await requireMemberActor(ctx, args.auth_token);
     const parsed = chainMutationSchema.parse(args.input);
     const input = chainMutationSchema.parse({ ...parsed, actor });
     const timestamp = now();
@@ -1855,8 +1856,8 @@ export const removeChainLink = mutationGeneric({
 export const addEvidence = mutationGeneric({
   args: { auth_token: v.optional(v.string()), input: v.any(), ...failureArgs },
   handler: async (ctx, args) => {
+    const actor = await requireMemberActor(ctx, args);
     await requireNoRestoreLease(ctx);
-    const actor = await requireMemberActor(ctx, args.auth_token);
     const parsed = newEvidenceSchema.parse(args.input);
     const input = newEvidenceSchema.parse({ ...parsed, added_by: actor });
     const record = await requireQuestRecord(ctx, input.quest_id);
@@ -1910,9 +1911,14 @@ export const addEvidence = mutationGeneric({
 });
 
 export const listQuests = queryGeneric({
-  args: { auth_token: v.optional(v.string()), filter: v.any(), lease_cutoff: v.string() },
+  args: {
+    auth_token: v.optional(v.string()),
+    filter: v.any(),
+    lease_cutoff: v.string(),
+    ...clientProtocolArgs,
+  },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args.auth_token);
+    await requireMemberQueryActor(ctx, args);
     const filter = questFilterSchema.parse(args.filter);
     return filterQuests(
       await readQuests(ctx, parseLeaseCutoff(args.lease_cutoff)),
@@ -1923,9 +1929,9 @@ export const listQuests = queryGeneric({
 });
 
 export const fencedRepositories = queryGeneric({
-  args: { auth_token: v.optional(v.string()) },
+  args: { auth_token: v.optional(v.string()), ...clientProtocolArgs },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args.auth_token);
+    await requireMemberQueryActor(ctx, args);
     return (await ctx.db.query("migration_fences").collect())
       .filter((fence) => fence.unfenced !== true)
       .map((fence) => fence.repo)
@@ -1934,9 +1940,9 @@ export const fencedRepositories = queryGeneric({
 });
 
 export const federatedSnapshot = queryGeneric({
-  args: { auth_token: v.optional(v.string()) },
+  args: { auth_token: v.optional(v.string()), ...clientProtocolArgs },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args.auth_token);
+    await requireMemberQueryActor(ctx, args);
     const timestamp = now();
     return {
       dump: await exportDump(ctx, timestamp),
@@ -1949,9 +1955,13 @@ export const federatedSnapshot = queryGeneric({
 });
 
 export const federatedListSnapshot = queryGeneric({
-  args: { auth_token: v.optional(v.string()), repository: v.optional(v.string()) },
+  args: {
+    auth_token: v.optional(v.string()),
+    repository: v.optional(v.string()),
+    ...clientProtocolArgs,
+  },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args.auth_token);
+    await requireMemberQueryActor(ctx, args);
     const repository =
       args.repository === undefined ? undefined : questSchema.shape.repo.parse(args.repository);
     return {
@@ -1965,9 +1975,14 @@ export const federatedListSnapshot = queryGeneric({
 });
 
 export const getQuest = queryGeneric({
-  args: { auth_token: v.optional(v.string()), id: v.number(), lease_cutoff: v.string() },
+  args: {
+    auth_token: v.optional(v.string()),
+    id: v.number(),
+    lease_cutoff: v.string(),
+    ...clientProtocolArgs,
+  },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args.auth_token);
+    await requireMemberQueryActor(ctx, args);
     const id = questSchema.shape.id.parse(args.id);
     const record = await findQuestRecord(ctx, id);
     return record === null
@@ -1977,9 +1992,9 @@ export const getQuest = queryGeneric({
 });
 
 export const questDetail = queryGeneric({
-  args: { auth_token: v.optional(v.string()), id: v.number() },
+  args: { auth_token: v.optional(v.string()), id: v.number(), ...clientProtocolArgs },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args.auth_token);
+    await requireMemberQueryActor(ctx, args);
     const id = questSchema.shape.id.parse(args.id);
     const quest = materializeExpiredLease(
       parseQuestDocument(await requireQuestRecord(ctx, id)),
@@ -2010,9 +2025,14 @@ export const questDetail = queryGeneric({
 });
 
 export const stats = queryGeneric({
-  args: { auth_token: v.optional(v.string()), scope: v.any(), lease_cutoff: v.string() },
+  args: {
+    auth_token: v.optional(v.string()),
+    scope: v.any(),
+    lease_cutoff: v.string(),
+    ...clientProtocolArgs,
+  },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args.auth_token);
+    await requireMemberQueryActor(ctx, args);
     return buildStats(
       await readQuests(ctx, parseLeaseCutoff(args.lease_cutoff)),
       questScopeSchema.parse(args.scope),
@@ -2021,18 +2041,23 @@ export const stats = queryGeneric({
 });
 
 export const events = queryGeneric({
-  args: { auth_token: v.optional(v.string()), quest_id: v.number() },
+  args: { auth_token: v.optional(v.string()), quest_id: v.number(), ...clientProtocolArgs },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args.auth_token);
+    await requireMemberQueryActor(ctx, args);
     const id = questSchema.shape.id.parse(args.quest_id);
     return readQuestEvents(ctx, id);
   },
 });
 
 export const queryEvents = queryGeneric({
-  args: { auth_token: v.optional(v.string()), filter: v.any(), lease_cutoff: v.string() },
+  args: {
+    auth_token: v.optional(v.string()),
+    filter: v.any(),
+    lease_cutoff: v.string(),
+    ...clientProtocolArgs,
+  },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args.auth_token);
+    await requireMemberQueryActor(ctx, args);
     const filter = eventFilterSchema.parse(args.filter);
     const quests = await readQuests(ctx, parseLeaseCutoff(args.lease_cutoff));
     const byId = new Map(quests.map((quest) => [quest.id, quest]));
@@ -2054,26 +2079,30 @@ export const queryEvents = queryGeneric({
 });
 
 export const exportAll = queryGeneric({
-  args: { auth_token: v.optional(v.string()), lease_cutoff: v.string() },
+  args: {
+    auth_token: v.optional(v.string()),
+    lease_cutoff: v.string(),
+    ...clientProtocolArgs,
+  },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args.auth_token);
+    await requireMemberQueryActor(ctx, args);
     return exportDump(ctx, parseLeaseCutoff(args.lease_cutoff));
   },
 });
 
 export const rawExportAll = queryGeneric({
-  args: { auth_token: v.optional(v.string()) },
+  args: { auth_token: v.optional(v.string()), ...clientProtocolArgs },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args.auth_token);
+    await requireMemberQueryActor(ctx, args);
     return exportRawDump(ctx);
   },
 });
 
 export const replaceAll = mutationGeneric({
-  args: { auth_token: v.optional(v.string()), dump: v.any() },
+  args: { auth_token: v.optional(v.string()), dump: v.any(), ...clientProtocolArgs },
   handler: async (ctx, args) => {
+    await requireMemberActor(ctx, args);
     await requireNoRestoreLease(ctx);
-    await requireMemberActor(ctx, args.auth_token);
     await restoreDump(ctx, questDumpSchema.parse(args.dump));
     return null;
   },
@@ -2086,9 +2115,10 @@ export const beginRestore = mutationGeneric({
     expected_snapshot: v.string(),
     lease_cutoff: v.string(),
     restore_kind: v.optional(v.literal("full-backup")),
+    ...clientProtocolArgs,
   },
   handler: async (ctx, args) => {
-    await requireMemberActor(ctx, args.auth_token);
+    await requireMemberActor(ctx, args);
     const token = args.token.trim();
     if (token === "") {
       failQuestDomain(
@@ -2144,9 +2174,9 @@ export const beginRestore = mutationGeneric({
 });
 
 export const renewRestore = mutationGeneric({
-  args: { auth_token: v.optional(v.string()), token: v.string() },
+  args: { auth_token: v.optional(v.string()), token: v.string(), ...clientProtocolArgs },
   handler: async (ctx, args) => {
-    await requireMemberActor(ctx, args.auth_token);
+    await requireMemberActor(ctx, args);
     const lease = await requireRestoreLease(ctx, args.token);
     await ctx.db.patch(lease._id, { expires_at: restoreLeaseExpiry(now()) });
     return null;
@@ -2154,9 +2184,9 @@ export const renewRestore = mutationGeneric({
 });
 
 export const restoreStatus = queryGeneric({
-  args: { auth_token: v.optional(v.string()), token: v.string() },
+  args: { auth_token: v.optional(v.string()), token: v.string(), ...clientProtocolArgs },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args.auth_token);
+    await requireMemberQueryActor(ctx, args);
     const lease = await findRestoreLease(ctx, args.token);
     if (lease === null) {
       return { status: "missing" as const };
@@ -2176,9 +2206,14 @@ export const restoreStatus = queryGeneric({
 });
 
 export const activateRestore = mutationGeneric({
-  args: { auth_token: v.optional(v.string()), token: v.string(), dump: v.any() },
+  args: {
+    auth_token: v.optional(v.string()),
+    token: v.string(),
+    dump: v.any(),
+    ...clientProtocolArgs,
+  },
   handler: async (ctx, args) => {
-    await requireMemberActor(ctx, args.auth_token);
+    await requireMemberActor(ctx, args);
     const lease = await requireRestoreLease(ctx, args.token);
     if (lease.committed === true) {
       const committed = await exportDump(ctx, parseLeaseCutoff(lease.lease_cutoff));
@@ -2223,7 +2258,12 @@ export const activateRestore = mutationGeneric({
 });
 
 export const fenceRepository = mutationGeneric({
-  args: { token: v.string(), repo: v.string(), target_backend: v.string() },
+  args: {
+    token: v.string(),
+    repo: v.string(),
+    target_backend: v.string(),
+    ...clientProtocolArgs,
+  },
   handler: async (ctx, args) => {
     const lease = await requireRestoreLease(ctx, args.token);
     const repo = args.repo.trim();
@@ -2270,7 +2310,7 @@ export const fenceRepository = mutationGeneric({
 });
 
 export const unfenceRepository = mutationGeneric({
-  args: { token: v.string(), repo: v.string() },
+  args: { token: v.string(), repo: v.string(), ...clientProtocolArgs },
   handler: async (ctx, args) => {
     await requireRestoreLease(ctx, args.token);
     const repo = args.repo.trim();
@@ -2292,9 +2332,9 @@ export const unfenceRepository = mutationGeneric({
 });
 
 export const recoverRepositoryFence = mutationGeneric({
-  args: { auth_token: v.optional(v.string()), repo: v.string() },
+  args: { auth_token: v.optional(v.string()), repo: v.string(), ...clientProtocolArgs },
   handler: async (ctx, args) => {
-    await requireMemberActor(ctx, args.auth_token);
+    await requireMemberActor(ctx, args);
     const repo = args.repo.trim();
     if (repo === "") {
       failQuestDomain(
@@ -2361,9 +2401,14 @@ export const recoverRepositoryFence = mutationGeneric({
 });
 
 export const recoverMigrationFenceForRestore = mutationGeneric({
-  args: { auth_token: v.optional(v.string()), token: v.string(), repo: v.string() },
+  args: {
+    auth_token: v.optional(v.string()),
+    token: v.string(),
+    repo: v.string(),
+    ...clientProtocolArgs,
+  },
   handler: async (ctx, args) => {
-    await requireMemberActor(ctx, args.auth_token);
+    await requireMemberActor(ctx, args);
     const token = args.token.trim();
     const repo = args.repo.trim();
     if (token === "") {
@@ -2417,9 +2462,9 @@ export const recoverMigrationFenceForRestore = mutationGeneric({
 });
 
 export const commitRestore = mutationGeneric({
-  args: { auth_token: v.optional(v.string()), token: v.string() },
+  args: { auth_token: v.optional(v.string()), token: v.string(), ...clientProtocolArgs },
   handler: async (ctx, args) => {
-    await requireMemberActor(ctx, args.auth_token);
+    await requireMemberActor(ctx, args);
     const lease = await requireRestoreLease(ctx, args.token);
     if (lease.committed === true) {
       const committed = await exportDump(ctx, parseLeaseCutoff(lease.lease_cutoff));
@@ -2472,9 +2517,9 @@ export const commitRestore = mutationGeneric({
 });
 
 export const releaseRestore = mutationGeneric({
-  args: { auth_token: v.optional(v.string()), token: v.string() },
+  args: { auth_token: v.optional(v.string()), token: v.string(), ...clientProtocolArgs },
   handler: async (ctx, args) => {
-    await requireMemberActor(ctx, args.auth_token);
+    await requireMemberActor(ctx, args);
     const lease = await findRestoreLease(ctx, args.token);
     if (lease !== null) {
       await restoreMigrationFencesAfterRestore(ctx, args.token, lease.committed === true);
@@ -2491,9 +2536,9 @@ export const releaseRestore = mutationGeneric({
 });
 
 export const rollbackRestore = mutationGeneric({
-  args: { auth_token: v.optional(v.string()), token: v.string() },
+  args: { auth_token: v.optional(v.string()), token: v.string(), ...clientProtocolArgs },
   handler: async (ctx, args) => {
-    await requireMemberActor(ctx, args.auth_token);
+    await requireMemberActor(ctx, args);
     const lease = await requireRestoreLease(ctx, args.token);
     if (lease.committed === true) {
       failQuestDomain(

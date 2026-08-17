@@ -17,3 +17,9 @@ export {
   type ConvexCompatibilityProbeOptions,
   createConvexStoreCompatibilityProbe,
 } from "./compatibility";
+export {
+  type ClientProtocolInput,
+  clientProtocolInput,
+  MINIMUM_QUEST_CLIENT_PROTOCOL,
+  QUEST_CLIENT_PROTOCOL,
+} from "./protocol";

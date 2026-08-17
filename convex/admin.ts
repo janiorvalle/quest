@@ -1,5 +1,5 @@
 import { queryGeneric } from "convex/server";
-import { ConvexError } from "convex/values";
+import { ConvexError, v } from "convex/values";
 
 const ADMIN_SECRET_ENVIRONMENT_VARIABLE = "QUEST_ADMIN_SECRET";
 type AdminErrorCode =
@@ -57,7 +57,7 @@ export async function assertAdminSecret(candidate: string): Promise<void> {
 }
 
 export const check = queryGeneric({
-  args: {},
+  args: { client_protocol: v.optional(v.number()) },
   handler: async () => {
     requireConfiguredAdminSecret();
     return {

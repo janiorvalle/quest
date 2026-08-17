@@ -4,6 +4,7 @@ import { newQuestSchema, questSchema, STORE_SCHEMA_VERSION } from "../../schema"
 import type { FederatedReadSnapshot } from "../port";
 import { ConvexStore } from "./adapter";
 import { type ConvexClientPair, convexApi } from "./client";
+import { QUEST_CLIENT_PROTOCOL } from "./protocol";
 
 const timestamp = "2026-08-05T20:00:00.000Z";
 const quest = newQuestSchema.parse({
@@ -150,7 +151,7 @@ describe("Convex reactive watches", () => {
 
     entries[0]?.callback(fullSnapshot);
 
-    expect(entries[0]?.args).toEqual({});
+    expect(entries[0]?.args).toEqual({ client_protocol: QUEST_CLIENT_PROTOCOL });
     expect(emissions).toEqual([
       {
         dump: { chains: [], quests: [], schema_version: STORE_SCHEMA_VERSION },
@@ -248,7 +249,10 @@ describe("Convex reactive watches", () => {
       fake.entries[0]?.callback(snapshot);
       expect(emissions).toEqual([snapshot]);
       expect(fake.httpQueries()).toBe(2);
-      expect(fake.entries[0]?.args).toEqual({ repository: "quest" });
+      expect(fake.entries[0]?.args).toEqual({
+        client_protocol: QUEST_CLIENT_PROTOCOL,
+        repository: "quest",
+      });
       await subscription.unsubscribe();
       subscription = undefined;
       expect(fake.entries[0]?.unsubscribed).toBeTrue();

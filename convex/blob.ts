@@ -92,9 +92,12 @@ export const record = internalMutationGeneric({
 });
 
 export const generateUploadUrl = mutationGeneric({
-  args: { auth_token: v.optional(v.string()) },
+  args: {
+    auth_token: v.optional(v.string()),
+    client_protocol: v.optional(v.number()),
+  },
   handler: async (ctx, args) => {
-    await requireMemberActor(ctx, args.auth_token);
+    await requireMemberActor(ctx, args);
     return ctx.storage.generateUploadUrl();
   },
 });
@@ -102,12 +105,16 @@ export const generateUploadUrl = mutationGeneric({
 export const finalizeUpload = actionGeneric({
   args: {
     auth_token: v.optional(v.string()),
+    client_protocol: v.optional(v.number()),
     sha256: v.string(),
     storage_id: v.id("_storage"),
     replace_existing: v.optional(v.boolean()),
   },
   handler: async (ctx: ActionContext, args) => {
-    await ctx.runMutation(validateActorReference, { auth_token: args.auth_token ?? "" });
+    await ctx.runMutation(validateActorReference, {
+      auth_token: args.auth_token ?? "",
+      ...(args.client_protocol === undefined ? {} : { client_protocol: args.client_protocol }),
+    });
     const address = sha256Schema.parse(args.sha256);
     const stored = await ctx.storage.get(args.storage_id);
     if (stored === null) {
@@ -142,9 +149,13 @@ export const finalizeUpload = actionGeneric({
 });
 
 export const getUrl = queryGeneric({
-  args: { auth_token: v.optional(v.string()), sha256: v.string() },
+  args: {
+    auth_token: v.optional(v.string()),
+    client_protocol: v.optional(v.number()),
+    sha256: v.string(),
+  },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args.auth_token);
+    await requireMemberQueryActor(ctx, args);
     const address = sha256Schema.parse(args.sha256);
     const record = await findBlob(ctx, address);
     return record === null ? null : ctx.storage.getUrl(record.storage_id);
@@ -152,9 +163,13 @@ export const getUrl = queryGeneric({
 });
 
 export const has = queryGeneric({
-  args: { auth_token: v.optional(v.string()), sha256: v.string() },
+  args: {
+    auth_token: v.optional(v.string()),
+    client_protocol: v.optional(v.number()),
+    sha256: v.string(),
+  },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args.auth_token);
+    await requireMemberQueryActor(ctx, args);
     const address = sha256Schema.parse(args.sha256);
     const record = await findBlob(ctx, address);
     return record === null
