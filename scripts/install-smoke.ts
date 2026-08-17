@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { appendFile, chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, delimiter, join, resolve } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 
 import { SQLITE_SCHEMA_VERSION } from "../src/store";
 import { artifactName, resolveDistVersion, selectDistTargets } from "./dist-config";
@@ -175,15 +176,16 @@ async function runPowerShellFailureSmoke(): Promise<void> {
   if (failing.exitCode === 0) {
     throw new Error("install.ps1 accepted an executable that failed its version smoke test");
   }
-  if (!failing.output.includes(failingFixture.expectedOutput)) {
+  const failureOutput = stripVTControlCharacters(failing.output).replace(/\s+/g, " ");
+  if (!failureOutput.includes(failingFixture.expectedOutput)) {
     throw new Error(`install.ps1 hid the smoke-test output: ${failing.output.trim()}`);
   }
-  if (!failing.output.toLowerCase().includes("retry the installer")) {
+  if (!failureOutput.toLowerCase().includes("retry the installer")) {
     throw new Error(
       `install.ps1 did not provide an actionable next step: ${failing.output.trim()}`,
     );
   }
-  if (failing.output.includes("null-valued expression")) {
+  if (failureOutput.includes("null-valued expression")) {
     throw new Error(
       `install.ps1 replaced the real error with a null error: ${failing.output.trim()}`,
     );
