@@ -20,3 +20,25 @@ test("interactive prompts use the injected diagnostic stream", async () => {
 test("hidden prompt input supports backspace and delete editing", () => {
   expect(applySecretInput("s3cret", "\u0008\u0008et")).toBe("s3cret");
 });
+
+test("prompts reject instead of hanging when the input ends without an answer", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  output.resume();
+  const answer = createCliPrompter({ input, output }).ask("Admin secret: ");
+  input.end();
+
+  expect(answer).rejects.toThrow(
+    '[QUEST_PROMPT_UNANSWERED] the prompt "Admin secret:" needs an answer',
+  );
+});
+
+test("prompts still accept answers piped through a non-interactive stream", async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  output.resume();
+  const answer = createCliPrompter({ input, output }).ask("Admin secret: ");
+  input.end("piped-secret\n");
+
+  expect(await answer).toBe("piped-secret");
+});

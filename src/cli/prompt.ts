@@ -29,7 +29,19 @@ export function createCliPrompter(options: CreateCliPrompterOptions = {}): CliPr
   const ask = async (question: string): Promise<string> => {
     const terminal = createInterface({ input, output });
     try {
-      return await terminal.question(question);
+      return await new Promise<string>((resolve, reject) => {
+        terminal.question(question).then(resolve, reject);
+        terminal.once("close", () => {
+          // Defer so an answer delivered in the same tick as the close settles first.
+          setImmediate(() => {
+            reject(
+              new Error(
+                `[QUEST_PROMPT_UNANSWERED] the prompt ${JSON.stringify(question.trim())} needs an answer, but the input ended before one arrived; supply the value through its flag or environment variable, or run quest in an interactive terminal`,
+              ),
+            );
+          });
+        });
+      });
     } finally {
       terminal.close();
     }
