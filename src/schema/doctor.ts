@@ -7,6 +7,7 @@ export const doctorCheckNameSchema = z.enum([
   "processes",
   "viewer_temp",
   "evidence",
+  "capacity",
 ]);
 export type DoctorCheckName = z.infer<typeof doctorCheckNameSchema>;
 

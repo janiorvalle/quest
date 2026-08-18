@@ -31,6 +31,7 @@ import {
   type StoreConfig,
 } from "../schema";
 import {
+  createConvexOccRetryInspector,
   createUpgradeOperations,
   type DoctorOperations,
   LocalBackupService,
@@ -1298,6 +1299,7 @@ async function createConvexCliBackend(context: CliBackendFactoryContext): Promis
     evidenceDirectory: context.platform.directories.evidence,
     retention: context.config.backup.retention,
   });
+  const inspectOccRetries = createConvexOccRetryInspector(deployment);
   return {
     clock,
     close: () => closeConvexClientPair(clients),
@@ -1305,9 +1307,13 @@ async function createConvexCliBackend(context: CliBackendFactoryContext): Promis
     doctor: {
       backup,
       blobStore,
+      inspectCapacity: () => questStore.inspectCapacity(),
+      inspectEvidenceSample: () => questStore.inspectEvidenceSample(),
+      inspectOccRetries,
+      inspectStaleClaims: (now) => questStore.inspectStaleClaims(now),
       inspectStore: async () => ({
-        dump: await questStore.exportAllRaw(),
         integrity_check: ["ok"],
+        scope: "diagnostics",
         state: "present",
       }),
       paths: {

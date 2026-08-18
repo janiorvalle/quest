@@ -88,6 +88,40 @@ export interface QuestDetailSnapshot {
   readonly related_quests: readonly Quest[];
 }
 
+export type StoreCapacityTableName = "quests" | "evidence" | "events";
+
+export interface StoreCapacityTableInspection {
+  readonly high_water_mark: number;
+  readonly table: StoreCapacityTableName;
+}
+
+export interface StoreCapacityInspection {
+  readonly event_rate_sample: {
+    readonly count: number;
+    readonly first: { readonly at: string; readonly id: number } | null;
+    readonly last: { readonly at: string; readonly id: number } | null;
+  };
+  readonly tables: readonly [
+    StoreCapacityTableInspection,
+    StoreCapacityTableInspection,
+    StoreCapacityTableInspection,
+  ];
+}
+
+export interface StoreEvidenceSampleInspection {
+  readonly high_water_mark: number;
+  readonly hashes: readonly Sha256[];
+}
+
+export interface StoreStaleClaimsInspection {
+  readonly claims: readonly {
+    readonly assignee: string | null;
+    readonly id: number;
+    readonly lease_expires_at: string | null;
+  }[];
+  readonly truncated: boolean;
+}
+
 export interface AcceptQuestAndDetailResult {
   readonly acceptance: AcceptResult;
   readonly detail: QuestDetailSnapshot;

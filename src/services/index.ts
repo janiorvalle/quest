@@ -39,6 +39,12 @@ export {
   showQuestChains,
 } from "./chains";
 export {
+  type ConvexInsightsFetch,
+  type ConvexInsightsOptions,
+  type ConvexOccRetryInspection,
+  createConvexOccRetryInspector,
+} from "./convex-insights";
+export {
   type DoctorOperations,
   type DoctorPaths,
   type DoctorStoreInspection,

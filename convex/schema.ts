@@ -105,7 +105,8 @@ export default defineSchema({
     .index("by_display_id", ["id"])
     .index("by_repo", ["repo"])
     .index("by_repo_status_and_lease_expiry", ["repo", "status", "lease_expires_at"])
-    .index("by_status", ["status"]),
+    .index("by_status", ["status"])
+    .index("by_status_and_lease_expires_at", ["status", "lease_expires_at"] as const),
   evidence: defineTable(evidenceFields)
     .index("by_display_id", ["id"])
     .index("by_quest_id", ["quest_id"]),

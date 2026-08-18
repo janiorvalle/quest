@@ -11,11 +11,26 @@ import {
   type QuestDump,
   type StoreCompatibilityResult,
 } from "../schema";
-import type { BlobStore } from "../store";
+import {
+  type BlobStore,
+  CONVEX_OLDER_STORE_REMEDY,
+  type StoreCapacityInspection,
+  type StoreEvidenceSampleInspection,
+  type StoreStaleClaimsInspection,
+} from "../store";
 import type { BackupOperations, BackupSnapshotSummary, BackupVerifyResult } from "./backup";
+import type { ConvexOccRetryInspection } from "./convex-insights";
 
 const MAX_BACKUP_AGE_SECONDS = 24 * 60 * 60;
 const EVIDENCE_SAMPLE_SIZE = 10;
+const CONVEX_RESPONSE_ELEMENT_LIMIT = 8_192;
+const CONVEX_SCAN_DOCUMENT_LIMIT = 32_000;
+const CONVEX_DOCUMENT_SIZE_LIMIT_BYTES = 1_048_576;
+const CAPACITY_INFORMATION_PERCENT = 50;
+const CAPACITY_WARNING_PERCENT = 80;
+const CAPACITY_ERROR_PERCENT = 95;
+const EXACT_ID_WRITE_CEILING_PER_SECOND = 70;
+const EVENT_RATE_RECENCY_HOURS = 72;
 
 export interface DoctorPaths {
   readonly backup: string;
@@ -32,13 +47,18 @@ export type DoctorStoreInspection =
   | {
       readonly dump?: QuestDump | undefined;
       readonly integrity_check: readonly string[];
+      readonly scope?: "diagnostics" | undefined;
       readonly state: "present";
     };
 
 export interface DoctorOperations {
   readonly backup?: BackupOperations | undefined;
   readonly blobStore?: BlobStore | undefined;
+  readonly inspectCapacity?: (() => Promise<StoreCapacityInspection>) | undefined;
+  readonly inspectEvidenceSample?: (() => Promise<StoreEvidenceSampleInspection>) | undefined;
+  readonly inspectOccRetries?: (() => Promise<ConvexOccRetryInspection>) | undefined;
   readonly inspectProcesses?: (() => Promise<ProcessHoldingResult>) | undefined;
+  readonly inspectStaleClaims?: ((now: string) => Promise<StoreStaleClaimsInspection>) | undefined;
   readonly inspectStore: () => Promise<DoctorStoreInspection>;
   readonly paths: DoctorPaths;
 }
@@ -54,6 +74,12 @@ export interface RunDoctorOptions {
 function errorDetail(error: unknown): string {
   const detail = error instanceof Error ? error.message : String(error);
   return detail.replaceAll(/\s+/gu, " ").trim() || "unknown error";
+}
+
+function diagnosticReadRemedy(detail: string): string {
+  return detail.includes("[CONVEX_DOCTOR_OUTDATED]")
+    ? CONVEX_OLDER_STORE_REMEDY
+    : "check the Convex deployment connection and permissions, then rerun quest doctor";
 }
 
 function finding(input: {
@@ -95,6 +121,12 @@ function compatibilitySummary(compatibility: StoreCompatibilityResult | undefine
     case "store-older":
       return `store schema ${compatibility.store_version} is older than binary support ${compatibility.supported_version}`;
   }
+}
+
+function hasDiagnosticContents(
+  inspection: Extract<DoctorStoreInspection, { state: "present" }>,
+): boolean {
+  return inspection.dump !== undefined || inspection.scope === "diagnostics";
 }
 
 function schemaFinding(
@@ -161,7 +193,7 @@ function schemaFinding(
         summary: `store schema matches, but SQLite integrity check returned ${integrity.join(", ") || "no result"}`,
       });
     }
-    if (inspection.dump === undefined) {
+    if (!hasDiagnosticContents(inspection)) {
       return finding({
         check: "schema",
         details: { store_schema_version: compatibility.store_version },
@@ -200,6 +232,341 @@ function formatAge(ageSeconds: number): string {
     return `${Math.floor(ageSeconds / (60 * 60))}h`;
   }
   return `${Math.floor(ageSeconds / (24 * 60 * 60))}d`;
+}
+
+function percentUsed(highWaterMark: number, limit: number): number {
+  return Math.round((highWaterMark / limit) * 1_000) / 10;
+}
+
+function sampleIsRecent(lastAt: string, now: string): boolean {
+  const ageMilliseconds = Date.parse(now) - Date.parse(lastAt);
+  return (
+    Number.isFinite(ageMilliseconds) &&
+    ageMilliseconds >= 0 &&
+    ageMilliseconds <= EVENT_RATE_RECENCY_HOURS * 60 * 60 * 1_000
+  );
+}
+
+function eventRatePerDay(inspection: StoreCapacityInspection, now: string): number | null {
+  const { count, first, last } = inspection.event_rate_sample;
+  if (count < 2 || first === null || last === null || !sampleIsRecent(last.at, now)) {
+    return null;
+  }
+  const elapsedMilliseconds = Date.parse(last.at) - Date.parse(first.at);
+  if (!Number.isFinite(elapsedMilliseconds) || elapsedMilliseconds <= 0) {
+    return null;
+  }
+  return Math.round(((count - 1) / (elapsedMilliseconds / 86_400_000)) * 100) / 100;
+}
+
+function eventRatePerSecond(inspection: StoreCapacityInspection, now: string): number | null {
+  const { count, first, last } = inspection.event_rate_sample;
+  if (count < 2 || first === null || last === null || !sampleIsRecent(last.at, now)) {
+    return null;
+  }
+  const elapsedMilliseconds = Date.parse(last.at) - Date.parse(first.at);
+  if (!Number.isFinite(elapsedMilliseconds) || elapsedMilliseconds <= 0) {
+    return null;
+  }
+  return Math.round(((count - 1) / (elapsedMilliseconds / 1_000)) * 100) / 100;
+}
+
+function estimatedLimitDate(
+  highWaterMark: number,
+  limit: number,
+  ratePerDay: number | null,
+  now: string,
+): string | null {
+  if (highWaterMark >= limit || ratePerDay === null || ratePerDay <= 0) {
+    return null;
+  }
+  const nowMilliseconds = Date.parse(now);
+  const estimatedMilliseconds =
+    nowMilliseconds + ((limit - highWaterMark) / ratePerDay) * 86_400_000;
+  if (!Number.isFinite(estimatedMilliseconds)) {
+    return null;
+  }
+  try {
+    return new Date(estimatedMilliseconds).toISOString();
+  } catch {
+    return null;
+  }
+}
+
+function capacityRemedy(table: StoreCapacityInspection["tables"][number]["table"]): string {
+  switch (table) {
+    case "quests":
+      return "verify quest 375's paged list, stats, viewer, and claim surfaces are deployed; page any custom quest reads, then rerun quest doctor";
+    case "evidence":
+      return "page the quest-detail evidence surface before this table reaches the Convex response limit, then rerun quest doctor";
+    case "events":
+      return "verify quest 374's paged event-feed surface is deployed; page any custom event reads, then rerun quest doctor";
+  }
+}
+
+const unavailableOccRetries: ConvexOccRetryInspection = {
+  reason:
+    "Convex Insights was not configured for this backend; inspect OCC retries in the deployment dashboard",
+  state: "unavailable",
+  window_hours: 72,
+};
+
+async function inspectOccRetries(operations: DoctorOperations): Promise<ConvexOccRetryInspection> {
+  if (operations.inspectOccRetries === undefined) {
+    return unavailableOccRetries;
+  }
+  try {
+    return await operations.inspectOccRetries();
+  } catch {
+    return {
+      reason:
+        "Convex Insights could not be read; check the Convex CLI login, then rerun quest doctor",
+      state: "unavailable",
+      window_hours: 72,
+    };
+  }
+}
+
+function capacityStatus(percent: number): DoctorFinding["status"] {
+  if (percent > CAPACITY_ERROR_PERCENT) {
+    return "fail";
+  }
+  return percent >= CAPACITY_WARNING_PERCENT ? "warn" : "pass";
+}
+
+function combineCapacityStatus(
+  table: DoctorFinding["status"],
+  writePath: DoctorFinding["status"],
+): DoctorFinding["status"] {
+  if (table === "fail" || writePath === "fail") {
+    return "fail";
+  }
+  return table === "warn" || writePath === "warn" ? "warn" : "pass";
+}
+
+function statusRank(status: DoctorFinding["status"]): number {
+  switch (status) {
+    case "pass":
+      return 0;
+    case "warn":
+      return 1;
+    case "fail":
+      return 2;
+  }
+}
+
+function capacityTables(
+  inspection: StoreCapacityInspection,
+  eventRatePerDay: number | null,
+  now: string,
+) {
+  // Display IDs are never reused, so the indexed tail is the intentionally conservative
+  // capacity proxy that keeps doctor constant-time even after restores introduce gaps.
+  return inspection.tables.map((table) => {
+    const tableRatePerDay = table.table === "events" ? eventRatePerDay : null;
+    return {
+      id_high_water_upper_bound: table.high_water_mark,
+      measurement: "monotonic_display_id_upper_bound",
+      response_limit: {
+        upper_bound_estimated_at: estimatedLimitDate(
+          table.high_water_mark,
+          CONVEX_RESPONSE_ELEMENT_LIMIT,
+          tableRatePerDay,
+          now,
+        ),
+        limit: CONVEX_RESPONSE_ELEMENT_LIMIT,
+        upper_bound_percent_used: percentUsed(table.high_water_mark, CONVEX_RESPONSE_ELEMENT_LIMIT),
+      },
+      scan_limit: {
+        upper_bound_estimated_at: estimatedLimitDate(
+          table.high_water_mark,
+          CONVEX_SCAN_DOCUMENT_LIMIT,
+          tableRatePerDay,
+          now,
+        ),
+        limit: CONVEX_SCAN_DOCUMENT_LIMIT,
+        upper_bound_percent_used: percentUsed(table.high_water_mark, CONVEX_SCAN_DOCUMENT_LIMIT),
+      },
+      table: table.table,
+    };
+  });
+}
+
+function nearestCapacityWall(tables: ReturnType<typeof capacityTables>) {
+  return tables.reduce((nearest, table) =>
+    table.response_limit.upper_bound_percent_used > nearest.response_limit.upper_bound_percent_used
+      ? table
+      : nearest,
+  );
+}
+
+function tableCapacitySummary(nearestWall: ReturnType<typeof capacityTables>[number]): string {
+  const usage = nearestWall.response_limit.upper_bound_percent_used;
+  if (usage < CAPACITY_INFORMATION_PERCENT) {
+    return "Convex table display-ID upper bounds are below 50% of known limits";
+  }
+  const estimatedAt = nearestWall.response_limit.upper_bound_estimated_at;
+  const projection =
+    nearestWall.id_high_water_upper_bound >= CONVEX_RESPONSE_ELEMENT_LIMIT
+      ? "; the upper bound has crossed the limit"
+      : estimatedAt === null
+        ? ""
+        : `; the upper bound is projected to reach it ${estimatedAt}`;
+  return `Convex ${nearestWall.table} display-ID upper bound ${nearestWall.id_high_water_upper_bound.toLocaleString("en-US")} is ${usage}% of the 8,192-element response limit${projection}; sparse restored stores may read high`;
+}
+
+function writePathStatus(input: {
+  readonly failedCalls: number | null;
+  readonly headroomUsed: number | null;
+  readonly retriedCalls: number | null;
+}): DoctorFinding["status"] {
+  if ((input.failedCalls ?? 0) > 0 || (input.headroomUsed ?? 0) > CAPACITY_ERROR_PERCENT) {
+    return "fail";
+  }
+  return (input.retriedCalls ?? 0) > 0 || (input.headroomUsed ?? 0) >= CAPACITY_WARNING_PERCENT
+    ? "warn"
+    : "pass";
+}
+
+function writePathSummary(input: {
+  readonly failedCalls: number | null;
+  readonly headroomUsed: number | null;
+  readonly ratePerSecond: number | null;
+  readonly retriedCalls: number | null;
+  readonly windowHours: number;
+}): string | null {
+  if ((input.failedCalls ?? 0) > 0) {
+    return `Convex exact-ID writes permanently failed after OCC retries ${input.failedCalls?.toLocaleString("en-US")} time${input.failedCalls === 1 ? "" : "s"} in the last ${input.windowHours} hours`;
+  }
+  if ((input.retriedCalls ?? 0) > 0) {
+    return `Convex retried ${input.retriedCalls?.toLocaleString("en-US")} exact-ID write${input.retriedCalls === 1 ? "" : "s"} after OCC conflicts in the last ${input.windowHours} hours`;
+  }
+  if (input.headroomUsed !== null && input.headroomUsed >= CAPACITY_WARNING_PERCENT) {
+    return `Recent event throughput is ${input.ratePerSecond?.toLocaleString("en-US")} inserts/s, ${input.headroomUsed}% of the measured 70 inserts/s exact-ID ceiling`;
+  }
+  return null;
+}
+
+function assessWritePath(
+  inspection: StoreCapacityInspection,
+  occRetries: ConvexOccRetryInspection,
+  now: string,
+) {
+  const ratePerSecond = eventRatePerSecond(inspection, now);
+  const headroomUsed =
+    ratePerSecond === null ? null : percentUsed(ratePerSecond, EXACT_ID_WRITE_CEILING_PER_SECOND);
+  const retriedCalls = occRetries.state === "available" ? occRetries.retried_calls : null;
+  const failedCalls = occRetries.state === "available" ? occRetries.failed_calls : null;
+  const status = writePathStatus({ failedCalls, headroomUsed, retriedCalls });
+  return {
+    details: {
+      ceiling_events_per_second: EXACT_ID_WRITE_CEILING_PER_SECOND,
+      headroom_percent_used: headroomUsed,
+      occ_retry_rate: {
+        failed_calls: failedCalls,
+        retries_per_hour:
+          retriedCalls === null
+            ? null
+            : Math.round((retriedCalls / occRetries.window_hours) * 100) / 100,
+        retried_calls: retriedCalls,
+        source: "Convex Insights",
+        state: occRetries.state,
+        ...(occRetries.state === "unavailable" ? { reason: occRetries.reason } : {}),
+        window_hours: occRetries.window_hours,
+      },
+      recent_events_per_second: ratePerSecond,
+      sample: inspection.event_rate_sample,
+    },
+    status,
+    summary: writePathSummary({
+      failedCalls,
+      headroomUsed,
+      ratePerSecond,
+      retriedCalls,
+      windowHours: occRetries.window_hours,
+    }),
+  };
+}
+
+async function capacityFinding(
+  operations: DoctorOperations,
+  now: string,
+): Promise<DoctorFinding | undefined> {
+  if (operations.inspectCapacity === undefined) {
+    return undefined;
+  }
+
+  let inspection: StoreCapacityInspection;
+  try {
+    inspection = await operations.inspectCapacity();
+  } catch (error: unknown) {
+    const detail = errorDetail(error);
+    return finding({
+      check: "capacity",
+      details: { error: detail },
+      remedy: diagnosticReadRemedy(detail),
+      status: "fail",
+      summary: `Convex capacity could not be checked: ${detail}`,
+    });
+  }
+
+  const ratePerDay = eventRatePerDay(inspection, now);
+  const tables = capacityTables(inspection, ratePerDay, now);
+  const nearestWall = nearestCapacityWall(tables);
+  const usage = nearestWall.response_limit.upper_bound_percent_used;
+  const tableStatus = capacityStatus(usage);
+  const writePath = assessWritePath(inspection, await inspectOccRetries(operations), now);
+  const status = combineCapacityStatus(tableStatus, writePath.status);
+  const writeRemedy =
+    "capture `convex insights --details --json`, then reopen quest 377 to evaluate protocol v3 opaque event and evidence IDs";
+  const tableSummary = tableCapacitySummary(nearestWall);
+  const tableRemedy = capacityRemedy(nearestWall.table);
+  const tableRank = statusRank(tableStatus);
+  const writeRank = statusRank(writePath.status);
+  const summary =
+    tableRank === writeRank && tableRank > 0 && writePath.summary !== null
+      ? `${tableSummary}; ${writePath.summary}`
+      : writeRank > tableRank && writePath.summary !== null
+        ? writePath.summary
+        : tableSummary;
+  const remedy =
+    status === "pass"
+      ? null
+      : tableRank === writeRank && tableRank > 0
+        ? `${tableRemedy}; also ${writeRemedy}`
+        : writeRank > tableRank
+          ? writeRemedy
+          : tableRemedy;
+
+  return finding({
+    check: "capacity",
+    details: {
+      document_size_limit: {
+        bytes: CONVEX_DOCUMENT_SIZE_LIMIT_BYTES,
+        remedy:
+          "quest 376 validates agent payloads before they reach Convex's 1 MiB document limit",
+      },
+      event_burn_rate: {
+        events_per_day: ratePerDay,
+        measurement: "bounded_recent_document_sample",
+        sample: inspection.event_rate_sample,
+      },
+      table_capacity_basis: {
+        measurement: "monotonic_display_id_upper_bound",
+        note: "The indexed display-ID tail is a conservative upper bound, not a document count; sparse stores after restore may report high but cannot under-report capacity pressure.",
+      },
+      write_path: writePath.details,
+      tables,
+      thresholds: {
+        error_percent: CAPACITY_ERROR_PERCENT,
+        information_percent: CAPACITY_INFORMATION_PERCENT,
+        warning_percent: CAPACITY_WARNING_PERCENT,
+      },
+    },
+    remedy,
+    status,
+    summary,
+  });
 }
 
 function backupFailureDetails(
@@ -329,14 +696,35 @@ function storeIntegrityIsHealthy(
   );
 }
 
-function leaseFinding(
+function noStaleClaimsFinding(truncated: boolean | undefined): DoctorFinding {
+  if (truncated === true) {
+    return finding({
+      check: "leases",
+      details: { claims: [], store_exists: true, truncated: true },
+      remedy:
+        "reduce accepted claims below 100 or inspect leases in the Convex dashboard, then rerun quest doctor",
+      status: "warn",
+      summary: "stale claims could not be ruled out because more than 100 claims are accepted",
+    });
+  }
+  return finding({
+    check: "leases",
+    details: { claims: [], store_exists: true },
+    remedy: null,
+    status: "pass",
+    summary: "no stale claims or expired leases",
+  });
+}
+
+async function leaseFinding(
+  operations: DoctorOperations,
   compatibility: StoreCompatibilityResult | undefined,
   compatibilityError: unknown,
   olderStoreRemedy: string | undefined,
   inspection: DoctorStoreInspection | undefined,
   inspectionError: string | undefined,
   now: string,
-): DoctorFinding {
+): Promise<DoctorFinding> {
   if (
     compatibilityError !== undefined ||
     compatibility === undefined ||
@@ -370,7 +758,46 @@ function leaseFinding(
       summary: "stale claims could not be trusted because SQLite integrity is not healthy",
     });
   }
-  if (inspection.dump === undefined) {
+  let staleClaims: readonly {
+    readonly assignee: string | null;
+    readonly id: number;
+    readonly lease_expires_at: string | null;
+    readonly reason: "expired lease" | "missing lease";
+  }[];
+  let staleClaimsTruncated: boolean | undefined;
+  if (inspection.dump !== undefined) {
+    staleClaims = inspection.dump.quests
+      .filter(
+        (quest) =>
+          quest.status === "accepted" &&
+          (quest.lease_expires_at === null ||
+            Date.parse(quest.lease_expires_at) <= Date.parse(now)),
+      )
+      .map((quest) => ({
+        assignee: quest.assignee,
+        id: quest.id,
+        lease_expires_at: quest.lease_expires_at,
+        reason: quest.lease_expires_at === null ? "missing lease" : "expired lease",
+      }));
+  } else if (inspection.scope === "diagnostics" && operations.inspectStaleClaims !== undefined) {
+    try {
+      const inspection = await operations.inspectStaleClaims(now);
+      staleClaims = inspection.claims.map((quest) => ({
+        ...quest,
+        reason: quest.lease_expires_at === null ? "missing lease" : "expired lease",
+      }));
+      staleClaimsTruncated = inspection.truncated;
+    } catch (error: unknown) {
+      const detail = errorDetail(error);
+      return finding({
+        check: "leases",
+        details: { error: detail, store_exists: true },
+        remedy: diagnosticReadRemedy(detail),
+        status: "warn",
+        summary: `stale claims could not be checked: ${detail}`,
+      });
+    }
+  } else {
     return unavailableStoreFinding(
       "leases",
       compatibility,
@@ -380,33 +807,19 @@ function leaseFinding(
     );
   }
 
-  const staleClaims = inspection.dump.quests
-    .filter(
-      (quest) =>
-        quest.status === "accepted" &&
-        (quest.lease_expires_at === null || Date.parse(quest.lease_expires_at) <= Date.parse(now)),
-    )
-    .map((quest) => ({
-      assignee: quest.assignee,
-      id: quest.id,
-      lease_expires_at: quest.lease_expires_at,
-      reason: quest.lease_expires_at === null ? "missing lease" : "expired lease",
-    }));
   if (staleClaims.length === 0) {
-    return finding({
-      check: "leases",
-      details: { claims: [], store_exists: true },
-      remedy: null,
-      status: "pass",
-      summary: "no stale claims or expired leases",
-    });
+    return noStaleClaimsFinding(staleClaimsTruncated);
   }
   return finding({
     check: "leases",
-    details: { claims: staleClaims, store_exists: true },
+    details: {
+      claims: staleClaims,
+      store_exists: true,
+      ...(staleClaimsTruncated === undefined ? {} : { truncated: staleClaimsTruncated }),
+    },
     remedy: "confirm no worker still owns each listed quest, then re-accept the stale quests",
     status: "fail",
-    summary: `${staleClaims.length} stale claim${staleClaims.length === 1 ? "" : "s"} need attention`,
+    summary: `${staleClaimsTruncated === true ? "at least " : ""}${staleClaims.length} stale claim${staleClaims.length === 1 ? "" : "s"} need attention`,
   });
 }
 
@@ -538,7 +951,40 @@ async function inspectEvidenceBlob(
   }
 }
 
+type EvidenceInventory =
+  | {
+      readonly details: Record<string, unknown>;
+      readonly hashes: string[];
+      readonly outcome: "available";
+    }
+  | { readonly detail: string; readonly outcome: "error" }
+  | { readonly outcome: "unavailable" };
+
+async function readEvidenceInventory(
+  operations: DoctorOperations,
+  inspection: Extract<DoctorStoreInspection, { state: "present" }>,
+): Promise<EvidenceInventory> {
+  if (inspection.dump !== undefined) {
+    const hashes = [...new Set(inspection.dump.evidence.map((item) => item.sha256))].sort();
+    return { details: { total: hashes.length }, hashes, outcome: "available" };
+  }
+  if (inspection.scope !== "diagnostics" || operations.inspectEvidenceSample === undefined) {
+    return { outcome: "unavailable" };
+  }
+  try {
+    const sample = await operations.inspectEvidenceSample();
+    return {
+      details: { high_water_mark: sample.high_water_mark },
+      hashes: [...sample.hashes],
+      outcome: "available",
+    };
+  } catch (error: unknown) {
+    return { detail: errorDetail(error), outcome: "error" };
+  }
+}
+
 async function evidenceFinding(
+  operations: DoctorOperations,
   compatibility: StoreCompatibilityResult | undefined,
   compatibilityError: unknown,
   olderStoreRemedy: string | undefined,
@@ -579,7 +1025,8 @@ async function evidenceFinding(
       summary: "evidence blobs could not be trusted because SQLite integrity is not healthy",
     });
   }
-  if (inspection.dump === undefined) {
+  const inventory = await readEvidenceInventory(operations, inspection);
+  if (inventory.outcome === "unavailable") {
     return unavailableStoreFinding(
       "evidence",
       compatibility,
@@ -587,6 +1034,15 @@ async function evidenceFinding(
       compatibilityError,
       olderStoreRemedy,
     );
+  }
+  if (inventory.outcome === "error") {
+    return finding({
+      check: "evidence",
+      details: { error: inventory.detail, store_exists: true },
+      remedy: diagnosticReadRemedy(inventory.detail),
+      status: "warn",
+      summary: `evidence sample could not be read: ${inventory.detail}`,
+    });
   }
   if (blobStore === undefined) {
     return finding({
@@ -598,8 +1054,7 @@ async function evidenceFinding(
     });
   }
 
-  const hashes = [...new Set(inspection.dump.evidence.map((item) => item.sha256))].sort();
-  const sample = hashes.slice(0, EVIDENCE_SAMPLE_SIZE);
+  const sample = inventory.hashes.slice(0, EVIDENCE_SAMPLE_SIZE);
   const failures: Array<{ hash: string; issue: string }> = [];
   for (const hash of sample) {
     const failure = await inspectEvidenceBlob(hash, blobStore);
@@ -610,7 +1065,7 @@ async function evidenceFinding(
   if (failures.length > 0) {
     return finding({
       check: "evidence",
-      details: { failures, sample, total: hashes.length },
+      details: { failures, sample, ...inventory.details },
       remedy: "restore the listed evidence blobs from a verified backup, then rerun quest doctor",
       status: "fail",
       summary: `evidence spot-check failed for ${failures.length} of ${sample.length} sampled blob${sample.length === 1 ? "" : "s"}`,
@@ -618,7 +1073,7 @@ async function evidenceFinding(
   }
   return finding({
     check: "evidence",
-    details: { sample, total: hashes.length },
+    details: { sample, ...inventory.details },
     remedy: null,
     status: "pass",
     summary: `spot-checked ${sample.length} evidence blob${sample.length === 1 ? "" : "s"}; content addresses match`,
@@ -636,21 +1091,18 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorData> 
     }
   }
 
-  const [backup, processes, viewerTemp] = await Promise.all([
+  const schema = schemaFinding(
+    options.compatibility,
+    options.compatibilityError,
+    options.olderStoreRemedy,
+    inspection,
+    inspectionError,
+  );
+  const [backup, capacity, leases, processes, viewerTemp, evidence] = await Promise.all([
     backupFinding(options.operations, options.now),
-    processFinding(options.operations),
-    viewerTempFinding(options.operations, options.now),
-  ]);
-  const checks = [
-    schemaFinding(
-      options.compatibility,
-      options.compatibilityError,
-      options.olderStoreRemedy,
-      inspection,
-      inspectionError,
-    ),
-    backup,
+    capacityFinding(options.operations, options.now),
     leaseFinding(
+      options.operations,
       options.compatibility,
       options.compatibilityError,
       options.olderStoreRemedy,
@@ -658,9 +1110,10 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorData> 
       inspectionError,
       options.now,
     ),
-    processes,
-    viewerTemp,
-    await evidenceFinding(
+    processFinding(options.operations),
+    viewerTempFinding(options.operations, options.now),
+    evidenceFinding(
+      options.operations,
       options.compatibility,
       options.compatibilityError,
       options.olderStoreRemedy,
@@ -668,6 +1121,15 @@ export async function runDoctor(options: RunDoctorOptions): Promise<DoctorData> 
       inspectionError,
       options.operations.blobStore,
     ),
+  ]);
+  const checks = [
+    schema,
+    ...(capacity === undefined ? [] : [capacity]),
+    backup,
+    leases,
+    processes,
+    viewerTemp,
+    evidence,
   ];
   return doctorDataSchema.parse({
     checks,

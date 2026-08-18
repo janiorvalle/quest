@@ -85,6 +85,11 @@ import {
   nextConvexDumpSection,
   parseConvexRestorePage,
 } from "../src/store/convex/pagination";
+import type {
+  StoreCapacityInspection,
+  StoreEvidenceSampleInspection,
+  StoreStaleClaimsInspection,
+} from "../src/store/port";
 import { assertAdminSecret } from "./admin";
 import { requireMemberActor, requireMemberQueryActor } from "./auth";
 import type schema from "./schema";
@@ -181,6 +186,12 @@ function numericDocumentId(value: unknown): number | undefined {
   return value.id;
 }
 
+function eventInspectionPoint(
+  event: Event | null,
+): { readonly at: string; readonly id: number } | null {
+  return event === null ? null : { at: event.at, id: event.id };
+}
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -201,6 +212,11 @@ const RESTORE_MUTATION_MAXIMUM_ROWS_READ = 256;
 const SNAPSHOT_GENERATION_COUNTER = "snapshot_generation";
 const FENCE_GENERATION_COUNTER = "fence_generation";
 type ConvexListMode = ConvexListCursor["mode"];
+const DOCTOR_EVENT_RATE_SAMPLE_SIZE = 64;
+const DOCTOR_EVIDENCE_SAMPLE_SIZE = 10;
+const DOCTOR_STALE_CLAIM_SAMPLE_SIZE = 100;
+const DOCTOR_MAXIMUM_BYTES_READ = 2 * 1_024 * 1_024;
+const MAX_TIMESTAMP_OFFSET_HOURS = 24;
 
 async function nextDocumentId(
   ctx: MutationContext,
@@ -247,6 +263,28 @@ async function counterHighWater(
 
 function parseLeaseCutoff(timestamp: string): string {
   return questSchema.shape.updated_at.parse(timestamp);
+}
+
+async function readStaleClaimSample(ctx: QueryContext, leaseCutoff: string) {
+  const latestPossibleLocalTime = new Date(
+    Date.parse(leaseCutoff) + MAX_TIMESTAMP_OFFSET_HOURS * 60 * 60 * 1_000,
+  ).toISOString();
+  const candidates = await ctx.db
+    .query("quests")
+    .withIndex("by_status_and_lease_expires_at", (query) =>
+      query.eq("status", "accepted").lte("lease_expires_at", latestPossibleLocalTime),
+    )
+    .order("asc")
+    .paginate({
+      cursor: null,
+      maximumBytesRead: DOCTOR_MAXIMUM_BYTES_READ,
+      maximumRowsRead: DOCTOR_STALE_CLAIM_SAMPLE_SIZE + 1,
+      numItems: DOCTOR_STALE_CLAIM_SAMPLE_SIZE + 1,
+    });
+  return {
+    documents: candidates.page,
+    truncated: !candidates.isDone,
+  };
 }
 
 async function readQuests(ctx: QueryContext, timestamp: string): Promise<Quest[]> {
@@ -2089,6 +2127,97 @@ export const migrateReadyStatuses = mutationGeneric({
 export const serverTime = queryGeneric({
   args: emptyArgs,
   handler: async () => now(),
+});
+
+export const doctorCapacity = queryGeneric({
+  args: { auth_token: v.optional(v.string()), ...clientProtocolArgs },
+  handler: async (ctx, args): Promise<StoreCapacityInspection> => {
+    await requireMemberQueryActor(ctx, args);
+    await requireNoPartialRestore(ctx);
+    const [latestQuest, latestEvidence, latestEvent] = await Promise.all([
+      ctx.db.query("quests").withIndex("by_display_id").order("desc").first(),
+      ctx.db.query("evidence").withIndex("by_display_id").order("desc").first(),
+      ctx.db.query("events").withIndex("by_display_id").order("desc").first(),
+    ]);
+    const parsedLatestEvent = latestEvent === null ? null : parseEventDocument(latestEvent);
+    const recentEventPage = await ctx.db
+      .query("events")
+      .withIndex("by_display_id")
+      .order("desc")
+      .paginate({
+        cursor: null,
+        maximumBytesRead: DOCTOR_MAXIMUM_BYTES_READ,
+        maximumRowsRead: DOCTOR_EVENT_RATE_SAMPLE_SIZE,
+        numItems: DOCTOR_EVENT_RATE_SAMPLE_SIZE,
+      });
+    const recentEvents = recentEventPage.page.map(parseEventDocument);
+    const firstRecentEvent = recentEvents.at(-1) ?? null;
+    const lastRecentEvent = recentEvents[0] ?? null;
+    return {
+      event_rate_sample: {
+        count: recentEvents.length,
+        first: eventInspectionPoint(firstRecentEvent),
+        last: eventInspectionPoint(lastRecentEvent),
+      },
+      tables: [
+        { high_water_mark: numericDocumentId(latestQuest) ?? 0, table: "quests" },
+        { high_water_mark: numericDocumentId(latestEvidence) ?? 0, table: "evidence" },
+        { high_water_mark: parsedLatestEvent?.id ?? 0, table: "events" },
+      ],
+    };
+  },
+});
+
+export const doctorEvidenceSample = queryGeneric({
+  args: { auth_token: v.optional(v.string()), ...clientProtocolArgs },
+  handler: async (ctx, args): Promise<StoreEvidenceSampleInspection> => {
+    await requireMemberQueryActor(ctx, args);
+    await requireNoPartialRestore(ctx);
+    const [latestEvidence, evidenceSample] = await Promise.all([
+      ctx.db.query("evidence").withIndex("by_display_id").order("desc").first(),
+      ctx.db
+        .query("evidence")
+        .withIndex("by_display_id")
+        .order("asc")
+        .take(DOCTOR_EVIDENCE_SAMPLE_SIZE),
+    ]);
+    return {
+      hashes: [
+        ...new Set(evidenceSample.map((document) => parseEvidenceDocument(document).sha256)),
+      ].sort(),
+      high_water_mark: numericDocumentId(latestEvidence) ?? 0,
+    };
+  },
+});
+
+export const doctorStaleClaims = queryGeneric({
+  args: {
+    auth_token: v.optional(v.string()),
+    lease_cutoff: v.string(),
+    ...clientProtocolArgs,
+  },
+  handler: async (ctx, args): Promise<StoreStaleClaimsInspection> => {
+    await requireMemberQueryActor(ctx, args);
+    await requireNoPartialRestore(ctx);
+    const leaseCutoff = parseLeaseCutoff(args.lease_cutoff);
+    const sample = await readStaleClaimSample(ctx, leaseCutoff);
+    const staleDocuments = sample.documents.filter(
+      (document) =>
+        document.lease_expires_at === null ||
+        Date.parse(document.lease_expires_at) <= Date.parse(leaseCutoff),
+    );
+    return {
+      claims: staleDocuments.slice(0, DOCTOR_STALE_CLAIM_SAMPLE_SIZE).map((document) => {
+        const quest = parseQuestDocument(document);
+        return {
+          assignee: quest.assignee,
+          id: quest.id,
+          lease_expires_at: quest.lease_expires_at,
+        };
+      }),
+      truncated: sample.truncated || staleDocuments.length > DOCTOR_STALE_CLAIM_SAMPLE_SIZE,
+    };
+  },
 });
 
 export const addQuest = mutationGeneric({
