@@ -1,4 +1,9 @@
-import { computeQuestPlan, isDispatchableQuest, type PlanLaneCluster } from "../domain";
+import {
+  computeQuestPlan,
+  isDispatchableQuest,
+  type PlanLaneCluster,
+  type PlanQuest,
+} from "../domain";
 import type { Chain, LaneConflictReference, Quest, QuestScope } from "../schema";
 import type { QuestStore } from "../store";
 import { compileQuestBriefFromSnapshot, type QuestBrief } from "./brief";
@@ -113,57 +118,80 @@ function nextCandidate(
   };
 }
 
-function laneConflictsForQuest(
+function isDispatchableInScope(
+  quest: PlanQuest | undefined,
+  scope: QuestScope,
+): quest is PlanQuest {
+  return quest !== undefined && quest.computed_state === "dispatchable" && isInScope(quest, scope);
+}
+
+function isInFlightPeer(
+  candidate: PlanQuest,
+  peer: PlanQuest | undefined,
+  scope: QuestScope,
+): peer is PlanQuest {
+  return (
+    peer !== undefined &&
+    peer.computed_state === "in_flight" &&
+    peer.repo === candidate.repo &&
+    isInScope(peer, scope)
+  );
+}
+
+function appendLaneConflictsForCandidate(
   questId: number,
+  cluster: PlanLaneCluster,
+  planQuestsById: ReadonlyMap<number, PlanQuest>,
+  scope: QuestScope,
+  conflictsByQuestId: Map<number, NextLaneConflict[]>,
+): void {
+  const quest = planQuestsById.get(questId);
+  if (!isDispatchableInScope(quest, scope)) {
+    return;
+  }
+  for (const inFlightQuestId of cluster.quest_ids) {
+    if (inFlightQuestId === questId) {
+      continue;
+    }
+    const inFlightQuest = planQuestsById.get(inFlightQuestId);
+    if (!isInFlightPeer(quest, inFlightQuest, scope)) {
+      continue;
+    }
+    const conflicts = conflictsByQuestId.get(questId) ?? [];
+    conflicts.push({
+      area: cluster.area,
+      files: cluster.files,
+      heuristic: cluster.heuristic,
+      inFlightQuestId,
+      kind: cluster.kind,
+      questId,
+    });
+    conflictsByQuestId.set(questId, conflicts);
+  }
+}
+
+function laneConflictsByQuestId(
   plan: ReturnType<typeof computeQuestPlan>,
   scope: QuestScope,
-): NextLaneConflict[] {
+): ReadonlyMap<number, readonly NextLaneConflict[]> {
   const planQuestsById = new Map(plan.quests.map((quest) => [quest.id, quest]));
-  const selectedQuest = planQuestsById.get(questId);
-  if (selectedQuest === undefined) {
-    return [];
+  const conflictsByQuestId = new Map<number, NextLaneConflict[]>();
+
+  for (const cluster of plan.lane_clusters) {
+    for (const questId of cluster.quest_ids) {
+      appendLaneConflictsForCandidate(questId, cluster, planQuestsById, scope, conflictsByQuestId);
+    }
   }
-  const inFlightQuestIds = new Set(
-    plan.quests
-      .filter(
-        (quest) =>
-          quest.computed_state === "in_flight" &&
-          quest.repo === selectedQuest.repo &&
-          isInScope(quest, scope),
-      )
-      .map((quest) => quest.id),
-  );
-  return plan.lane_clusters
-    .flatMap((cluster): NextLaneConflict[] => {
-      if (!cluster.quest_ids.includes(questId)) {
-        return [];
-      }
-      return cluster.quest_ids
-        .filter((candidateId) => candidateId !== questId && inFlightQuestIds.has(candidateId))
-        .flatMap((inFlightQuestId): NextLaneConflict[] => {
-          const inFlightQuest = planQuestsById.get(inFlightQuestId);
-          return inFlightQuest === undefined ||
-            inFlightQuest.repo !== selectedQuest.repo ||
-            !isInScope(inFlightQuest, scope)
-            ? []
-            : [
-                {
-                  area: cluster.area,
-                  files: cluster.files,
-                  heuristic: cluster.heuristic,
-                  inFlightQuestId,
-                  kind: cluster.kind,
-                  questId,
-                },
-              ];
-        });
-    })
-    .sort(
+
+  for (const conflicts of conflictsByQuestId.values()) {
+    conflicts.sort(
       (left, right) =>
         left.inFlightQuestId - right.inFlightQuestId ||
         left.kind.localeCompare(right.kind) ||
         left.files.join("\0").localeCompare(right.files.join("\0")),
     );
+  }
+  return conflictsByQuestId;
 }
 
 function laneConflictWarning(conflict: NextLaneConflict): string {
@@ -316,9 +344,7 @@ export function selectNextQuest(
   const eligible = candidates.flatMap(({ quest }) => (quest === null ? [] : [quest]));
   const warnings = candidates.flatMap(({ warnings: candidateWarnings }) => candidateWarnings);
 
-  const conflictsByQuestId = new Map(
-    eligible.map((candidate) => [candidate.id, laneConflictsForQuest(candidate.id, plan, scope)]),
-  );
+  const conflictsByQuestId = laneConflictsByQuestId(plan, scope);
   const conflictFree = eligible.filter(
     (candidate) =>
       !(conflictsByQuestId.get(candidate.id) ?? []).some((conflict) => !conflict.heuristic),

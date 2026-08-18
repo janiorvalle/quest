@@ -192,6 +192,8 @@ function compareClusters(left: PlanLaneCluster, right: PlanLaneCluster): number 
   );
 }
 
+const MAX_EXHAUSTIVE_SAME_AREA_BUCKET_SIZE = 64;
+
 function laneClusterForPair(left: PlanQuest, right: PlanQuest): PlanLaneCluster | null {
   if (left.repo !== right.repo) {
     return null;
@@ -225,7 +227,11 @@ function laneClusterForPair(left: PlanQuest, right: PlanQuest): PlanLaneCluster 
   return null;
 }
 
-function laneClusters(quests: readonly PlanQuest[]): readonly PlanLaneCluster[] {
+function pairKey(left: PlanQuest, right: PlanQuest): string {
+  return `${left.repo}\0${left.id}\0${right.id}`;
+}
+
+function pairwiseClusters(quests: readonly PlanQuest[]): PlanLaneCluster[] {
   const byIdentity = [...quests].sort(compareQuestIdentity);
   const clusters: PlanLaneCluster[] = [];
   for (const [leftIndex, left] of byIdentity.entries()) {
@@ -236,7 +242,98 @@ function laneClusters(quests: readonly PlanQuest[]): readonly PlanLaneCluster[] 
       }
     }
   }
-  return clusters.sort(compareClusters);
+  return clusters;
+}
+
+interface SharedFilePair {
+  readonly files: Set<string>;
+  readonly left: PlanQuest;
+  readonly right: PlanQuest;
+}
+
+function sharedFileClusters(quests: readonly PlanQuest[]): PlanLaneCluster[] {
+  const questsByFile = new Map<string, PlanQuest[]>();
+  for (const quest of quests) {
+    for (const file of new Set(quest.predicted_files)) {
+      const bucket = questsByFile.get(`${quest.repo}\0${file}`) ?? [];
+      bucket.push(quest);
+      questsByFile.set(`${quest.repo}\0${file}`, bucket);
+    }
+  }
+
+  const pairs = new Map<string, SharedFilePair>();
+  for (const [bucketKey, bucket] of questsByFile) {
+    const separator = bucketKey.indexOf("\0");
+    const file = bucketKey.slice(separator + 1);
+    const byIdentity = [...bucket].sort(compareQuestIdentity);
+    for (const [leftIndex, left] of byIdentity.entries()) {
+      for (const right of byIdentity.slice(leftIndex + 1)) {
+        const key = pairKey(left, right);
+        const existing = pairs.get(key);
+        if (existing === undefined) {
+          pairs.set(key, { files: new Set([file]), left, right });
+        } else {
+          existing.files.add(file);
+        }
+      }
+    }
+  }
+
+  return [...pairs.values()].map(({ files, left, right }) => ({
+    area: null,
+    files: [...files].sort(),
+    heuristic: false,
+    kind: "shared_files",
+    quest_ids: [left.id, right.id],
+  }));
+}
+
+function questsBySameArea(quests: readonly PlanQuest[]): Map<string, PlanQuest[]> {
+  const questsByArea = new Map<string, PlanQuest[]>();
+  for (const quest of quests) {
+    if (quest.predicted_files.length > 0 || quest.area === null) {
+      continue;
+    }
+    const key = `${quest.repo}\0${quest.area}`;
+    const bucket = questsByArea.get(key) ?? [];
+    bucket.push(quest);
+    questsByArea.set(key, bucket);
+  }
+  return questsByArea;
+}
+
+function boundedSameAreaClusters(quests: readonly PlanQuest[]): PlanLaneCluster[] {
+  // Same-area lanes are heuristic. A deterministic star keeps every quest visible to the lane
+  // consumers while preventing a dense area from producing quadratic output. Shared-file lanes
+  // remain exhaustive because they are hard conflicts.
+  const center = quests.find((quest) => quest.computed_state === "in_flight") ?? quests[0];
+  if (center === undefined) {
+    return [];
+  }
+  return quests.flatMap((quest) => {
+    if (quest === center) {
+      return [];
+    }
+    const cluster = laneClusterForPair(center, quest);
+    return cluster === null ? [] : [cluster];
+  });
+}
+
+function sameAreaClusters(quests: readonly PlanQuest[]): PlanLaneCluster[] {
+  const clusters: PlanLaneCluster[] = [];
+  for (const bucket of questsBySameArea(quests).values()) {
+    const byIdentity = [...bucket].sort(compareQuestIdentity);
+    clusters.push(
+      ...(byIdentity.length <= MAX_EXHAUSTIVE_SAME_AREA_BUCKET_SIZE
+        ? pairwiseClusters(byIdentity)
+        : boundedSameAreaClusters(byIdentity)),
+    );
+  }
+  return clusters;
+}
+
+function laneClusters(quests: readonly PlanQuest[]): readonly PlanLaneCluster[] {
+  return [...sharedFileClusters(quests), ...sameAreaClusters(quests)].sort(compareClusters);
 }
 
 export function computeQuestPlan(input: QuestPlanInput): QuestPlan {

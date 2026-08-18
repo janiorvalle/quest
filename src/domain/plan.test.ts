@@ -182,6 +182,46 @@ describe("computed quest plan", () => {
     ]);
   });
 
+  test("bounds dense same-area lanes without dropping shared-file conflicts", () => {
+    const result = plan([
+      ...Array.from({ length: 65 }, (_, index) => quest(index + 1, `Area work ${index + 1}`)),
+      quest(100, "Shared file one", { predicted_files: ["src/shared.ts"] }),
+      quest(101, "Shared file two", { predicted_files: ["src/shared.ts"] }),
+    ]);
+
+    const sameAreaClusters = result.lane_clusters.filter((cluster) => cluster.kind === "same_area");
+    expect(sameAreaClusters).toHaveLength(64);
+    expect(
+      sameAreaClusters.every(
+        (cluster) => cluster.quest_ids[0] === 1 && cluster.quest_ids[1] !== undefined,
+      ),
+    ).toBe(true);
+    expect(result.lane_clusters).toContainEqual({
+      area: null,
+      files: ["src/shared.ts"],
+      heuristic: false,
+      kind: "shared_files",
+      quest_ids: [100, 101],
+    });
+  });
+
+  test("computes a realistic 9,000-quest plan promptly", () => {
+    const areas = ["core", "cli", "store", "tui", "config", "domain", "release"];
+    const quests = Array.from({ length: 9000 }, (_, index) =>
+      quest(index + 1, `Large backlog quest ${index + 1}`, {
+        area: areas[index % areas.length] ?? "core",
+        predicted_files: index % 11 === 0 ? [`src/features/${index % 300}.ts`] : [],
+      }),
+    );
+    const startedAt = performance.now();
+    const result = plan(quests);
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(elapsedMs).toBeLessThan(2000);
+    expect(result.quests).toHaveLength(9000);
+    expect(result.lane_clusters.length).toBeLessThan(10000);
+  });
+
   test("orders in-flight work, dispatchable work, and blocked work by chain depth", () => {
     const result = plan(
       [

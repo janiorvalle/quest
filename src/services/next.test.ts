@@ -39,6 +39,16 @@ function backlog(quests: readonly Quest[], chains: readonly Chain[] = []): NextB
   return { chains, quests };
 }
 
+function realisticLargeBacklog(): Quest[] {
+  const areas = ["core", "cli", "store", "tui", "config", "domain", "release"];
+  return Array.from({ length: 9000 }, (_, index) =>
+    quest(index + 1, `Large backlog quest ${index + 1}`, {
+      area: areas[index % areas.length] ?? "core",
+      predicted_files: index % 11 === 0 ? [`src/features/${index % 300}.ts`] : [],
+    }),
+  );
+}
+
 describe("next selection policy", () => {
   test("selects strict priority before age, then oldest instant and lowest id", () => {
     const quests = [
@@ -363,5 +373,22 @@ describe("next selection policy", () => {
 
     expect(result.quest?.id).toBe(2);
     expect(result.warnings).toEqual(["quest 1 skipped: reopened 2 times; human review required"]);
+  });
+
+  test("selects from a realistic 9,000-quest backlog promptly", () => {
+    const startedAt = performance.now();
+    const result = selectNextQuest(
+      backlog(realisticLargeBacklog()),
+      { repo: "quest" },
+      undefined,
+      null,
+      undefined,
+      now,
+    );
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(elapsedMs).toBeLessThan(2000);
+    expect(result.quest?.id).toBe(1);
+    expect(result.laneConflicts).toEqual([]);
   });
 });
