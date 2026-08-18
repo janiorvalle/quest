@@ -10,6 +10,7 @@ import {
 import type { FederatedReadSnapshot } from "../port";
 import { ConvexStore } from "./adapter";
 import { type ConvexClientPair, convexApi } from "./client";
+import type { ConvexListPage } from "./pagination";
 import { QUEST_CLIENT_PROTOCOL } from "./protocol";
 
 const timestamp = "2026-08-05T20:00:00.000Z";
@@ -87,6 +88,238 @@ function fakeClients() {
 }
 
 describe("Convex reactive watches", () => {
+  test("ignores a stale paginated list failure after a newer update", async () => {
+    const entries: RealtimeEntry[] = [];
+    let rejectPage: ((error: Error) => void) | undefined;
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.serverTime) {
+            return timestamp;
+          }
+          return new Promise((_resolve, reject) => {
+            rejectPage = reject;
+          });
+        },
+      },
+      realtime: {
+        close: async () => undefined,
+        onUpdate: (
+          _query: unknown,
+          args: Readonly<Record<string, unknown>>,
+          callback: (value: unknown) => void,
+        ) => {
+          const entry = { args, callback, unsubscribed: false };
+          entries.push(entry);
+          return { unsubscribe: () => undefined };
+        },
+      },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+    const errors: Error[] = [];
+    const emissions: unknown[] = [];
+    const subscription = await store.watch({}, (quests, error) => {
+      emissions.push(quests);
+      if (error !== undefined) {
+        errors.push(error);
+      }
+    });
+    const firstPage: ConvexListPage = {
+      section: "quests",
+      items: [],
+      next_cursor: "older-page",
+      snapshot_generation: 1,
+    };
+
+    entries[0]?.callback(firstPage);
+    entries[0]?.callback([quest]);
+    rejectPage?.(new Error("older snapshot changed"));
+    await Bun.sleep(10);
+
+    expect(emissions.at(-1)).toEqual([quest]);
+    expect(errors).toEqual([]);
+    await subscription.unsubscribe();
+  });
+
+  test("rebinds a paginated list watch after a current page failure", async () => {
+    const entries: RealtimeEntry[] = [];
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.serverTime) {
+            return timestamp;
+          }
+          throw new Error("temporary continuation failure");
+        },
+      },
+      realtime: {
+        close: async () => undefined,
+        onUpdate: (
+          _query: unknown,
+          args: Readonly<Record<string, unknown>>,
+          callback: (value: unknown) => void,
+        ) => {
+          const entry = { args, callback, unsubscribed: false };
+          entries.push(entry);
+          return {
+            unsubscribe: () => {
+              entry.unsubscribed = true;
+            },
+          };
+        },
+      },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+    const errors: Error[] = [];
+    const subscription = await store.watch({}, (_quests, error) => {
+      if (error !== undefined) {
+        errors.push(error);
+      }
+    });
+    const firstPage: ConvexListPage = {
+      section: "quests",
+      items: [],
+      next_cursor: "failed-page",
+      snapshot_generation: 1,
+    };
+
+    entries[0]?.callback(firstPage);
+    await Bun.sleep(10);
+    entries[1]?.callback([]);
+    await Bun.sleep(1_100);
+
+    expect(errors.map((error) => error.message)).toContain("temporary continuation failure");
+    expect(entries).toHaveLength(4);
+    expect(entries.slice(0, 2).every((entry) => entry.unsubscribed)).toBeTrue();
+    await subscription.unsubscribe();
+  });
+
+  test("ignores a stale paginated viewer failure after a newer snapshot", async () => {
+    const entries: RealtimeEntry[] = [];
+    let listQueries = 0;
+    let rejectPage: ((error: Error) => void) | undefined;
+    const healthySnapshot: FederatedReadSnapshot = {
+      dump: { chains: [], quests: [], schema_version: STORE_SCHEMA_VERSION },
+      fencedRepositories: ["healthy"],
+    };
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.serverTime) {
+            return timestamp;
+          }
+          listQueries += 1;
+          if (listQueries === 1) {
+            return { dump: { ...healthySnapshot.dump, quests: [] }, fencedRepositories: [] };
+          }
+          return new Promise((_resolve, reject) => {
+            rejectPage = reject;
+          });
+        },
+      },
+      realtime: {
+        close: async () => undefined,
+        onUpdate: (
+          _query: unknown,
+          args: Readonly<Record<string, unknown>>,
+          callback: (value: unknown) => void,
+        ) => {
+          const entry = { args, callback, unsubscribed: false };
+          entries.push(entry);
+          return { unsubscribe: () => undefined };
+        },
+      },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+    const errors: Error[] = [];
+    const emissions: FederatedReadSnapshot[] = [];
+    const subscription = await store.watchFederatedSnapshot(undefined, (snapshot, error) => {
+      emissions.push(snapshot);
+      if (error !== undefined) {
+        errors.push(error);
+      }
+    });
+    const firstPage: ConvexListPage = {
+      section: "quests",
+      items: [],
+      next_cursor: "older-page",
+      snapshot_generation: 1,
+    };
+
+    entries[0]?.callback(firstPage);
+    entries[0]?.callback(healthySnapshot);
+    rejectPage?.(new Error("older snapshot changed"));
+    await Bun.sleep(10);
+
+    expect(emissions.at(-1)).toEqual(healthySnapshot);
+    expect(errors).toEqual([]);
+    await subscription.unsubscribe();
+  });
+
+  test("refreshes a paginated viewer after a current page failure", async () => {
+    const entries: RealtimeEntry[] = [];
+    let listQueries = 0;
+    const initialSnapshot: FederatedReadSnapshot = {
+      dump: { chains: [], quests: [], schema_version: STORE_SCHEMA_VERSION },
+      fencedRepositories: [],
+    };
+    const recoveredSnapshot: FederatedReadSnapshot = {
+      ...initialSnapshot,
+      fencedRepositories: ["recovered"],
+    };
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.serverTime) {
+            return timestamp;
+          }
+          listQueries += 1;
+          if (listQueries === 1) {
+            return initialSnapshot;
+          }
+          if (listQueries === 2) {
+            throw new Error("temporary viewer continuation failure");
+          }
+          return recoveredSnapshot;
+        },
+      },
+      realtime: {
+        close: async () => undefined,
+        onUpdate: (
+          _query: unknown,
+          args: Readonly<Record<string, unknown>>,
+          callback: (value: unknown) => void,
+        ) => {
+          const entry = { args, callback, unsubscribed: false };
+          entries.push(entry);
+          return { unsubscribe: () => undefined };
+        },
+      },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+    const emissions: FederatedReadSnapshot[] = [];
+    const errors: Error[] = [];
+    const subscription = await store.watchFederatedSnapshot(undefined, (snapshot, error) => {
+      emissions.push(snapshot);
+      if (error !== undefined) {
+        errors.push(error);
+      }
+    });
+    const firstPage: ConvexListPage = {
+      section: "quests",
+      items: [],
+      next_cursor: "failed-page",
+      snapshot_generation: 1,
+    };
+
+    entries[0]?.callback(firstPage);
+    await Bun.sleep(1_100);
+
+    expect(errors.map((error) => error.message)).toContain("temporary viewer continuation failure");
+    expect(emissions.at(-1)).toEqual(recoveredSnapshot);
+    await subscription.unsubscribe();
+  });
+
   test("uses websocket query results without refetching over HTTP", async () => {
     const fake = fakeClients();
     const store = new ConvexStore("http://127.0.0.1:3210", { clients: fake.clients });
@@ -101,6 +334,7 @@ describe("Convex reactive watches", () => {
       fake.entries[0]?.callback([quest]);
       fake.entries[1]?.callback([quest]);
       fake.entries[0]?.callback([]);
+      await Bun.sleep(10);
       expect(emissions).toEqual([[quest], []]);
       expect(fake.httpQueries()).toBe(1);
 

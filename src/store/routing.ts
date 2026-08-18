@@ -133,7 +133,7 @@ function filterSnapshotQuests(
   );
 }
 
-function statsForQuests(quests: readonly Quest[]): QuestStats {
+export function statsForQuests(quests: readonly Quest[]): QuestStats {
   const repos = new Map<string, RepoStats>();
   for (const quest of quests) {
     const current = repos.get(quest.repo) ?? {

@@ -3,9 +3,13 @@ import { expect, test } from "bun:test";
 import { type Event, type QuestDump, STORE_SCHEMA_VERSION } from "../../schema";
 import {
   assembleConvexDump,
+  assembleConvexListPages,
   CONVEX_DUMP_PAGE_MAX_ITEMS,
   type ConvexDumpPage,
   createConvexRestorePages,
+  decodeConvexListCursor,
+  encodeConvexListCursor,
+  parseConvexListPage,
 } from "./pagination";
 
 function event(id: number, payload = "small"): Event {
@@ -68,4 +72,30 @@ test("restore pages split by serialized value size before item count", () => {
 
   expect(pages).toHaveLength(2);
   expect(pages.every((page) => page.items.length === 1)).toBeTrue();
+});
+
+test("list cursors and pages preserve bounded snapshot state", () => {
+  const cursor = {
+    version: 1,
+    mode: "federated",
+    section: "fences",
+    database_cursor: "next-fence",
+    snapshot_generation: 42,
+    fence_generation: 7,
+    lease_cutoff: "2026-08-17T00:00:00.000Z",
+    request_key: "null",
+  } as const;
+  expect(decodeConvexListCursor(encodeConvexListCursor(cursor))).toEqual(cursor);
+
+  const page = parseConvexListPage({
+    section: "fences",
+    items: ["zeta", "alpha"],
+    next_cursor: null,
+    snapshot_generation: 42,
+  });
+  expect(assembleConvexListPages([page])).toEqual({
+    chains: [],
+    fencedRepositories: ["alpha", "zeta"],
+    quests: [],
+  });
 });

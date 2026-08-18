@@ -12,6 +12,7 @@ export {
   type ConvexBlobStoreOptions,
   type ConvexClientPair,
   type ConvexCompatibilityProbeOptions,
+  type ConvexListPage,
   type ConvexMember,
   type ConvexMemberStatus,
   ConvexStore,

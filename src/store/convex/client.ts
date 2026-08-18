@@ -42,7 +42,12 @@ import type {
   FederatedReadSnapshot,
   QuestDetailSnapshot,
 } from "../port";
-import type { ConvexDumpPage, ConvexEventPage, ConvexRestorePage } from "./pagination";
+import type {
+  ConvexDumpPage,
+  ConvexEventPage,
+  ConvexListPage,
+  ConvexRestorePage,
+} from "./pagination";
 import { type ClientProtocolInput, clientProtocolInput } from "./protocol";
 
 type TestableMutation<T> = {
@@ -155,8 +160,12 @@ export const convexApi = {
   ),
   listQuests: makeFunctionReference<
     "query",
-    AuthTokenInput & { readonly filter: QuestFilter; readonly lease_cutoff: string },
-    Quest[]
+    AuthTokenInput & {
+      readonly cursor?: string;
+      readonly filter: QuestFilter;
+      readonly lease_cutoff: string;
+    },
+    ConvexListPage | Quest[]
   >("quest:listQuests"),
   getQuest: makeFunctionReference<
     "query",
@@ -170,16 +179,22 @@ export const convexApi = {
   >("quest:questDetail"),
   stats: makeFunctionReference<
     "query",
-    AuthTokenInput & { readonly scope: QuestScope; readonly lease_cutoff: string },
-    QuestStats
+    AuthTokenInput & {
+      readonly cursor?: string;
+      readonly scope: QuestScope;
+      readonly lease_cutoff: string;
+    },
+    ConvexListPage | QuestStats
   >("quest:stats"),
-  fencedRepositories: makeFunctionReference<"query", AuthTokenInput, string[]>(
-    "quest:fencedRepositories",
-  ),
+  fencedRepositories: makeFunctionReference<
+    "query",
+    AuthTokenInput & { readonly cursor?: string },
+    ConvexListPage | string[]
+  >("quest:fencedRepositories"),
   federatedListSnapshot: makeFunctionReference<
     "query",
-    AuthTokenInput & { readonly repository?: string },
-    FederatedReadSnapshot
+    AuthTokenInput & { readonly cursor?: string; readonly repository?: string },
+    ConvexListPage | FederatedReadSnapshot
   >("quest:federatedListSnapshot"),
   federatedSnapshot: makeFunctionReference<
     "query",
