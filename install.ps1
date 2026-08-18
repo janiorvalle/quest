@@ -121,6 +121,63 @@ New-Item -ItemType Directory -Force $temporaryDirectory | Out-Null
 $artifact = Join-Path $temporaryDirectory $artifactName
 $checksums = Join-Path $temporaryDirectory "checksums.txt"
 
+function Invoke-QuestVersion([string]$Executable) {
+  $smokeHome = Join-Path $temporaryDirectory "smoke-home"
+  $smokeConfig = Join-Path $smokeHome "config"
+  $smokeState = Join-Path $smokeHome "state"
+  New-Item -ItemType Directory -Force $smokeConfig, $smokeState | Out-Null
+
+  $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+  $startInfo.FileName = $Executable
+  $startInfo.Arguments = "--version"
+  $startInfo.UseShellExecute = $false
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+  $startInfo.CreateNoWindow = $true
+  $startInfo.EnvironmentVariables["HOME"] = $smokeHome
+  $startInfo.EnvironmentVariables["USERPROFILE"] = $smokeHome
+  $startInfo.EnvironmentVariables["XDG_CONFIG_HOME"] = $smokeConfig
+  $startInfo.EnvironmentVariables["XDG_STATE_HOME"] = $smokeState
+  $startInfo.EnvironmentVariables["APPDATA"] = $smokeConfig
+  $startInfo.EnvironmentVariables["LOCALAPPDATA"] = $smokeState
+
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo = $startInfo
+  try {
+    [void]$process.Start()
+    $standardOutput = $process.StandardOutput.ReadToEnd()
+    $standardError = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    [PSCustomObject]@{
+      ExitCode = $process.ExitCode
+      StandardError = $standardError
+      StandardOutput = $standardOutput
+    }
+  } catch {
+    Fail "could not start the quest version smoke test: $($_.Exception.Message). Confirm this release matches Windows x64, then retry the installer."
+  } finally {
+    $process.Dispose()
+  }
+}
+
+function Assert-QuestVersion([string]$Executable, [string]$Stage) {
+  $result = Invoke-QuestVersion $Executable
+  $reportedVersion = $result.StandardOutput.Trim()
+  if ($result.ExitCode -ne 0) {
+    $details = @($result.StandardOutput, $result.StandardError) |
+      Where-Object { $_ -and $_.Trim() } |
+      ForEach-Object { $_.Trim() }
+    $detailText = (($details -join " ") -replace "\s+", " ").Trim()
+    if (-not $detailText) {
+      $detailText = "the executable produced no output"
+    }
+    Fail "$Stage quest failed its version smoke test (exit $($result.ExitCode)): $detailText. Confirm Windows security tools allow the release executable, then retry the installer; if it still fails, include this output in the bug report."
+  }
+  if ($reportedVersion -ne "quest $version") {
+    Fail "$Stage quest reported '$reportedVersion' instead of 'quest $version'. Retry the installer; if it still fails, report both versions."
+  }
+}
+
 try {
   if ($env:QUEST_INSTALL_ARTIFACT -or $env:QUEST_INSTALL_CHECKSUMS) {
     if (-not $env:QUEST_INSTALL_ARTIFACT -or -not $env:QUEST_INSTALL_CHECKSUMS) {
@@ -164,10 +221,7 @@ try {
     Fail "checksum mismatch for $artifactName"
   }
 
-  $reportedVersion = (& $artifact --version).Trim()
-  if ($LASTEXITCODE -ne 0 -or $reportedVersion -ne "quest $version") {
-    Fail "downloaded quest failed its version smoke test"
-  }
+  Assert-QuestVersion $artifact "downloaded"
 
   New-Item -ItemType Directory -Force $installDir | Out-Null
   $destination = Join-Path $installDir "quest.exe"
@@ -183,10 +237,7 @@ try {
   }
   try {
     Move-Item -Force $stage $destination
-    & $destination --version | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-      Fail "installed quest failed its version smoke test"
-    }
+    Assert-QuestVersion $destination "installed"
   } catch {
     if ($hadPrevious -and -not (Test-Path -LiteralPath $destination) -and (Test-Path -LiteralPath $previous)) {
       Copy-Item $previous $destination

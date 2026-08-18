@@ -1,7 +1,10 @@
-import { appendFile, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { Database } from "bun:sqlite";
+import { appendFile, chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join, resolve } from "node:path";
+import { basename, delimiter, join, resolve } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 
+import { SQLITE_SCHEMA_VERSION } from "../src/store";
 import { artifactName, resolveDistVersion, selectDistTargets } from "./dist-config";
 
 const rootDirectory = resolve(import.meta.dir, "..");
@@ -26,14 +29,32 @@ if (hostTarget === undefined) {
 
 const temporaryDirectory = await mkdtemp(join(tmpdir(), "quest-install-smoke-"));
 const installDirectory = join(temporaryDirectory, "bin");
+const machineHome = join(temporaryDirectory, "machine-home");
+const machineConfig = join(temporaryDirectory, "machine-config");
+const machineState = join(temporaryDirectory, "machine-state");
+const discoveredStoreDirectory =
+  process.platform === "darwin"
+    ? join(machineHome, ".local", "state", "quest")
+    : join(machineState, "quest");
+await mkdir(discoveredStoreDirectory, { recursive: true });
+const discoveredStore = join(discoveredStoreDirectory, "quest.db");
+const oldStore = new Database(discoveredStore, { create: true });
+oldStore.run(`PRAGMA user_version = ${SQLITE_SCHEMA_VERSION - 1}`);
+oldStore.close();
 const name = artifactName(version, hostTarget);
 const installerEnvironment = {
   ...process.env,
+  APPDATA: machineConfig,
+  HOME: machineHome,
+  LOCALAPPDATA: machineState,
   QUEST_INSTALL_ARTIFACT: join(rootDirectory, "dist", name),
   QUEST_INSTALL_CHECKSUMS: join(rootDirectory, "dist", "checksums.txt"),
   QUEST_INSTALL_DIR: installDirectory,
   QUEST_INSTALL_SKIP_PATH: "1",
   QUEST_INSTALL_VERSION: version,
+  USERPROFILE: machineHome,
+  XDG_CONFIG_HOME: machineConfig,
+  XDG_STATE_HOME: machineState,
 };
 
 async function runInstaller(environment: typeof installerEnvironment): Promise<number> {
@@ -48,6 +69,127 @@ async function runInstaller(environment: typeof installerEnvironment): Promise<n
     stdout: "inherit",
   });
   return install.exited;
+}
+
+async function runPowerShellInstaller(
+  environment: typeof installerEnvironment,
+): Promise<{ readonly exitCode: number; readonly output: string }> {
+  const install = Bun.spawn({
+    cmd: ["pwsh", "-NoProfile", "-File", join(rootDirectory, "install.ps1")],
+    env: environment,
+    stderr: "pipe",
+    stdout: "pipe",
+  });
+  const [exitCode, stderr, stdout] = await Promise.all([
+    install.exited,
+    new Response(install.stderr).text(),
+    new Response(install.stdout).text(),
+  ]);
+  return { exitCode, output: `${stdout}${stderr}` };
+}
+
+async function createPowerShellArtifact(
+  directory: string,
+  script: string,
+): Promise<{ readonly artifact: string; readonly checksums: string }> {
+  await mkdir(directory, { recursive: true });
+  const windowsArtifactName = `quest-${version}-windows-x64.exe`;
+  const artifact = join(directory, windowsArtifactName);
+  await writeFile(artifact, script);
+  await chmod(artifact, 0o755);
+  return { artifact, checksums: await writePowerShellChecksums(directory, artifact) };
+}
+
+async function writePowerShellChecksums(directory: string, artifact: string): Promise<string> {
+  const digest = new Bun.CryptoHasher("sha256")
+    .update(new Uint8Array(await Bun.file(artifact).arrayBuffer()))
+    .digest("hex");
+  const checksums = join(directory, "checksums.txt");
+  await writeFile(checksums, `${digest}  ${basename(artifact)}\n`);
+  return checksums;
+}
+
+async function createFailingPowerShellArtifact(): Promise<{
+  readonly artifact: string;
+  readonly checksums: string;
+  readonly expectedOutput: string;
+  readonly installVersion: string;
+}> {
+  const directory = join(temporaryDirectory, "powershell-failing");
+  if (process.platform !== "win32") {
+    const fixture = await createPowerShellArtifact(
+      directory,
+      "#!/bin/sh\nprintf 'store is broken; run quest migrate\\n' >&2\nexit 7\n",
+    );
+    return {
+      ...fixture,
+      expectedOutput: "store is broken; run quest migrate",
+      installVersion: version,
+    };
+  }
+
+  const installVersion = `${version}-mismatch`;
+  await mkdir(directory, { recursive: true });
+  const artifact = join(directory, `quest-${installVersion}-windows-x64.exe`);
+  await copyFile(installerEnvironment.QUEST_INSTALL_ARTIFACT, artifact);
+  return {
+    artifact,
+    checksums: await writePowerShellChecksums(directory, artifact),
+    expectedOutput: `quest ${version}`,
+    installVersion,
+  };
+}
+
+async function runPowerShellFailureSmoke(): Promise<void> {
+  if (Bun.which("pwsh") === null) {
+    if (process.platform === "win32") {
+      throw new Error("PowerShell is required to test install.ps1");
+    }
+    process.stdout.write("Skipped install.ps1 smoke because pwsh is unavailable\n");
+    return;
+  }
+
+  if (process.platform !== "win32") {
+    const passingFixture = await createPowerShellArtifact(
+      join(temporaryDirectory, "powershell-passing"),
+      `#!/bin/sh\nprintf 'quest ${version}\\n'\n`,
+    );
+    const passing = await runPowerShellInstaller({
+      ...installerEnvironment,
+      QUEST_INSTALL_ARTIFACT: passingFixture.artifact,
+      QUEST_INSTALL_CHECKSUMS: passingFixture.checksums,
+      QUEST_INSTALL_DIR: join(temporaryDirectory, "powershell-bin"),
+    });
+    if (passing.exitCode !== 0) {
+      throw new Error(`install.ps1 failed with an old discovered store: ${passing.output.trim()}`);
+    }
+  }
+
+  const failingFixture = await createFailingPowerShellArtifact();
+  const failing = await runPowerShellInstaller({
+    ...installerEnvironment,
+    QUEST_INSTALL_ARTIFACT: failingFixture.artifact,
+    QUEST_INSTALL_CHECKSUMS: failingFixture.checksums,
+    QUEST_INSTALL_DIR: join(temporaryDirectory, "powershell-failing-bin"),
+    QUEST_INSTALL_VERSION: failingFixture.installVersion,
+  });
+  if (failing.exitCode === 0) {
+    throw new Error("install.ps1 accepted an executable that failed its version smoke test");
+  }
+  const failureOutput = stripVTControlCharacters(failing.output).replace(/\s+/g, " ");
+  if (!failureOutput.includes(failingFixture.expectedOutput)) {
+    throw new Error(`install.ps1 hid the smoke-test output: ${failing.output.trim()}`);
+  }
+  if (!/retry the.{0,80}installer/.test(failureOutput.toLowerCase())) {
+    throw new Error(
+      `install.ps1 did not provide an actionable next step: ${failing.output.trim()}`,
+    );
+  }
+  if (failureOutput.includes("null-valued expression")) {
+    throw new Error(
+      `install.ps1 replaced the real error with a null error: ${failing.output.trim()}`,
+    );
+  }
 }
 
 async function runPrivateInstallerSmoke(): Promise<void> {
@@ -154,7 +296,7 @@ async function runPrivateInstallerSmoke(): Promise<void> {
 }
 
 const environmentWithoutPath = Object.fromEntries(
-  Object.entries(process.env).filter(([key]) => key.toUpperCase() !== "PATH"),
+  Object.entries(installerEnvironment).filter(([key]) => key.toUpperCase() !== "PATH"),
 );
 const smokeEnvironment = {
   ...environmentWithoutPath,
@@ -165,11 +307,26 @@ try {
   if ((await runInstaller(installerEnvironment)) !== 0) {
     throw new Error("installer failed");
   }
-  if ((await runInstaller(installerEnvironment)) !== 0) {
-    throw new Error("installer failed when replacing an existing installation");
-  }
 
   const executable = process.platform === "win32" ? "quest.exe" : "quest";
+  const oldStoreSmoke = Bun.spawn({
+    cmd: [executable, "--version"],
+    env: smokeEnvironment,
+    stderr: "inherit",
+    stdout: "pipe",
+  });
+  const oldStoreOutput = await new Response(oldStoreSmoke.stdout).text();
+  if ((await oldStoreSmoke.exited) !== 0 || oldStoreOutput.trim() !== `quest ${version}`) {
+    throw new Error("installed quest --version failed with an old discovered store");
+  }
+
+  await writeFile(discoveredStore, "not a SQLite database");
+  if ((await runInstaller(installerEnvironment)) !== 0) {
+    throw new Error(
+      "installer failed when replacing an existing installation with a corrupt store",
+    );
+  }
+
   const smoke = Bun.spawn({
     cmd: [executable, "--version"],
     env: smokeEnvironment,
@@ -185,6 +342,7 @@ try {
   }
 
   await runPrivateInstallerSmoke();
+  await runPowerShellFailureSmoke();
 
   const untrustedDirectory = join(temporaryDirectory, "untrusted-cwd");
   const preloadMarker = join(untrustedDirectory, "preload-ran");
