@@ -968,4 +968,80 @@ describe("Convex restore rolling upgrades", () => {
     expect(mutations.filter((mutation) => mutation === convexApi.commitRestore)).toHaveLength(1);
     expect(mutations.at(-1)).toBe(convexApi.rollbackRestore);
   });
+
+  test("reads doctor diagnostics from bounded Convex queries", async () => {
+    const calls: Array<{ readonly args: Record<string, unknown>; readonly query: unknown }> = [];
+    const capacity = {
+      event_rate_sample: {
+        count: 2,
+        first: { at: "2026-08-04T20:00:00.000Z", id: 1 },
+        last: { at: timestamp, id: 2 },
+      },
+      tables: [
+        { high_water_mark: 3, table: "quests" },
+        { high_water_mark: 4, table: "evidence" },
+        { high_water_mark: 5, table: "events" },
+      ],
+    } as const;
+    const clients = {
+      http: {
+        query: async (query: unknown, args: Record<string, unknown>) => {
+          calls.push({ args, query });
+          if (query === convexApi.doctorCapacity) {
+            return capacity;
+          }
+          if (query === convexApi.doctorEvidenceSample) {
+            return { hashes: [], high_water_mark: 4 };
+          }
+          if (query === convexApi.doctorStaleClaims) {
+            return { claims: [], truncated: false };
+          }
+          throw new Error("unexpected doctor query");
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.inspectCapacity()).resolves.toEqual(capacity);
+    await expect(store.inspectEvidenceSample()).resolves.toEqual({
+      hashes: [],
+      high_water_mark: 4,
+    });
+    await expect(store.inspectStaleClaims(timestamp)).resolves.toEqual({
+      claims: [],
+      truncated: false,
+    });
+
+    expect(calls).toEqual([
+      {
+        args: { client_protocol: QUEST_CLIENT_PROTOCOL },
+        query: convexApi.doctorCapacity,
+      },
+      {
+        args: { client_protocol: QUEST_CLIENT_PROTOCOL },
+        query: convexApi.doctorEvidenceSample,
+      },
+      {
+        args: { client_protocol: QUEST_CLIENT_PROTOCOL, lease_cutoff: timestamp },
+        query: convexApi.doctorStaleClaims,
+      },
+    ]);
+  });
+
+  test("gives old Convex deployments the exact doctor upgrade remedy", async () => {
+    const clients = {
+      http: {
+        query: async () => {
+          throw new Error("Could not find public function for 'quest:doctorCapacity'");
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.inspectCapacity()).rejects.toThrow(
+      "[CONVEX_DOCTOR_OUTDATED] this Convex deployment does not expose quest:doctorCapacity; deploy the matching Convex functions with `bunx convex deploy`, then retry. No full-store fallback was attempted because doctor diagnostics must stay bounded",
+    );
+  });
 });

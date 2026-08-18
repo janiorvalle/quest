@@ -81,6 +81,26 @@ if (deployment === undefined || authToken === undefined) {
     }
   });
 
+  test.serial("Convex doctor diagnostics use bounded maintenance queries", async () => {
+    const clients = createConvexClientPair(deployment, { authToken });
+    try {
+      const store = new ConvexStore(deployment, { clients });
+      const [capacity, evidence, staleClaims] = await Promise.all([
+        store.inspectCapacity(),
+        store.inspectEvidenceSample(),
+        store.inspectStaleClaims(new Date().toISOString()),
+      ]);
+
+      expect(capacity.tables.map((table) => table.table)).toEqual(["quests", "evidence", "events"]);
+      expect(capacity.tables.every((table) => table.high_water_mark >= 0)).toBeTrue();
+      expect(capacity.event_rate_sample.count).toBeLessThanOrEqual(64);
+      expect(evidence.hashes.length).toBeLessThanOrEqual(10);
+      expect(staleClaims.claims.length).toBeLessThanOrEqual(100);
+    } finally {
+      await closeConvexClientPair(clients);
+    }
+  });
+
   const questStoreFactory: QuestStoreFactory = async () => {
     const clients = createConvexClientPair(deployment, { authToken });
     const store = new ConvexStore(deployment, { clients });

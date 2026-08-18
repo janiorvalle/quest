@@ -40,8 +40,13 @@ export type {
   QuestDetailSnapshot,
   QuestStore,
   QuestWatchListener,
+  StoreCapacityInspection,
+  StoreCapacityTableInspection,
+  StoreCapacityTableName,
   StoreCompatibilityProbe,
+  StoreEvidenceSampleInspection,
   StoreMigrationSession,
+  StoreStaleClaimsInspection,
   WatchSubscription,
 } from "./port";
 export {

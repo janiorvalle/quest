@@ -45,7 +45,10 @@ import type {
   QuestDetailSnapshot,
   QuestStore,
   QuestWatchListener,
+  StoreCapacityInspection,
+  StoreEvidenceSampleInspection,
   StoreMigrationSession,
+  StoreStaleClaimsInspection,
   WatchSubscription,
 } from "../port";
 import { statsForQuests } from "../routing";
@@ -351,6 +354,26 @@ function isMissingFederatedSnapshotQuery(error: unknown): boolean {
     /(?:could not find|not found|does not exist|not a function).*federatedSnapshot|federatedSnapshot.*(?:could not find|not found|does not exist|not a function)/i.test(
       error.message,
     )
+  );
+}
+
+function doctorDiagnosticError(error: unknown, functionName: string): unknown {
+  if (!(error instanceof Error)) {
+    return error;
+  }
+  const message = error.message.trim();
+  const missingFunction = new RegExp(
+    `(?:could not find|not found|does not exist|not a function).*${functionName}|${functionName}.*(?:could not find|not found|does not exist|not a function)`,
+    "i",
+  );
+  if (
+    !missingFunction.test(message) &&
+    !/^\[Request ID: [0-9a-f]+\] Server Error$/i.test(message)
+  ) {
+    return error;
+  }
+  return new Error(
+    `[CONVEX_DOCTOR_OUTDATED] this Convex deployment does not expose ${functionName}; deploy the matching Convex functions with \`bunx convex deploy\`, then retry. No full-store fallback was attempted because doctor diagnostics must stay bounded`,
   );
 }
 
@@ -1001,6 +1024,39 @@ export class ConvexStore implements QuestStore {
         }),
       )
     ).dump;
+  }
+
+  async inspectCapacity(): Promise<StoreCapacityInspection> {
+    try {
+      return await this.#clients.http.query(
+        convexApi.doctorCapacity,
+        authTokenInput(this.#clients),
+      );
+    } catch (error: unknown) {
+      throw doctorDiagnosticError(error, "quest:doctorCapacity");
+    }
+  }
+
+  async inspectEvidenceSample(): Promise<StoreEvidenceSampleInspection> {
+    try {
+      return await this.#clients.http.query(
+        convexApi.doctorEvidenceSample,
+        authTokenInput(this.#clients),
+      );
+    } catch (error: unknown) {
+      throw doctorDiagnosticError(error, "quest:doctorEvidenceSample");
+    }
+  }
+
+  async inspectStaleClaims(now: string): Promise<StoreStaleClaimsInspection> {
+    try {
+      return await this.#clients.http.query(convexApi.doctorStaleClaims, {
+        ...authTokenInput(this.#clients),
+        lease_cutoff: questSchema.shape.updated_at.parse(now),
+      });
+    } catch (error: unknown) {
+      throw doctorDiagnosticError(error, "quest:doctorStaleClaims");
+    }
   }
 
   async serverTime(): Promise<string> {

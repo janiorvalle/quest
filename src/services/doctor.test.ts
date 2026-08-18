@@ -15,7 +15,7 @@ import {
   STORE_SCHEMA_VERSION,
   type StoreCompatibilityResult,
 } from "../schema";
-import { type BlobStore, SQLITE_SCHEMA_VERSION } from "../store";
+import { type BlobStore, SQLITE_SCHEMA_VERSION, type StoreCapacityInspection } from "../store";
 import type { BackupOperations } from "./backup";
 import { type DoctorOperations, type DoctorStoreInspection, runDoctor } from "./doctor";
 
@@ -162,6 +162,25 @@ function operations(
   };
 }
 
+function capacityInspection(
+  quests: number,
+  evidence: number,
+  events: number,
+): StoreCapacityInspection {
+  return {
+    event_rate_sample: {
+      count: 64,
+      first: { at: "2026-07-21T18:00:00.000Z", id: Math.max(1, events - 63) },
+      last: { at: now, id: events },
+    },
+    tables: [
+      { high_water_mark: quests, table: "quests" },
+      { high_water_mark: evidence, table: "evidence" },
+      { high_water_mark: events, table: "events" },
+    ],
+  };
+}
+
 function check(data: Awaited<ReturnType<typeof runDoctor>>, name: string) {
   const result = data.checks.find((item) => item.check === name);
   if (result === undefined) {
@@ -191,6 +210,304 @@ describe("doctor diagnostics", () => {
       ]);
       expect(check(result, "backup").details).toMatchObject({
         last_verify: { snapshot: backupSnapshot, status: "passed" },
+      });
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("keeps a small Convex deployment healthy without exporting its full store", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-doctor-small-capacity-"));
+    try {
+      const result = await runDoctor({
+        compatibility: compatible(),
+        now,
+        operations: operations(
+          root,
+          { integrity_check: ["ok"], scope: "diagnostics", state: "present" },
+          {
+            inspectCapacity: () => Promise.resolve(capacityInspection(100, 200, 300)),
+            inspectEvidenceSample: () => Promise.resolve({ hashes: [], high_water_mark: 200 }),
+            inspectStaleClaims: () => Promise.resolve({ claims: [], truncated: false }),
+          },
+        ),
+      });
+
+      expect(result.healthy).toBeTrue();
+      expect(check(result, "capacity")).toMatchObject({
+        details: {
+          write_path: {
+            ceiling_events_per_second: 70,
+            occ_retry_rate: { retries_per_hour: null, state: "unavailable" },
+          },
+        },
+        remedy: null,
+        status: "pass",
+        summary: "Convex table display-ID upper bounds are below 50% of known limits",
+      });
+      expect(check(result, "evidence").details).toEqual({
+        high_water_mark: 200,
+        sample: [],
+      });
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("warns when recent event writes approach the measured exact-ID ceiling", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-doctor-write-headroom-"));
+    try {
+      const inspection: StoreCapacityInspection = {
+        ...capacityInspection(100, 100, 164),
+        event_rate_sample: {
+          count: 65,
+          first: { at: "2026-07-31T17:59:59.000Z", id: 100 },
+          last: { at: now, id: 164 },
+        },
+      };
+      const result = await runDoctor({
+        compatibility: compatible(),
+        now,
+        operations: operations(root, undefined, {
+          inspectCapacity: () => Promise.resolve(inspection),
+          inspectOccRetries: () =>
+            Promise.resolve({
+              failed_calls: 0,
+              retried_calls: 0,
+              state: "available",
+              window_hours: 72,
+            }),
+        }),
+      });
+
+      expect(check(result, "capacity")).toMatchObject({
+        details: {
+          write_path: {
+            ceiling_events_per_second: 70,
+            headroom_percent_used: 91.4,
+            recent_events_per_second: 64,
+          },
+        },
+        remedy:
+          "capture `convex insights --details --json`, then reopen quest 377 to evaluate protocol v3 opaque event and evidence IDs",
+        status: "warn",
+        summary:
+          "Recent event throughput is 64 inserts/s, 91.4% of the measured 70 inserts/s exact-ID ceiling",
+      });
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("uses sampled documents rather than sparse display-ID gaps for throughput", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-doctor-sparse-event-rate-"));
+    try {
+      const inspection: StoreCapacityInspection = {
+        ...capacityInspection(100, 100, 8_000),
+        event_rate_sample: {
+          count: 2,
+          first: { at: "2026-07-31T17:59:59.000Z", id: 7_937 },
+          last: { at: now, id: 8_000 },
+        },
+      };
+      const result = await runDoctor({
+        compatibility: compatible(),
+        now,
+        operations: operations(root, undefined, {
+          inspectCapacity: () => Promise.resolve(inspection),
+        }),
+      });
+
+      expect(check(result, "capacity")).toMatchObject({
+        details: { write_path: { headroom_percent_used: 1.4, recent_events_per_second: 1 } },
+      });
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("does not report an old event burst as current write pressure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-doctor-old-event-rate-"));
+    try {
+      const inspection: StoreCapacityInspection = {
+        ...capacityInspection(100, 100, 300),
+        event_rate_sample: {
+          count: 64,
+          first: { at: "2026-06-01T17:59:59.000Z", id: 237 },
+          last: { at: "2026-06-01T18:00:00.000Z", id: 300 },
+        },
+      };
+      const result = await runDoctor({
+        compatibility: compatible(),
+        now,
+        operations: operations(root, undefined, {
+          inspectCapacity: () => Promise.resolve(inspection),
+        }),
+      });
+
+      expect(check(result, "capacity")).toMatchObject({
+        details: {
+          event_burn_rate: { events_per_day: null },
+          write_path: { headroom_percent_used: null, recent_events_per_second: null },
+        },
+        status: "pass",
+      });
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("reports the exact-ID allocator OCC retry rate from Convex Insights", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-doctor-occ-retries-"));
+    try {
+      const result = await runDoctor({
+        compatibility: compatible(),
+        now,
+        operations: operations(root, undefined, {
+          inspectCapacity: () => Promise.resolve(capacityInspection(100, 100, 300)),
+          inspectOccRetries: () =>
+            Promise.resolve({
+              failed_calls: 0,
+              retried_calls: 15,
+              state: "available",
+              window_hours: 72,
+            }),
+        }),
+      });
+
+      expect(check(result, "capacity")).toMatchObject({
+        details: {
+          write_path: {
+            occ_retry_rate: {
+              failed_calls: 0,
+              retries_per_hour: 0.21,
+              retried_calls: 15,
+              state: "available",
+              window_hours: 72,
+            },
+          },
+        },
+        remedy:
+          "capture `convex insights --details --json`, then reopen quest 377 to evaluate protocol v3 opaque event and evidence IDs",
+        status: "warn",
+        summary: "Convex retried 15 exact-ID writes after OCC conflicts in the last 72 hours",
+      });
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("warns before the nearest Convex wall with its projected date and exact remedy", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-doctor-near-capacity-"));
+    try {
+      const result = await runDoctor({
+        compatibility: compatible(),
+        now,
+        operations: operations(root, undefined, {
+          inspectCapacity: () => Promise.resolve(capacityInspection(500, 1_000, 7_000)),
+        }),
+      });
+
+      expect(result.healthy).toBeFalse();
+      expect(check(result, "capacity")).toMatchObject({
+        details: {
+          document_size_limit: { bytes: 1_048_576 },
+          event_burn_rate: {
+            events_per_day: 6.3,
+            measurement: "bounded_recent_document_sample",
+          },
+          table_capacity_basis: {
+            measurement: "monotonic_display_id_upper_bound",
+            note: "The indexed display-ID tail is a conservative upper bound, not a document count; sparse stores after restore may report high but cannot under-report capacity pressure.",
+          },
+          tables: [
+            { response_limit: { upper_bound_estimated_at: null }, table: "quests" },
+            { response_limit: { upper_bound_estimated_at: null }, table: "evidence" },
+            {
+              id_high_water_upper_bound: 7_000,
+              measurement: "monotonic_display_id_upper_bound",
+              response_limit: {
+                upper_bound_estimated_at: "2027-02-05T22:57:08.571Z",
+                limit: 8_192,
+                upper_bound_percent_used: 85.4,
+              },
+              table: "events",
+            },
+          ],
+        },
+        remedy:
+          "verify quest 374's paged event-feed surface is deployed; page any custom event reads, then rerun quest doctor",
+        status: "warn",
+        summary:
+          "Convex events display-ID upper bound 7,000 is 85.4% of the 8,192-element response limit; the upper bound is projected to reach it 2027-02-05T22:57:08.571Z; sparse restored stores may read high",
+      });
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("fails a sparse high-water upper bound above 95% and labels the conservative basis", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-doctor-capacity-error-"));
+    try {
+      const result = await runDoctor({
+        compatibility: compatible(),
+        now,
+        operations: operations(root, undefined, {
+          inspectCapacity: () => Promise.resolve(capacityInspection(7_800, 1_000, 2_000)),
+          inspectOccRetries: () =>
+            Promise.resolve({
+              failed_calls: 0,
+              retried_calls: 1,
+              state: "available",
+              window_hours: 72,
+            }),
+        }),
+      });
+
+      expect(check(result, "capacity")).toMatchObject({
+        details: {
+          table_capacity_basis: {
+            measurement: "monotonic_display_id_upper_bound",
+            note: expect.stringContaining("not a document count"),
+          },
+          tables: expect.arrayContaining([
+            expect.objectContaining({
+              id_high_water_upper_bound: 7_800,
+              response_limit: expect.objectContaining({ upper_bound_percent_used: 95.2 }),
+              table: "quests",
+            }),
+          ]),
+        },
+        remedy:
+          "verify quest 375's paged list, stats, viewer, and claim surfaces are deployed; page any custom quest reads, then rerun quest doctor",
+        status: "fail",
+        summary:
+          "Convex quests display-ID upper bound 7,800 is 95.2% of the 8,192-element response limit; sparse restored stores may read high",
+      });
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("tells operators to deploy matching functions when capacity diagnostics are missing", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-doctor-outdated-capacity-"));
+    try {
+      const result = await runDoctor({
+        compatibility: compatible(),
+        now,
+        operations: operations(root, undefined, {
+          inspectCapacity: () =>
+            Promise.reject(
+              new Error(
+                "[CONVEX_DOCTOR_OUTDATED] this Convex deployment does not expose quest:doctorCapacity",
+              ),
+            ),
+        }),
+      });
+
+      expect(check(result, "capacity")).toMatchObject({
+        remedy: "deploy the matching Convex functions with `bunx convex deploy`, then retry",
+        status: "fail",
       });
     } finally {
       await rm(root, { force: true, recursive: true });
@@ -333,6 +650,35 @@ describe("doctor diagnostics", () => {
       expect(check(result, "leases")).toMatchObject({
         remedy: "confirm no worker still owns each listed quest, then re-accept the stale quests",
         status: "fail",
+      });
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  test("warns instead of hiding stale claims beyond the bounded Convex sample", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-doctor-truncated-leases-"));
+    try {
+      const result = await runDoctor({
+        compatibility: compatible(),
+        now,
+        operations: operations(
+          root,
+          { integrity_check: ["ok"], scope: "diagnostics", state: "present" },
+          {
+            inspectEvidenceSample: () => Promise.resolve({ hashes: [], high_water_mark: 0 }),
+            inspectStaleClaims: () => Promise.resolve({ claims: [], truncated: true }),
+          },
+        ),
+      });
+
+      expect(check(result, "leases")).toEqual({
+        check: "leases",
+        details: { claims: [], store_exists: true, truncated: true },
+        remedy:
+          "reduce accepted claims below 100 or inspect leases in the Convex dashboard, then rerun quest doctor",
+        status: "warn",
+        summary: "stale claims could not be ruled out because more than 100 claims are accepted",
       });
     } finally {
       await rm(root, { force: true, recursive: true });

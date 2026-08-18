@@ -41,6 +41,9 @@ import type {
   FederatedFullSnapshot,
   FederatedReadSnapshot,
   QuestDetailSnapshot,
+  StoreCapacityInspection,
+  StoreEvidenceSampleInspection,
+  StoreStaleClaimsInspection,
 } from "../port";
 import type {
   ConvexDumpPage,
@@ -102,6 +105,19 @@ export interface ConvexPendingRestoreResult {
 export const convexApi = {
   schemaVersion: makeFunctionReference<"query", ClientProtocolInput, number>("quest:schemaVersion"),
   serverTime: makeFunctionReference<"query", ClientProtocolInput, string>("quest:serverTime"),
+  doctorCapacity: makeFunctionReference<"query", AuthTokenInput, StoreCapacityInspection>(
+    "quest:doctorCapacity",
+  ),
+  doctorEvidenceSample: makeFunctionReference<
+    "query",
+    AuthTokenInput,
+    StoreEvidenceSampleInspection
+  >("quest:doctorEvidenceSample"),
+  doctorStaleClaims: makeFunctionReference<
+    "query",
+    AuthTokenInput & { readonly lease_cutoff: string },
+    StoreStaleClaimsInspection
+  >("quest:doctorStaleClaims"),
   migrateReadyStatuses: makeFunctionReference<
     "mutation",
     ClientProtocolInput & { readonly admin_secret: string },
