@@ -130,6 +130,7 @@ export interface ExecuteMembersCliOptions {
   readonly output: CliOutputBoundary;
   readonly prompter: CliPrompter;
   readonly request: MembersCliRequest;
+  readonly scopeWarnings?: readonly string[] | undefined;
 }
 
 export class MembersCliUsageError extends Error {
@@ -257,7 +258,7 @@ function report(
         command,
         generated_at: new Date().toISOString(),
         filters: {},
-        warnings: [...warnings],
+        warnings: [...(options.scopeWarnings ?? []), ...warnings],
         data,
       }),
     ),

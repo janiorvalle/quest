@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { configSchema } from "../schema";
-import { configuredRepositoryStores, resolveRepositoryName, resolveRepositoryStore } from ".";
+import {
+  configuredRepositoryStores,
+  repositoryRoutingWarning,
+  resolveRepositoryName,
+  resolveRepositoryStore,
+} from ".";
 
 describe("repository backend routing", () => {
   test("resolves a per-repository store after applying an alias", () => {
@@ -82,5 +87,63 @@ describe("repository backend routing", () => {
     expect(() => resolveRepositoryStore(config, "alpha")).toThrow(
       '[CONFIG_ALIAS_CYCLE] repository alias cycle includes "alpha"',
     );
+  });
+
+  test("warns when an unconfigured checkout can fall back from a routed repository", () => {
+    const config = configSchema.parse({
+      store: { backend: "sqlite" },
+      repos: {
+        "streamlyne-marketing": {
+          store: { backend: "convex", deployment: "dev:marketing" },
+        },
+      },
+    });
+
+    expect(repositoryRoutingWarning(config, "marketing")).toBe(
+      'detected repository "marketing" is not configured, so Quest fell back to the default sqlite store; configured repository "streamlyne-marketing" uses a non-default convex store. Add [repos] marketing = "streamlyne-marketing" or rerun with --repo streamlyne-marketing',
+    );
+  });
+
+  test("does not warn when the checkout is explicitly routed or all stores use the default", () => {
+    const aliased = configSchema.parse({
+      store: { backend: "sqlite" },
+      repos: {
+        marketing: "streamlyne-marketing",
+        "streamlyne-marketing": {
+          store: { backend: "convex", deployment: "dev:marketing" },
+        },
+      },
+    });
+    const sameBackend = configSchema.parse({
+      store: { backend: "sqlite" },
+      repos: {
+        "streamly-marketing": { store: { backend: "sqlite" } },
+      },
+    });
+
+    expect(repositoryRoutingWarning(aliased, "marketing")).toBeUndefined();
+    expect(repositoryRoutingWarning(sameBackend, "marketing")).toBeUndefined();
+  });
+
+  test("does not recommend an arbitrary route when several non-default stores exist", () => {
+    const config = configSchema.parse({
+      store: { backend: "sqlite" },
+      repos: {
+        "streamlyne-marketing": {
+          store: { backend: "convex", deployment: "dev:marketing" },
+        },
+        "streamlyne-platform": {
+          store: { backend: "convex", deployment: "dev:platform" },
+        },
+      },
+    });
+
+    const warning = repositoryRoutingWarning(config, "marketing");
+
+    expect(warning).toContain(
+      'configured non-default stores exist for "streamlyne-marketing", "streamlyne-platform"',
+    );
+    expect(warning).toContain('Add [repos] marketing = "<intended repository>"');
+    expect(warning).not.toContain('Add [repos] marketing = "streamlyne-marketing"');
   });
 });

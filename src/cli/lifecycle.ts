@@ -311,6 +311,7 @@ export interface ExecuteLifecycleCliOptions {
   readonly request: LifecycleCliRequest;
   readonly readStdin?: (() => Promise<string>) | undefined;
   readonly scope: QuestScope;
+  readonly scopeWarnings?: readonly string[] | undefined;
   readonly workingDirectory: string;
 }
 
@@ -911,6 +912,13 @@ function writeWarnings(output: CliOutputBoundary, warnings: readonly string[]): 
   }
 }
 
+function reportWarnings(
+  options: ExecuteLifecycleCliOptions,
+  warnings: readonly string[],
+): string[] {
+  return [...(options.scopeWarnings ?? []), ...options.identityWarnings, ...warnings];
+}
+
 async function writeMutationResult(
   options: ExecuteLifecycleCliOptions,
   command: LifecycleCliRequest["command"],
@@ -927,7 +935,7 @@ async function writeMutationResult(
 ): Promise<ExitCode> {
   if (options.format === "json") {
     const generatedAt = await options.ports.clock.now();
-    const warnings = [...options.identityWarnings, ...result.warnings];
+    const warnings = reportWarnings(options, result.warnings);
     const report =
       command === "accept"
         ? buildQuestReport(acceptMutationDataSchema, {
@@ -998,7 +1006,7 @@ async function executeAdd(options: ExecuteLifecycleCliOptions): Promise<ExitCode
       command: "add",
       generated_at: await options.ports.clock.now(),
       filters: { repo: options.scope.repo },
-      warnings: [...options.identityWarnings, ...result.warnings],
+      warnings: reportWarnings(options, result.warnings),
       data: {
         candidates: [...result.candidates],
         evidence: [...result.evidence],
@@ -1076,14 +1084,14 @@ async function writeNextJson(
           command: "next",
           generated_at: await options.ports.clock.now(),
           filters: { repo: options.scope.repo },
-          warnings: [...options.identityWarnings, ...result.warnings],
+          warnings: reportWarnings(options, result.warnings),
           data: { claimed: result.claimed, quest: result.quest },
         })
       : buildQuestReport(nextBriefDataSchema, {
           command: "next",
           generated_at: await options.ports.clock.now(),
           filters: { repo: options.scope.repo },
-          warnings: [...options.identityWarnings, ...result.warnings],
+          warnings: reportWarnings(options, result.warnings),
           data: {
             brief: brief === null ? null : serializeQuestBrief(brief, undefined),
             claimed: result.claimed,
@@ -1271,7 +1279,7 @@ async function writeSignoffResult(
   options: ExecuteLifecycleCliOptions,
   result: LifecycleSignoffBatchResult,
 ): Promise<ExitCode> {
-  const warnings = [...options.identityWarnings, ...result.warnings];
+  const warnings = reportWarnings(options, result.warnings);
   if (options.format === "json") {
     const report = buildQuestReport(signoffDataSchema, {
       command: "signoff",
@@ -1293,7 +1301,7 @@ async function writeSignoffResult(
     return EXIT_SUCCESS;
   }
 
-  writeWarnings(options.output, warnings);
+  writeWarnings(options.output, [...options.identityWarnings, ...result.warnings]);
   for (const quest of result.quests) {
     options.output.write(`quest ${quest.quest.id} signed off\n`);
   }

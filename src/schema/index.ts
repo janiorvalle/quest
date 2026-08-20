@@ -23,10 +23,12 @@ export {
   type DoctorData,
   type DoctorFinding,
   type DoctorFindingStatus,
+  type DoctorScope,
   doctorCheckNameSchema,
   doctorDataSchema,
   doctorFindingSchema,
   doctorFindingStatusSchema,
+  doctorScopeSchema,
 } from "./doctor";
 export {
   type Chain,

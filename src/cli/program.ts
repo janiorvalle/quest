@@ -222,6 +222,11 @@ interface CliBackendRuntime {
   readonly openApplicationPorts: () => Promise<CliApplicationPorts>;
 }
 
+interface OpenedMaintenanceBackend {
+  readonly backend: CliBackendRuntime;
+  readonly resolved?: ResolvedCliScope | undefined;
+}
+
 export interface QuestCliBackendOpenOptions {
   readonly mode?: "command" | "viewer";
 }
@@ -390,6 +395,7 @@ function executeQueryRequest(
     ports: requireOperationalPorts(context.ports),
     request,
     scope: context.resolved.scope,
+    scopeWarnings: context.resolved.warnings,
   });
 }
 
@@ -407,6 +413,7 @@ function executePlanRequest(
     ports: requireOperationalPorts(context.ports),
     request,
     scope: context.resolved.scope,
+    scopeWarnings: context.resolved.warnings,
   });
 }
 
@@ -424,6 +431,7 @@ function executeQaRequest(
     ports: requireOperationalPorts(context.ports),
     request,
     scope: context.resolved.scope,
+    scopeWarnings: context.resolved.warnings,
   });
 }
 
@@ -443,6 +451,7 @@ function executeChainRequest(
     ports: requireOperationalPorts(context.ports),
     request,
     scope: context.resolved.scope,
+    scopeWarnings: context.resolved.warnings,
   });
 }
 
@@ -469,6 +478,7 @@ function executeLifecycleRequest(
     request,
     readStdin: context.dependencies.readStdin,
     scope: context.resolved.scope,
+    scopeWarnings: context.resolved.warnings,
     workingDirectory: context.resolved.working_directory,
   });
 }
@@ -485,6 +495,7 @@ function executeExportRequest(
     output: context.dependencies.output,
     ports: requireOperationalPorts(context.ports),
     request,
+    scopeWarnings: context.resolved.warnings,
     workingDirectory: context.resolved.working_directory,
   });
 }
@@ -502,6 +513,7 @@ function executeBackupRequest(
     ports: context.ports,
     repository: context.resolved.scope.repo,
     request,
+    scopeWarnings: context.resolved.warnings,
     workingDirectory: context.resolved.working_directory,
   });
 }
@@ -629,11 +641,20 @@ async function executeMigrateRequest(
       prompter: dependencies.prompter,
     });
   }
-  return executeStoreMigration(
-    dependencies,
-    flags,
-    await openMaintenanceBackend(dependencies, flags, "migrate"),
-  );
+  const maintenance = await openMaintenanceBackend(dependencies, flags, "migrate");
+  try {
+    return await executeStoreMigration(
+      dependencies,
+      flags,
+      maintenance.backend,
+      maintenance.resolved?.warnings,
+    );
+  } catch (error: unknown) {
+    writeScopeWarningsOnFailure(dependencies.output, maintenance.resolved?.warnings ?? []);
+    throw error;
+  } finally {
+    await closeBackend(maintenance.backend);
+  }
 }
 
 export function isBackupRecoveryRequest(request: QuestCliRequest | undefined): boolean {
@@ -660,6 +681,25 @@ function identityOverride(request: QuestCliRequest | undefined): string | undefi
   return request !== undefined && isLifecycleCliRequest(request) && request.command === "accept"
     ? request.owner
     : undefined;
+}
+
+function writeScopeWarnings(
+  format: GlobalCliOptions["format"],
+  output: CliOutputBoundary,
+  warnings: readonly string[],
+): void {
+  if (format === "json") {
+    return;
+  }
+  for (const warning of warnings) {
+    output.writeWarning(warning);
+  }
+}
+
+function writeScopeWarningsOnFailure(output: CliOutputBoundary, warnings: readonly string[]): void {
+  for (const warning of warnings) {
+    output.writeWarning(warning);
+  }
 }
 
 async function resolveRequestIdentity(
@@ -715,25 +755,34 @@ async function openMaintenanceBackend(
   dependencies: QuestCliDependencies,
   flags: GlobalCliOptions,
   command: "doctor" | "migrate",
-): Promise<CliBackendRuntime> {
+): Promise<OpenedMaintenanceBackend> {
   if (flags.all) {
     throw new ScopeResolutionError(
       `[UNSUPPORTED_SCOPE] ${command} cannot use --all; rerun with --repo <name> to select one backend`,
     );
   }
   if (dependencies.openBackend === undefined) {
-    return openDefaultBackend(dependencies);
+    return { backend: await openDefaultBackend(dependencies) };
   }
-  const scope = await resolveMaintenanceScope(dependencies, flags);
-  return scope === undefined
-    ? openDefaultBackend(dependencies)
-    : openScopedBackend(dependencies, scope);
+  const resolved = await resolveMaintenanceScope(dependencies, flags);
+  try {
+    return {
+      backend:
+        resolved === undefined
+          ? await openDefaultBackend(dependencies)
+          : await openScopedBackend(dependencies, resolved.scope),
+      ...(resolved === undefined ? {} : { resolved }),
+    };
+  } catch (error: unknown) {
+    writeScopeWarningsOnFailure(dependencies.output, resolved?.warnings ?? []);
+    throw error;
+  }
 }
 
 async function resolveMaintenanceScope(
   dependencies: QuestCliDependencies,
   flags: GlobalCliOptions,
-): Promise<QuestScope | undefined> {
+): Promise<ResolvedCliScope | undefined> {
   try {
     const resolved = await resolveCliScope({
       config: dependencies.config,
@@ -742,7 +791,7 @@ async function resolveMaintenanceScope(
       locateGitRoot: dependencies.locateGitRoot,
       validateWorkingDirectory: dependencies.validateWorkingDirectory,
     });
-    return resolved.scope;
+    return resolved;
   } catch (error: unknown) {
     if (
       error instanceof ScopeResolutionError &&
@@ -815,22 +864,43 @@ function supportedStoreSchemaVersion(config: Config): number {
   return config.store.backend === "sqlite" ? SQLITE_SCHEMA_VERSION : STORE_SCHEMA_VERSION;
 }
 
-function executeMembersRequest(
+interface ResolvedMembersConfig {
+  readonly config: Config;
+  readonly warnings: readonly string[];
+}
+
+async function executeMembersRequest(
   flags: GlobalCliOptions,
   request: MembersCliRequest,
   dependencies: QuestCliDependencies,
   config: Config,
+  scopeWarnings: readonly string[] = [],
 ): Promise<ExitCode> {
-  return executeMembersCli({
-    config,
-    ...(dependencies.configWriter === undefined ? {} : { configWriter: dependencies.configWriter }),
-    environment: dependencies.environment ?? process.env,
-    format: flags.format,
-    ...(dependencies.onboarding === undefined ? {} : { onboarding: dependencies.onboarding }),
-    output: dependencies.output,
-    prompter: dependencies.prompter,
-    request,
-  });
+  if (flags.format !== "json") {
+    for (const warning of scopeWarnings) {
+      dependencies.output.writeWarning(warning);
+    }
+  }
+  try {
+    return await executeMembersCli({
+      config,
+      ...(dependencies.configWriter === undefined
+        ? {}
+        : { configWriter: dependencies.configWriter }),
+      environment: dependencies.environment ?? process.env,
+      format: flags.format,
+      ...(dependencies.onboarding === undefined ? {} : { onboarding: dependencies.onboarding }),
+      output: dependencies.output,
+      prompter: dependencies.prompter,
+      request,
+      scopeWarnings,
+    });
+  } catch (error: unknown) {
+    if (flags.format === "json") {
+      writeScopeWarningsOnFailure(dependencies.output, scopeWarnings);
+    }
+    throw error;
+  }
 }
 
 function executeSkillRequest(
@@ -849,14 +919,14 @@ function executeSkillRequest(
 async function resolveMembersConfig(
   flags: GlobalCliOptions,
   dependencies: QuestCliDependencies,
-): Promise<Config> {
+): Promise<ResolvedMembersConfig> {
   if (flags.all) {
     throw new ScopeResolutionError(
       "[UNSUPPORTED_SCOPE] member commands target one Convex deployment; rerun with --repo <name> or --deployment <url>",
     );
   }
   if (flags.repo === undefined && configuredRepositoryStores(dependencies.config).length === 0) {
-    return dependencies.config;
+    return { config: dependencies.config, warnings: [] };
   }
 
   let resolved: ResolvedCliScope;
@@ -886,8 +956,11 @@ async function resolveMembersConfig(
     );
   }
   return {
-    ...dependencies.config,
-    store: resolveRepositoryStore(dependencies.config, resolved.scope.repo),
+    config: {
+      ...dependencies.config,
+      store: resolveRepositoryStore(dependencies.config, resolved.scope.repo),
+    },
+    warnings: resolved.warnings ?? [],
   };
 }
 
@@ -914,11 +987,13 @@ async function executePreScopeRequest(
     if (request.command === "join" || request.deployment !== undefined) {
       return executeMembersRequest(flags, request, dependencies, dependencies.config);
     }
+    const resolvedMembersConfig = await resolveMembersConfig(flags, dependencies);
     return executeMembersRequest(
       flags,
       request,
       dependencies,
-      await resolveMembersConfig(flags, dependencies),
+      resolvedMembersConfig.config,
+      resolvedMembersConfig.warnings,
     );
   }
 
@@ -948,7 +1023,8 @@ async function executeDoctorRequest(
   flags: GlobalCliOptions,
   dependencies: QuestCliDependencies,
 ): Promise<ExitCode> {
-  const backend = await openMaintenanceBackend(dependencies, flags, "doctor");
+  const maintenance = await openMaintenanceBackend(dependencies, flags, "doctor");
+  const backend = maintenance.backend;
   try {
     let compatibility: StoreCompatibilityResult | undefined;
     let compatibilityError: unknown;
@@ -957,6 +1033,7 @@ async function executeDoctorRequest(
     } catch (error: unknown) {
       compatibilityError = error;
     }
+    const repository = maintenance.resolved?.scope.repo;
     return await executeDoctorCli({
       clock: backend.clock,
       compatibility,
@@ -965,7 +1042,19 @@ async function executeDoctorRequest(
       format: flags.format,
       olderStoreRemedy: backend.compatibilityProbe.olderStoreRemedy,
       output: dependencies.output,
+      ...(repository === undefined || repository === null
+        ? {}
+        : {
+            scope: {
+              backend: resolveRepositoryStore(dependencies.config, repository).backend,
+              repo: repository,
+            },
+          }),
+      warnings: maintenance.resolved?.warnings,
     });
+  } catch (error: unknown) {
+    writeScopeWarningsOnFailure(dependencies.output, maintenance.resolved?.warnings ?? []);
+    throw error;
   } finally {
     await closeBackend(backend);
   }
@@ -996,31 +1085,65 @@ async function executeQuestCli(
   });
   // Resolve identity once after scope detection so Git metadata is read only once per command.
   const resolvedIdentity = await resolveRequestIdentity(request, resolved, dependencies);
-  const backend =
-    request === undefined && dependencies.isTty && flags.format !== "json"
-      ? await openScopedBackend(dependencies, { repo: null }, { mode: "viewer" })
-      : await openRequestBackend(dependencies, request, resolved.scope);
+  writeScopeWarnings(flags.format, dependencies.output, resolved.warnings ?? []);
   try {
-    if (!isBackupRecoveryRequest(request)) {
+    return await executeResolvedQuestRequest({
+      dependencies,
+      flags,
+      identity: resolvedIdentity.identity,
+      identityWarnings: resolvedIdentity.identityWarnings,
+      request,
+      resolved,
+    });
+  } catch (error: unknown) {
+    if (flags.format === "json") {
+      for (const warning of resolved.warnings ?? []) {
+        dependencies.output.writeWarning(warning);
+      }
+    }
+    throw error;
+  }
+}
+
+async function executeResolvedQuestRequest(options: {
+  readonly dependencies: QuestCliDependencies;
+  readonly flags: GlobalCliOptions;
+  readonly identity: string | undefined;
+  readonly identityWarnings: readonly string[];
+  readonly request: QuestCliRequest | undefined;
+  readonly resolved: ResolvedCliScope;
+}): Promise<ExitCode> {
+  const backend =
+    options.request === undefined && options.dependencies.isTty && options.flags.format !== "json"
+      ? await openScopedBackend(options.dependencies, { repo: null }, { mode: "viewer" })
+      : await openRequestBackend(options.dependencies, options.request, options.resolved.scope);
+  try {
+    if (!isBackupRecoveryRequest(options.request)) {
       await requireCompatibleStore(backend.compatibilityProbe);
     }
     const ports = await backend.openApplicationPorts();
-    if (request === undefined) {
-      return await executeBareQuestRequest(flags, dependencies, ports, resolved, backend.clock);
-    }
-    if (!isOperationalQuestCliRequest(request)) {
-      throw new Error(`request ${request.command} was not handled before backend dispatch`);
-    }
-    return await CLI_REQUEST_DISPATCH[request.command](
-      {
-        dependencies,
-        flags,
-        identity: resolvedIdentity.identity,
-        identityWarnings: resolvedIdentity.identityWarnings,
+    if (options.request === undefined) {
+      return await executeBareQuestRequest(
+        options.flags,
+        options.dependencies,
         ports,
-        resolved,
+        options.resolved,
+        backend.clock,
+      );
+    }
+    if (!isOperationalQuestCliRequest(options.request)) {
+      throw new Error(`request ${options.request.command} was not handled before backend dispatch`);
+    }
+    return await CLI_REQUEST_DISPATCH[options.request.command](
+      {
+        dependencies: options.dependencies,
+        flags: options.flags,
+        identity: options.identity,
+        identityWarnings: options.identityWarnings,
+        ports,
+        resolved: options.resolved,
       },
-      request,
+      options.request,
     );
   } finally {
     await closeBackend(backend);
@@ -1085,7 +1208,7 @@ async function executeBareQuestRequest(
       command: "status",
       generated_at: await clock.now(),
       filters: { repo: resolved.scope.repo },
-      warnings: [],
+      warnings: [...(resolved.warnings ?? [])],
       data: bareQuestData(stats, resolved.scope),
     });
     dependencies.output.write(formatQuestReport(report));
@@ -1101,6 +1224,7 @@ async function executeStoreMigration(
   dependencies: QuestCliDependencies,
   flags: GlobalCliOptions,
   backend: CliBackendRuntime,
+  scopeWarnings?: readonly string[] | undefined,
 ): Promise<ExitCode> {
   const before = await readStoreCompatibility(backend.compatibilityProbe);
   const storeSchemaVersion = await migrateStore(backend.compatibilityProbe);
@@ -1110,7 +1234,7 @@ async function executeStoreMigration(
       command: "migrate",
       generated_at: await backend.clock.now(),
       filters: {},
-      warnings: [],
+      warnings: [...(scopeWarnings ?? [])],
       data: {
         changed,
         store_schema_version: storeSchemaVersion,
@@ -1118,6 +1242,9 @@ async function executeStoreMigration(
     });
     dependencies.output.write(formatQuestReport(report));
   } else {
+    for (const warning of scopeWarnings ?? []) {
+      dependencies.output.writeWarning(warning);
+    }
     dependencies.output.write(
       changed
         ? `quest store migrated to schema ${storeSchemaVersion}\n`

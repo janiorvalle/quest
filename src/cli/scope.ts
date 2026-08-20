@@ -3,7 +3,7 @@ import { basename, resolve } from "node:path";
 
 import { z } from "zod";
 
-import { resolveRepositoryName } from "../config";
+import { repositoryRoutingWarning, resolveRepositoryName } from "../config";
 import type { Config } from "../schema";
 import { questScopeSchema } from "../schema";
 import { type GitIdentity, parseGitIdentityConfig } from "./identity";
@@ -32,6 +32,7 @@ export const resolvedCliScopeSchema = z.strictObject({
   scope: questScopeSchema,
   working_directory: nonEmptyOptionSchema,
   git_root: nonEmptyOptionSchema.optional(),
+  warnings: z.array(nonEmptyOptionSchema).optional(),
 });
 export type ResolvedCliScope = z.infer<typeof resolvedCliScopeSchema>;
 
@@ -125,9 +126,11 @@ export async function resolveCliScope(options: ResolveCliScopeOptions): Promise<
   const gitRoot = await options.locateGitRoot(workingDirectory);
   const detectedRepo = basename(gitRoot);
   const repo = resolveRepositoryName(options.config, detectedRepo);
+  const warning = repositoryRoutingWarning(options.config, detectedRepo);
   return resolvedCliScopeSchema.parse({
     scope: { repo },
     working_directory: workingDirectory,
     git_root: gitRoot,
+    ...(warning === undefined ? {} : { warnings: [warning] }),
   });
 }

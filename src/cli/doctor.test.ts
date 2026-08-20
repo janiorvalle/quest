@@ -172,4 +172,40 @@ describe("doctor CLI", () => {
       await rm(harness.root, { force: true, recursive: true });
     }
   });
+
+  test("shows the routed repository and backend when the checkout folder is mismatched", async () => {
+    const harness = await createHarness();
+    const configWithRoute = {
+      ...config,
+      repos: {
+        "streamlyne-marketing": {
+          store: { backend: "convex", deployment: "dev:marketing" },
+        },
+      },
+    } satisfies Config;
+    const dependencies = {
+      ...harness.dependencies,
+      config: configWithRoute,
+      locateGitRoot: () => Promise.resolve("/work/marketing"),
+      openBackend: async (scope: { readonly repo: string | null }) => {
+        expect(scope).toEqual({ repo: "marketing" });
+        return {
+          clock: harness.dependencies.clock,
+          compatibilityProbe: harness.dependencies.compatibilityProbe,
+          doctor: harness.dependencies.doctor,
+          openApplicationPorts: () =>
+            Promise.reject(new Error("doctor test must not open application ports")),
+        };
+      },
+    } satisfies QuestCliDependencies;
+    try {
+      expect(await runQuestCli(["doctor"], dependencies)).toBe(EXIT_SUCCESS);
+      expect(harness.stdout.join("")).toContain("scope: repo=marketing; store=sqlite");
+      expect(harness.stderr).toEqual([
+        'warning: detected repository "marketing" is not configured, so Quest fell back to the default sqlite store; configured repository "streamlyne-marketing" uses a non-default convex store. Add [repos] marketing = "streamlyne-marketing" or rerun with --repo streamlyne-marketing',
+      ]);
+    } finally {
+      await rm(harness.root, { force: true, recursive: true });
+    }
+  });
 });

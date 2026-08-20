@@ -15,6 +15,15 @@ const config = {
   },
 } satisfies Config;
 
+const routedConfig = {
+  ...config,
+  repos: {
+    "streamlyne-marketing": {
+      store: { backend: "convex", deployment: "dev:marketing" },
+    },
+  },
+} satisfies Config;
+
 const workDirectory = join(resolve("/"), "work");
 const questRoot = join(workDirectory, "quest");
 const questSource = join(questRoot, "src");
@@ -129,5 +138,39 @@ describe("CLI scope resolution", () => {
     await expect(promise).rejects.toThrow(
       `working directory is not accessible: ${missingDirectory}`,
     );
+  });
+
+  test("warns when the git-root folder falls back to the default store", async () => {
+    const result = await resolveCliScope({
+      config: routedConfig,
+      flags: globalCliOptionsSchema.parse({}),
+      initialWorkingDirectory: questSource,
+      locateGitRoot: () => Promise.resolve(join(workDirectory, "marketing")),
+      validateWorkingDirectory: () => Promise.resolve(),
+    });
+
+    expect(result.warnings).toEqual([
+      'detected repository "marketing" is not configured, so Quest fell back to the default sqlite store; configured repository "streamlyne-marketing" uses a non-default convex store. Add [repos] marketing = "streamlyne-marketing" or rerun with --repo streamlyne-marketing',
+    ]);
+    expect(result.scope).toEqual({ repo: "marketing" });
+  });
+
+  test("does not warn after adding the checkout alias", async () => {
+    const result = await resolveCliScope({
+      config: {
+        ...routedConfig,
+        repos: {
+          marketing: "streamlyne-marketing",
+          ...routedConfig.repos,
+        },
+      },
+      flags: globalCliOptionsSchema.parse({}),
+      initialWorkingDirectory: questSource,
+      locateGitRoot: () => Promise.resolve(join(workDirectory, "marketing")),
+      validateWorkingDirectory: () => Promise.resolve(),
+    });
+
+    expect(result.warnings).toBeUndefined();
+    expect(result.scope).toEqual({ repo: "streamlyne-marketing" });
   });
 });
