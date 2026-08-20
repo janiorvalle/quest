@@ -30,7 +30,7 @@ typecheck:
 	bunx tsc --noEmit
 
 test:
-	bun test
+	bun run test
 
 dist-deps:
 	bun run scripts/dist-deps.ts

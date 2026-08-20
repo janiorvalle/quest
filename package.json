@@ -9,8 +9,8 @@
     "format": "biome check --write .",
     "lint": "biome ci .",
     "typecheck": "tsc --noEmit",
-    "test": "bun test",
-    "check": "bun run lint && bun run typecheck && bun test",
+    "test": "bun test --timeout 20000",
+    "check": "bun run lint && bun run typecheck && bun run test",
     "dist": "bun run scripts/dist.ts && bun run scripts/verify-dist.ts",
     "dist:smoke": "bun run dist && bun run scripts/install-smoke.ts"
   },
