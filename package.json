@@ -18,7 +18,7 @@
     "@opentui/react": "0.5.1",
     "@vllnt/convex-api-keys": "0.2.0",
     "commander": "15.0.0",
-    "convex": "1.42.3",
+    "convex": "1.43.0",
     "react": "19.2.8",
     "react-devtools-core": "7.0.1",
     "smol-toml": "1.6.1",
