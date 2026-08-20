@@ -39,4 +39,4 @@ jobs:
           path-to-signatures: signatures/version1/cla.json
           path-to-document: https://github.com/janiorvalle/quest/blob/main/CONTRIBUTING.md
           branch: signatures
-          allowlist: janiorvalle,dependabot[bot],*[bot]
+          allowlist: janiorvalle,yavuz-ozkan,dependabot[bot],*[bot]
