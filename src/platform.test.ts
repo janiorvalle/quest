@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, win32 } from "node:path";
 import type {
   PlatformCommand,
   PlatformCommandResult,
@@ -783,6 +783,10 @@ describe("scheduler entry points", () => {
 
   test("installs, inspects, and removes an isolated Windows scheduled task", async () => {
     const name = `Quest Backup Test ${crypto.randomUUID()}`;
+    const homeDirectory = await mkdtemp(join(tmpdir(), "quest-windows-scheduler-"));
+    const appData = win32.join(homeDirectory, "AppData", "Roaming");
+    const localAppData = win32.join(homeDirectory, "AppData", "Local");
+    const definitionPath = win32.join(appData, "quest", "backup-schedule.xml");
     const executable =
       process.platform === "win32"
         ? "C:\\Windows\\System32\\where.exe"
@@ -805,11 +809,11 @@ describe("scheduler entry points", () => {
       }
       const platform = createPlatform({
         platform: "win32",
-        homeDirectory: windowsHome,
+        homeDirectory,
         environment: {
-          APPDATA: "C:\\Users\\Example\\AppData\\Roaming",
+          APPDATA: appData,
           COMPUTERNAME: "EXAMPLE-PC",
-          LOCALAPPDATA: "C:\\Users\\Example\\AppData\\Local",
+          LOCALAPPDATA: localAppData,
           USERDOMAIN: "WORKGROUP",
           USERNAME: "User",
         },
@@ -821,7 +825,7 @@ describe("scheduler entry points", () => {
       const installedStatus = await platform.scheduler.install();
       expect(installedStatus).toEqual({
         definition_exists: true,
-        definition_path: "C:\\Users\\Example\\AppData\\Roaming\\quest\\backup-schedule.xml",
+        definition_path: definitionPath,
         executable,
         executable_exists: true,
         frequency: "daily",
@@ -831,14 +835,7 @@ describe("scheduler entry points", () => {
       });
       const create = commands.find((command) => command.arguments[0] === "/Create");
       expect(create?.executable).toBe("C:\\Windows\\System32\\schtasks.exe");
-      expect(create?.arguments).toEqual([
-        "/Create",
-        "/TN",
-        name,
-        "/XML",
-        "C:\\Users\\Example\\AppData\\Roaming\\quest\\backup-schedule.xml",
-        "/F",
-      ]);
+      expect(create?.arguments).toEqual(["/Create", "/TN", name, "/XML", definitionPath, "/F"]);
       if (installedStatus.definition_path === null) {
         throw new Error("Windows task definition path is missing");
       }
@@ -863,6 +860,7 @@ describe("scheduler entry points", () => {
       if (removeExecutable) {
         await rm(executable, { force: true });
       }
+      await rm(homeDirectory, { force: true, recursive: true });
     }
   });
 
