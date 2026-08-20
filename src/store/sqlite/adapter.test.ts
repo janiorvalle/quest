@@ -174,47 +174,43 @@ describe("SqliteStore", () => {
     }
   });
 
-  test(
-    "allows a committed migration release to retry after a busy guard cleanup",
-    async () => {
-      const { databasePath, directory } = await createDatabasePath();
-      const store = new SqliteStore(databasePath);
-      const blocker = new Database(databasePath, { readwrite: true, strict: true });
-      try {
-        const session = await store.beginMigration(await store.exportAll());
-        await session.commit();
-        runStatement(blocker, "BEGIN IMMEDIATE");
+  test("allows a committed migration release to retry after a busy guard cleanup", async () => {
+    const { databasePath, directory } = await createDatabasePath();
+    const store = new SqliteStore(databasePath);
+    const blocker = new Database(databasePath, { readwrite: true, strict: true });
+    try {
+      const session = await store.beginMigration(await store.exportAll());
+      await session.commit();
+      runStatement(blocker, "BEGIN IMMEDIATE");
 
-        await expect(session.release()).rejects.toThrow();
+      await expect(session.release()).rejects.toThrow();
 
-        runStatement(blocker, "ROLLBACK");
-        await session.release();
-        expect(() =>
-          runStatement(
-            blocker,
-            `INSERT INTO quests (
+      runStatement(blocker, "ROLLBACK");
+      await session.release();
+      expect(() =>
+        runStatement(
+          blocker,
+          `INSERT INTO quests (
               repo, area, kind, title, description, opened_by, status, priority,
               predicted_files, reopen_count, created_at, updated_at
             ) VALUES (?, ?, 'task', ?, '', ?, 'open', 2, '[]', 0, ?, ?)`,
-            "after-release",
-            "store",
-            "retryable release",
-            actor,
-            "2026-07-31T12:00:00.000Z",
-            "2026-07-31T12:00:00.000Z",
-          ),
-        ).not.toThrow();
-      } finally {
-        if (blocker.inTransaction) {
-          runStatement(blocker, "ROLLBACK");
-        }
-        blocker.close();
-        store.close();
-        await removeDirectory(directory);
+          "after-release",
+          "store",
+          "retryable release",
+          actor,
+          "2026-07-31T12:00:00.000Z",
+          "2026-07-31T12:00:00.000Z",
+        ),
+      ).not.toThrow();
+    } finally {
+      if (blocker.inTransaction) {
+        runStatement(blocker, "ROLLBACK");
       }
-    },
-    { timeout: 15_000 },
-  );
+      blocker.close();
+      store.close();
+      await removeDirectory(directory);
+    }
+  });
 
   test("rejects public replacement while a migration session is active", async () => {
     const { databasePath, directory } = await createDatabasePath();
