@@ -64,6 +64,7 @@ export interface ExecuteQaCliOptions {
   readonly request: QaCliRequest;
   readonly shell?: QaShell;
   readonly scope: QuestScope;
+  readonly scopeWarnings?: readonly string[] | undefined;
 }
 
 function areaLabel(session: QaSession): string {
@@ -138,7 +139,7 @@ export async function executeQaCli(options: ExecuteQaCliOptions): Promise<ExitCo
       command: "qa",
       generated_at: generatedAt,
       filters: { repo: options.scope.repo },
-      warnings: [],
+      warnings: [...(options.scopeWarnings ?? [])],
       data: queue,
     });
     options.output.write(formatQuestReport(report));

@@ -83,6 +83,7 @@ export interface ExecuteChainCliOptions {
   };
   readonly request: ChainCliRequest;
   readonly scope: QuestScope;
+  readonly scopeWarnings?: readonly string[] | undefined;
 }
 
 export class ChainCliUsageError extends Error {
@@ -175,6 +176,10 @@ function writeWarnings(output: CliOutputBoundary, warnings: readonly string[]): 
   }
 }
 
+function reportWarnings(options: ExecuteChainCliOptions, warnings: readonly string[]): string[] {
+  return [...(options.scopeWarnings ?? []), ...options.identityWarnings, ...warnings];
+}
+
 async function writeMutationResult(
   options: ExecuteChainCliOptions,
   result: ChainMutationResult,
@@ -185,7 +190,7 @@ async function writeMutationResult(
       command,
       generated_at: await options.ports.clock.now(),
       filters: { repo: options.scope.repo },
-      warnings: [...options.identityWarnings, ...result.warnings],
+      warnings: reportWarnings(options, result.warnings),
       data: {
         changed: result.changed,
         link: result.link,
@@ -235,7 +240,7 @@ async function writeTreeResult(
         repo: options.scope.repo,
         id: options.request.command === "chain-show" ? (options.request.id ?? null) : null,
       },
-      warnings: [],
+      warnings: reportWarnings(options, []),
       data: {
         trees: result.trees.map((tree) => ({
           lines: [...tree.lines],

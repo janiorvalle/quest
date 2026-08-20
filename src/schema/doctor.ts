@@ -23,8 +23,15 @@ export const doctorFindingSchema = z.strictObject({
 });
 export type DoctorFinding = z.infer<typeof doctorFindingSchema>;
 
+export const doctorScopeSchema = z.strictObject({
+  backend: z.enum(["sqlite", "convex"]),
+  repo: z.string().trim().min(1).nullable(),
+});
+export type DoctorScope = z.infer<typeof doctorScopeSchema>;
+
 export const doctorDataSchema = z.strictObject({
   healthy: z.boolean(),
   checks: z.array(doctorFindingSchema),
+  scope: doctorScopeSchema.nullable().default(null),
 });
 export type DoctorData = z.infer<typeof doctorDataSchema>;

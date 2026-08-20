@@ -116,6 +116,7 @@ export interface ExecuteBackupCliOptions {
   };
   readonly repository?: string | null;
   readonly request: BackupCliRequest;
+  readonly scopeWarnings?: readonly string[] | undefined;
   readonly workingDirectory: string;
 }
 
@@ -236,7 +237,7 @@ async function writeJson(
     command,
     generated_at: await options.ports.clock.now(),
     filters: {},
-    warnings: [],
+    warnings: [...(options.scopeWarnings ?? [])],
     data: parsedData,
   });
   options.output.write(formatQuestReport(report));

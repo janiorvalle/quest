@@ -49,7 +49,10 @@ interface QueryCliHarness {
   readonly stop: () => Promise<void>;
 }
 
-async function createHarness(configOverride: Config = config): Promise<QueryCliHarness> {
+async function createHarness(
+  configOverride: Config = config,
+  detectedRepo?: string,
+): Promise<QueryCliHarness> {
   const directory = await mkdtemp(join(tmpdir(), "quest-query-cli-"));
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -73,7 +76,8 @@ async function createHarness(configOverride: Config = config): Promise<QueryCliH
     },
     initialWorkingDirectory: directory,
     isTty: false,
-    locateGitRoot: () => Promise.resolve(directory),
+    locateGitRoot: () =>
+      Promise.resolve(detectedRepo === undefined ? directory : join(directory, detectedRepo)),
     openApplicationPorts: () =>
       Promise.resolve({
         blobStore,
@@ -212,6 +216,55 @@ async function seedFixture(store: SqliteStore): Promise<void> {
 }
 
 describe("query CLI behavior", () => {
+  test("carries the checkout fallback warning in JSON and human list output", async () => {
+    const mismatchConfig = {
+      ...config,
+      repos: {
+        "streamlyne-marketing": {
+          store: { backend: "convex", deployment: "dev:marketing" },
+        },
+      },
+    } satisfies Config;
+    const harness = await createHarness(mismatchConfig, "marketing");
+    try {
+      const json = await harness.run(["list", "--format", "json"]);
+      expect(json.code).toBe(EXIT_SUCCESS);
+      expect(json.report?.warnings).toEqual([
+        'detected repository "marketing" is not configured, so Quest fell back to the default sqlite store; configured repository "streamlyne-marketing" uses a non-default convex store. Add [repos] marketing = "streamlyne-marketing" or rerun with --repo streamlyne-marketing',
+      ]);
+
+      const human = await harness.run(["list"]);
+      expect(human.code).toBe(EXIT_SUCCESS);
+      expect(human.stderr).toEqual([
+        'warning: detected repository "marketing" is not configured, so Quest fell back to the default sqlite store; configured repository "streamlyne-marketing" uses a non-default convex store. Add [repos] marketing = "streamlyne-marketing" or rerun with --repo streamlyne-marketing',
+      ]);
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  test("keeps the fallback warning visible when a JSON query fails", async () => {
+    const mismatchConfig = {
+      ...config,
+      repos: {
+        "streamlyne-marketing": {
+          store: { backend: "convex", deployment: "dev:marketing" },
+        },
+      },
+    } satisfies Config;
+    const harness = await createHarness(mismatchConfig, "marketing");
+    try {
+      const result = await harness.run(["show", "999", "--format", "json"]);
+
+      expect(result.code).toBe(EXIT_DOMAIN_ERROR);
+      expect(result.stdout).toEqual([]);
+      expect(result.stderr[0]).toContain('warning: detected repository "marketing"');
+      expect(result.stderr[1]).toContain("quest 999 does not exist");
+    } finally {
+      await harness.stop();
+    }
+  });
+
   test("composes list filters and supports mine and unclaimed views", async () => {
     const harness = await createHarness();
     try {
