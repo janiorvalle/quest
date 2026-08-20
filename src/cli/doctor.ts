@@ -8,7 +8,7 @@ import {
   type ExitCode,
   formatQuestReport,
 } from "../output";
-import { doctorDataSchema, type StoreCompatibilityResult } from "../schema";
+import { type DoctorScope, doctorDataSchema, type StoreCompatibilityResult } from "../schema";
 import { type DoctorOperations, runDoctor } from "../services";
 import type { Clock } from "../store";
 import type { CliFormat } from "./scope";
@@ -29,6 +29,8 @@ export interface ExecuteDoctorCliOptions {
   readonly format: CliFormat;
   readonly olderStoreRemedy?: string | undefined;
   readonly output: CliOutputBoundary;
+  readonly scope?: DoctorScope | undefined;
+  readonly warnings?: readonly string[] | undefined;
 }
 
 export function registerDoctorCommand(program: Command, capture: DoctorRequestCapture): void {
@@ -51,6 +53,9 @@ function statusMarker(status: "fail" | "pass" | "warn"): string {
 
 function renderDoctor(data: ReturnType<typeof doctorDataSchema.parse>): string {
   const lines = [`quest doctor: ${data.healthy ? "HEALTHY" : "NEEDS ATTENTION"}`];
+  if (data.scope !== null) {
+    lines.push(`scope: repo=${data.scope.repo ?? "<none>"}; store=${data.scope.backend}`);
+  }
   for (const check of data.checks) {
     const remedy = check.remedy === null ? "" : `; remedy: ${check.remedy}`;
     lines.push(`${statusMarker(check.status)} ${check.check}: ${check.summary}${remedy}`);
@@ -70,19 +75,26 @@ export async function executeDoctorCli(options: ExecuteDoctorCliOptions): Promis
     operations: options.doctor,
     now,
   });
+  const scopedData = doctorDataSchema.parse({
+    ...data,
+    ...(options.scope === undefined ? {} : { scope: options.scope }),
+  });
   if (options.format === "json") {
     const report = buildQuestReport(doctorDataSchema, {
       command: "doctor",
-      data,
+      data: scopedData,
       filters: {},
       generated_at: now,
-      warnings: [],
+      warnings: [...(options.warnings ?? [])],
     });
     options.output.write(formatQuestReport(report));
   } else {
-    options.output.write(renderDoctor(data));
+    for (const warning of options.warnings ?? []) {
+      options.output.writeWarning(warning);
+    }
+    options.output.write(renderDoctor(scopedData));
   }
-  return data.healthy ? EXIT_SUCCESS : EXIT_DOMAIN_ERROR;
+  return scopedData.healthy ? EXIT_SUCCESS : EXIT_DOMAIN_ERROR;
 }
 
 export function isDoctorCliRequest(

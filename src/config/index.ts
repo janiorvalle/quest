@@ -10,6 +10,7 @@ export {
 export {
   configuredRepositoryStores,
   repoConfigEntry,
+  repositoryRoutingWarning,
   resolveRepositoryName,
   resolveRepositoryStore,
 } from "./routing";

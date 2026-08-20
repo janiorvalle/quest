@@ -8,12 +8,25 @@ status followed by command help. All subcommands support `--format json`
 
 ## Scoping rules
 
-- Default: quests belonging to the git repo containing cwd
-  (identity = repo name from `git rev-parse --show-toplevel`, overridable by a
-  string entry in the `[repos]` alias map in config).
+- Default: quests belonging to the git repo containing cwd. The scope identity
+  is the git-root folder basename from `git rev-parse --show-toplevel`, not the
+  GitHub remote or repository name. A string entry in the `[repos]` alias map
+  can override that folder name.
 - `--repo other-app` — explicit repo scope from anywhere.
 - `--all` — a read-only federated view over every configured backend.
 - `-C <dir>` — behave as if run from `<dir>` (bgr convention).
+
+If the checkout folder is not configured and another repository uses a
+non-default store, Quest warns that it fell back to `[store]`. For a clone of
+`streamlyne-marketing` named `marketing`, make the folder resolve to the shared
+repository with:
+
+```toml
+[repos]
+marketing = "streamlyne-marketing"
+```
+
+You can use `--repo streamlyne-marketing` for a one-off override instead.
 
 Backend selection is per repository. `[store]` is the default, and a nested
 `[repos.<name>.store]` block overrides it for one repository:

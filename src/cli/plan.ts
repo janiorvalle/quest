@@ -52,6 +52,7 @@ export interface ExecutePlanCliOptions {
   readonly ports: { readonly questStore: QuestStore };
   readonly request: PlanCliRequest;
   readonly scope: QuestScope;
+  readonly scopeWarnings?: readonly string[] | undefined;
 }
 
 function stateLabel(state: z.infer<typeof planComputedStateSchema>): string {
@@ -119,7 +120,7 @@ export async function executePlanCli(options: ExecutePlanCliOptions): Promise<Ex
       command: "plan",
       generated_at: generatedAt,
       filters: { repo: options.scope.repo },
-      warnings: [],
+      warnings: [...(options.scopeWarnings ?? [])],
       data: plan,
     });
     options.output.write(formatQuestReport(report));

@@ -766,6 +766,74 @@ describe("Commander CLI wiring", () => {
     });
   });
 
+  test("migrate JSON reports an implicit routing warning", async () => {
+    const routedConfig = {
+      ...config,
+      repos: {
+        "streamlyne-marketing": {
+          store: { backend: "convex", deployment: "dev:marketing" },
+        },
+      },
+    } satisfies Config;
+    const { dependencies, stderr, stdout } = harness({
+      config: routedConfig,
+      openBackend: async () => ({
+        clock,
+        compatibilityProbe: compatibilityProbe(),
+        openApplicationPorts: () => Promise.reject(new Error("migration must not open ports")),
+      }),
+    });
+
+    expect(await runQuestCli(["--format", "json", "migrate"], dependencies)).toBe(EXIT_SUCCESS);
+    expect(stderr).toEqual([]);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      command: "migrate",
+      warnings: [expect.stringContaining('detected repository "quest"')],
+    });
+  });
+
+  test("member JSON reports an implicit routing warning before using the fallback deployment", async () => {
+    const routedConfig = {
+      ...config,
+      store: { backend: "convex", deployment: "dev:default" },
+      repos: {
+        "streamlyne-marketing": {
+          store: { backend: "convex", deployment: "dev:marketing" },
+        },
+      },
+    } satisfies Config;
+    const deployments: string[] = [];
+    const { dependencies, stderr, stdout } = harness({
+      config: routedConfig,
+      environment: { QUEST_ADMIN_SECRET: "secret" },
+      onboarding: {
+        invite: async () => ({ member: "alice", token: "invite-token" }),
+        rotate: async () => ({ member: "alice", old_key_expires_at: 0, token: "rotate-token" }),
+        remove: async (deployment, name) => {
+          deployments.push(deployment);
+          return { member: name, revoked_keys: 1 };
+        },
+        list: async () => [],
+        join: async () => ({ member: "alice", token: "join-token" }),
+        whoami: async () => ({ member: "alice" }),
+        repositories: async () => [],
+      },
+    });
+
+    const code = await runQuestCli(
+      ["--format", "json", "members", "remove", "alice"],
+      dependencies,
+    );
+    expect(stderr).toEqual([]);
+    expect(code).toBe(EXIT_SUCCESS);
+    expect(stderr).toEqual([]);
+    expect(deployments).toEqual(["dev:default"]);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      command: "members remove",
+      warnings: [expect.stringContaining('detected repository "quest"')],
+    });
+  });
+
   test("backup management can open recovery ports without probing a corrupt live store", async () => {
     const directory = await mkdtemp(join(tmpdir(), "quest-cli-recovery-"));
     const restoreCalls: string[] = [];

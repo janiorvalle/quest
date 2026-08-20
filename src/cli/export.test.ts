@@ -62,7 +62,7 @@ function task(title: string, changes: Partial<NewQuest> = {}): NewQuest {
   });
 }
 
-async function createHarness(): Promise<ExportHarness> {
+async function createHarness(configOverride: Config = config): Promise<ExportHarness> {
   const directory = await mkdtemp(join(tmpdir(), "quest-export-cli-"));
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -78,7 +78,7 @@ async function createHarness(): Promise<ExportHarness> {
           store_version: 1,
         }),
     },
-    config,
+    config: configOverride,
     evidenceFiles: {
       read: () => Promise.reject(new Error("export commands must not read evidence blobs")),
     },
@@ -176,6 +176,29 @@ describe("export CLI", () => {
       const restored = parseQuestBackupExport(result.stdout.join(""));
       expect(restored).toEqual(questDumpSchema.parse(await harness.store.exportAll()));
       expect(restored.quests.map(({ repo }) => repo)).toContain("beta");
+    } finally {
+      await harness.stop();
+    }
+  });
+
+  test("writes an implicit routing warning to stderr with raw JSON output", async () => {
+    const harness = await createHarness({
+      ...config,
+      repos: {
+        "streamlyne-marketing": {
+          store: { backend: "convex", deployment: "dev:marketing" },
+        },
+      },
+    });
+    try {
+      const result = await harness.run(["export", "--json"]);
+
+      expect(result.code).toBe(EXIT_SUCCESS);
+      expect(result.stderr[0]).toContain('detected repository "quest-export-cli-');
+      expect(result.stderr[0]).toContain("streamlyne-marketing");
+      expect(parseQuestBackupExport(result.stdout.join(""))).toEqual(
+        questDumpSchema.parse(await harness.store.exportAll()),
+      );
     } finally {
       await harness.stop();
     }

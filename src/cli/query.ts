@@ -171,6 +171,7 @@ export interface ExecuteQueryCliOptions {
   };
   readonly request: QueryCliRequest;
   readonly scope: QuestScope;
+  readonly scopeWarnings?: readonly string[] | undefined;
 }
 
 export class QueryCliUsageError extends Error {
@@ -514,7 +515,7 @@ async function executeList(options: ExecuteQueryCliOptions): Promise<ExitCode> {
         unclaimed: options.request.unclaimed,
         blocked: options.request.blocked,
       },
-      warnings: [],
+      warnings: [...(options.scopeWarnings ?? [])],
       data: { quests, total: quests.length },
     });
     options.output.write(formatQuestReport(report));
@@ -544,7 +545,7 @@ async function executeShow(options: ExecuteQueryCliOptions): Promise<ExitCode> {
       command: "show",
       generated_at: await options.ports.clock.now(),
       filters: { repo: options.scope.repo, id: options.request.id },
-      warnings: [],
+      warnings: [...(options.scopeWarnings ?? [])],
       data: {
         quest: detail.quest,
         evidence: [...detail.evidence],
@@ -579,7 +580,7 @@ async function executeStats(options: ExecuteQueryCliOptions): Promise<ExitCode> 
       command: "stats",
       generated_at: await options.ports.clock.now(),
       filters: { repo: options.scope.repo },
-      warnings: [],
+      warnings: [...(options.scopeWarnings ?? [])],
       data: stats,
     });
     options.output.write(formatQuestReport(report));
@@ -608,7 +609,7 @@ async function executeEvents(options: ExecuteQueryCliOptions): Promise<ExitCode>
         area: options.request.area ?? null,
         quest: options.request.quest ?? null,
       },
-      warnings: [],
+      warnings: [...(options.scopeWarnings ?? [])],
       data: { events, total: events.length },
     });
     options.output.write(formatQuestReport(report));
@@ -640,7 +641,7 @@ async function executeBrief(options: ExecuteQueryCliOptions): Promise<ExitCode> 
       command: "brief",
       generated_at: await options.ports.clock.now(),
       filters: { repo: options.scope.repo, id: options.request.id },
-      warnings: [],
+      warnings: [...(options.scopeWarnings ?? [])],
       data: serializeQuestBrief(brief, materialized),
     });
     options.output.write(formatQuestReport(report));

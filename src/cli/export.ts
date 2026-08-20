@@ -37,6 +37,7 @@ export interface ExecuteExportCliOptions {
     readonly questStore: QuestStore;
   };
   readonly request: ExportCliRequest;
+  readonly scopeWarnings?: readonly string[] | undefined;
   readonly workingDirectory: string;
 }
 
@@ -79,7 +80,7 @@ async function writeExportResult(options: ExecuteExportCliOptions, path: string)
       command: "export",
       generated_at: await options.ports.clock.now(),
       filters: {},
-      warnings: [],
+      warnings: [...(options.scopeWarnings ?? [])],
       data: {
         export_format: "json",
         path,
@@ -96,6 +97,9 @@ export async function executeExportCli(options: ExecuteExportCliOptions): Promis
     await createLogicalQuestExport(options.ports.questStore),
   );
   if (options.request.out === undefined) {
+    for (const warning of options.scopeWarnings ?? []) {
+      options.output.writeWarning(warning);
+    }
     options.output.write(serialized);
     return EXIT_SUCCESS;
   }
