@@ -83,7 +83,11 @@ changes when calls start crossing the wire.
 
 The CLI needs consistent snapshots for agent-rendered views. v0 implements
 `watch(query, cb)` as poll-and-diff over the sqlite adapter; Convex implements
-it natively with subscriptions.
+it natively with subscriptions. The Convex viewer subscribes to one tiny
+revision stamp (`quest:revisionStamp`, the counters every list page is
+validated against) and fetches list pages over HTTP when the stamp changes, so
+a busy write stream re-executes cheap stamp reads instead of full list pages
+for every open viewer.
 
 ### 5. zod schemas are the single source of truth
 

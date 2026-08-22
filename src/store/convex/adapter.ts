@@ -56,6 +56,7 @@ import {
   authTokenInput,
   type ConvexActiveRestore,
   type ConvexClientPair,
+  type ConvexRevisionStamp,
   closeConvexClientPair,
   convexApi,
   convexClientProtocolInput,
@@ -73,6 +74,12 @@ import {
   parseConvexEventPage,
   parseConvexListPage,
 } from "./pagination";
+import {
+  ConvexViewerFeed,
+  leaseRefreshDelay,
+  realtimeWatchError,
+  type ViewerFeedRead,
+} from "./viewer-feed";
 
 interface RealtimeSubscription {
   unsubscribe(): void;
@@ -81,14 +88,6 @@ interface RealtimeSubscription {
 const RESTORE_WRITE_RETRY_LIMIT = 8;
 const RESTORE_WRITE_RETRY_START_MS = 125;
 const EVENT_QUERY_SNAPSHOT_RETRY_LIMIT = 2;
-
-function realtimeWatchError(error: unknown): Error {
-  return error instanceof Error
-    ? error
-    : new Error(
-        "[CONVEX_WATCH_FAILED] the live Convex query stopped responding; check the deployment connection and retry",
-      );
-}
 
 function isConvexWriteRateLimit(error: unknown): boolean {
   return error instanceof Error && /TooManyWrites|too many writes per second/i.test(error.message);
@@ -118,24 +117,6 @@ async function retryRestoreWrite<T>(operation: () => Promise<T>): Promise<T> {
     }
   }
   throw new Error("unreachable Convex restore retry state");
-}
-
-function leaseRefreshDelay(
-  quests: readonly Quest[],
-  leaseCutoff: string,
-  boundAt: number,
-): number | null {
-  const nextExpiry = quests
-    .filter((quest) => quest.status === "accepted" && quest.lease_expires_at !== null)
-    .map((quest) => Date.parse(quest.lease_expires_at ?? ""))
-    .filter(Number.isFinite)
-    .sort((left, right) => left - right)[0];
-  const serverAtBind = Date.parse(leaseCutoff);
-  if (nextExpiry === undefined || !Number.isFinite(serverAtBind)) {
-    return null;
-  }
-  const estimatedServerNow = serverAtBind + (Date.now() - boundAt);
-  return Math.min(Math.max(0, nextExpiry - estimatedServerNow + 1), 2_147_483_647);
 }
 
 type TestableMutation<T> = {
@@ -328,24 +309,31 @@ function detailSnapshotFromDump(dump: QuestDump, id: number): QuestDetailSnapsho
   };
 }
 
-type FederatedListSnapshotFailure = "confirmed-missing" | "opaque-server-error";
+type MissingConvexFunctionFailure = "confirmed-missing" | "opaque-server-error";
 
-function federatedListSnapshotFailure(error: unknown): FederatedListSnapshotFailure | undefined {
+function missingConvexFunctionFailure(
+  error: unknown,
+  functionName: string,
+): MissingConvexFunctionFailure | undefined {
   if (!(error instanceof Error)) {
     return undefined;
   }
   const message = error.message.trim();
-  if (
-    /(?:could not find|not found|does not exist|not a function).*federatedListSnapshot|federatedListSnapshot.*(?:could not find|not found|does not exist|not a function)/i.test(
-      message,
-    )
-  ) {
+  const missingFunction = new RegExp(
+    `(?:could not find|not found|does not exist|not a function).*${functionName}|${functionName}.*(?:could not find|not found|does not exist|not a function)`,
+    "i",
+  );
+  if (missingFunction.test(message)) {
     return "confirmed-missing";
   }
   // Production Convex redacts a missing public function to this request envelope.
   return /^\[Request ID: [0-9a-f]+\] Server Error$/i.test(message)
     ? "opaque-server-error"
     : undefined;
+}
+
+function federatedListSnapshotFailure(error: unknown): MissingConvexFunctionFailure | undefined {
+  return missingConvexFunctionFailure(error, "federatedListSnapshot");
 }
 
 function isMissingFederatedSnapshotQuery(error: unknown): boolean {
@@ -487,6 +475,8 @@ export class ConvexStore implements QuestStore {
   readonly #leaseTtlMinutes: number;
   #failNextEventAppend = false;
   #federatedListSnapshotAvailable: boolean | undefined;
+  #revisionStampAvailable: boolean | undefined;
+  #viewerFeed: Promise<ConvexViewerFeed | undefined> | undefined;
   readonly #legacyRestoreTokens = new Set<string>();
 
   constructor(deployment: string, options: ConvexStoreOptions = {}) {
@@ -765,6 +755,109 @@ export class ConvexStore implements QuestStore {
   }
 
   async watchFederatedSnapshot(
+    repository: string | undefined,
+    listener: FederatedSnapshotWatchListener,
+  ): Promise<WatchSubscription> {
+    this.#viewerFeed ??= this.#openViewerFeed();
+    const opening = this.#viewerFeed;
+    let feed: ConvexViewerFeed | undefined;
+    try {
+      feed = await opening;
+    } catch (error: unknown) {
+      if (this.#viewerFeed === opening) {
+        this.#viewerFeed = undefined;
+      }
+      throw error;
+    }
+    if (feed === undefined) {
+      if (this.#viewerFeed === opening) {
+        this.#viewerFeed = undefined;
+      }
+      return this.#watchFederatedSnapshotWithoutStamp(repository, listener);
+    }
+    const openedFeed = feed;
+    const feedSubscription = openedFeed.subscribe((pages, error) => {
+      listener(federatedSnapshotFromPages(pages, repository), error);
+    });
+    let active = true;
+    return {
+      unsubscribe: async () => {
+        if (!active) {
+          return;
+        }
+        active = false;
+        feedSubscription.unsubscribe();
+        if (openedFeed.listenerCount === 0) {
+          openedFeed.close();
+          if (this.#viewerFeed === opening) {
+            this.#viewerFeed = undefined;
+          }
+        }
+      },
+    };
+  }
+
+  async #openViewerFeed(): Promise<ConvexViewerFeed | undefined> {
+    const initialStamp = await this.#readRevisionStamp();
+    if (initialStamp === undefined) {
+      return undefined;
+    }
+    return new ConvexViewerFeed({
+      initialRead: await this.#readViewerPages(),
+      initialStamp,
+      read: () => this.#readViewerPages(),
+      subscribeStamp: (onStamp, onError) =>
+        this.#clients.realtime.onUpdate(
+          convexApi.revisionStamp,
+          authTokenInput(this.#clients),
+          onStamp,
+          onError,
+        ),
+    });
+  }
+
+  async #readRevisionStamp(): Promise<ConvexRevisionStamp | undefined> {
+    if (this.#revisionStampAvailable === false) {
+      return undefined;
+    }
+    try {
+      const stamp = await this.#clients.http.query(
+        convexApi.revisionStamp,
+        authTokenInput(this.#clients),
+      );
+      this.#revisionStampAvailable = true;
+      return stamp;
+    } catch (error: unknown) {
+      const failure = missingConvexFunctionFailure(error, "revisionStamp");
+      if (failure === undefined) {
+        throw error;
+      }
+      if (failure === "confirmed-missing") {
+        this.#revisionStampAvailable = false;
+      }
+      return undefined;
+    }
+  }
+
+  async #readViewerPages(): Promise<ViewerFeedRead> {
+    const input = authTokenInput(this.#clients);
+    const readPage = (cursor?: string) =>
+      this.#clients.http
+        .query(convexApi.federatedListSnapshot, cursor === undefined ? input : { ...input, cursor })
+        .then((page) => {
+          if ("dump" in page) {
+            throw new Error(
+              "[CONVEX_LIST_PROTOCOL_CHANGED] the Convex deployment changed viewer protocols mid-read; restart the viewer after the deployment finishes",
+            );
+          }
+          return page;
+        });
+    const [leaseCutoff, firstPage] = await Promise.all([this.serverTime(), readPage()]);
+    return { leaseCutoff, pages: await assembleListPages(firstPage, readPage) };
+  }
+
+  /** The pre-stamp viewer path for deployments that predate `quest:revisionStamp`. */
+  async #watchFederatedSnapshotWithoutStamp(
     repository: string | undefined,
     listener: FederatedSnapshotWatchListener,
   ): Promise<WatchSubscription> {

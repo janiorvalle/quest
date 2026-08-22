@@ -63,6 +63,7 @@ import {
   stableSerialize,
   touchQuestInputSchema,
 } from "../src/schema";
+import type { ConvexRevisionStamp } from "../src/store/convex/client";
 import { legacyReadySnapshot } from "../src/store/convex/legacy-fingerprint";
 import {
   CONVEX_DUMP_PAGE_MAX_BYTES,
@@ -2127,6 +2128,22 @@ export const migrateReadyStatuses = mutationGeneric({
 export const serverTime = queryGeneric({
   args: emptyArgs,
   handler: async () => now(),
+});
+
+/**
+ * Returns the two counters every list page is validated against. Viewers subscribe to this
+ * instead of a list page: the subscription re-executes on every write but reads only the
+ * counter documents, and the viewer fetches list pages over HTTP when the stamp changes.
+ */
+export const revisionStamp = queryGeneric({
+  args: { auth_token: v.optional(v.string()), ...clientProtocolArgs },
+  handler: async (ctx, args): Promise<ConvexRevisionStamp> => {
+    await requireMemberQueryActor(ctx, args);
+    return {
+      snapshot_generation: await snapshotGeneration(ctx),
+      fence_generation: await fenceGeneration(ctx),
+    };
+  },
 });
 
 export const doctorCapacity = queryGeneric({

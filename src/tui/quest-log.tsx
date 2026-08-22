@@ -146,6 +146,8 @@ function tabsForAreas(
   }));
 }
 
+const DETAIL_RETRY_MS = 1_000;
+
 function useQuestDetail(runtime: QuestLogRuntime, current: QuestLogItem | undefined) {
   const [detail, setDetail] = useState<Awaited<ReturnType<QuestLogRuntime["loadDetail"]>> | null>(
     null,
@@ -187,43 +189,42 @@ function useQuestDetail(runtime: QuestLogRuntime, current: QuestLogItem | undefi
     const repository = detailKey.slice(0, separator);
     const id = Number(detailKey.slice(separator + 1, secondSeparator));
     let cancelled = false;
-    let inFlight = false;
-    const refresh = (): void => {
-      if (cancelled || inFlight) {
-        return;
-      }
-      inFlight = true;
-      runtime
-        .loadDetail(id, repository)
-        .then(
-          (value) => {
-            if (!cancelled) {
-              const signature = JSON.stringify(value);
-              hasLoadedDetail.current = true;
-              updateDetailStaleness(false);
-              if (signature !== detailSignature.current) {
-                detailSignature.current = signature;
-                setDetail(value);
-              }
-            }
-          },
-          () => {
-            if (!cancelled && hasLoadedDetail.current) {
-              updateDetailStaleness(true);
-            }
-          },
-        )
-        .finally(() => {
-          inFlight = false;
-        });
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    // The key carries the quest's updated_at, so this effect re-runs when the live list reports
+    // a change to the selected quest; a failed load retries until it succeeds or the key moves on.
+    const load = (): void => {
+      runtime.loadDetail(id, repository).then(
+        (value) => {
+          if (cancelled) {
+            return;
+          }
+          const signature = JSON.stringify(value);
+          hasLoadedDetail.current = true;
+          updateDetailStaleness(false);
+          if (signature !== detailSignature.current) {
+            detailSignature.current = signature;
+            setDetail(value);
+          }
+        },
+        () => {
+          if (cancelled) {
+            return;
+          }
+          if (hasLoadedDetail.current) {
+            updateDetailStaleness(true);
+          }
+          retryTimer = setTimeout(load, DETAIL_RETRY_MS);
+        },
+      );
     };
-    refresh();
-    const refreshTimer = setInterval(refresh, Math.max(1_000, runtime.pollIntervalMs));
+    load();
     return () => {
       cancelled = true;
-      clearInterval(refreshTimer);
+      if (retryTimer !== undefined) {
+        clearTimeout(retryTimer);
+      }
     };
-  }, [detailKey, runtime, runtime.pollIntervalMs, updateDetailStaleness]);
+  }, [detailKey, runtime, updateDetailStaleness]);
 
   return { detail, detailStale };
 }

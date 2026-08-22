@@ -1,15 +1,17 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  type Chain,
   type Event,
   newQuestSchema,
+  type Quest,
   type QuestDump,
   questSchema,
   STORE_SCHEMA_VERSION,
 } from "../../schema";
 import type { FederatedReadSnapshot } from "../port";
 import { ConvexStore } from "./adapter";
-import { type ConvexClientPair, convexApi } from "./client";
+import { type ConvexClientPair, type ConvexRevisionStamp, convexApi } from "./client";
 import type { ConvexListPage } from "./pagination";
 import { QUEST_CLIENT_PROTOCOL } from "./protocol";
 
@@ -39,6 +41,10 @@ interface RealtimeEntry {
   unsubscribed: boolean;
 }
 
+function missingStampQuery(): Error {
+  return new Error("Could not find public function for 'quest:revisionStamp'");
+}
+
 function fakeClients() {
   let httpQueries = 0;
   let failNextQuery = false;
@@ -50,6 +56,9 @@ function fakeClients() {
         if (failNextQuery) {
           failNextQuery = false;
           throw new Error("temporary server-time failure");
+        }
+        if (query === convexApi.revisionStamp) {
+          throw missingStampQuery();
         }
         if (query === convexApi.federatedListSnapshot) {
           return {
@@ -208,6 +217,9 @@ describe("Convex reactive watches", () => {
           if (query === convexApi.serverTime) {
             return timestamp;
           }
+          if (query === convexApi.revisionStamp) {
+            throw missingStampQuery();
+          }
           listQueries += 1;
           if (listQueries === 1) {
             return { dump: { ...healthySnapshot.dump, quests: [] }, fencedRepositories: [] };
@@ -272,6 +284,9 @@ describe("Convex reactive watches", () => {
         query: async (query: unknown) => {
           if (query === convexApi.serverTime) {
             return timestamp;
+          }
+          if (query === convexApi.revisionStamp) {
+            throw missingStampQuery();
           }
           listQueries += 1;
           if (listQueries === 1) {
@@ -363,6 +378,9 @@ describe("Convex reactive watches", () => {
         query: async (query: unknown) => {
           if (query === convexApi.serverTime) {
             return timestamp;
+          }
+          if (query === convexApi.revisionStamp) {
+            throw missingStampQuery();
           }
           if (query === convexApi.federatedListSnapshot) {
             throw new Error("[Request ID: bfdf4caebe0312d8] Server Error");
@@ -467,7 +485,7 @@ describe("Convex reactive watches", () => {
     expect(listQueries).toBe(2);
   });
 
-  test("streams federated snapshots and closes the realtime subscription", async () => {
+  test("streams federated snapshots on a pre-stamp deployment and closes the realtime subscription", async () => {
     const fake = fakeClients();
     const store = new ConvexStore("http://127.0.0.1:3210", { clients: fake.clients });
     const emissions: unknown[] = [];
@@ -488,7 +506,8 @@ describe("Convex reactive watches", () => {
 
       fake.entries[0]?.callback(snapshot);
       expect(emissions).toEqual([snapshot]);
-      expect(fake.httpQueries()).toBe(2);
+      // server time, the rejected stamp probe, and the initial list read
+      expect(fake.httpQueries()).toBe(3);
       expect(fake.entries[0]?.args).toEqual({
         client_protocol: QUEST_CLIENT_PROTOCOL,
         repository: "quest",
@@ -510,6 +529,9 @@ describe("Convex reactive watches", () => {
         query: async (query: unknown) => {
           if (query === convexApi.serverTime) {
             return timestamp;
+          }
+          if (query === convexApi.revisionStamp) {
+            throw missingStampQuery();
           }
           queryCount += 1;
           if (queryCount === 1) {
@@ -599,6 +621,314 @@ describe("Convex reactive watches", () => {
     } finally {
       await subscription?.unsubscribe();
     }
+  });
+});
+
+interface StampRealtimeEntry extends RealtimeEntry {
+  readonly onError: ((error: unknown) => void) | undefined;
+  readonly query: unknown;
+}
+
+interface StampListData {
+  readonly chains: readonly Chain[];
+  readonly fences: readonly string[];
+  readonly quests: readonly Quest[];
+}
+
+const { backfill: _stampBackfill, ...storedStampQuestFields } = quest;
+
+function storedQuest(id: number, repo: string, overrides: Partial<Quest> = {}): Quest {
+  return questSchema.parse({
+    ...storedStampQuestFields,
+    created_at: timestamp,
+    id,
+    lease_expires_at: null,
+    repo,
+    title: `${repo} quest ${id}`,
+    updated_at: timestamp,
+    ...overrides,
+  });
+}
+
+/** A deployment that exposes `quest:revisionStamp` and paged federated list reads. */
+function fakeStampClients(initial: StampListData = { chains: [], fences: [], quests: [] }) {
+  const queryNames = new Map<unknown, string>(
+    Object.entries(convexApi).map(([name, reference]) => [reference, name]),
+  );
+  const queryCounts = new Map<string, number>();
+  const entries: StampRealtimeEntry[] = [];
+  let data = initial;
+  let stamp: ConvexRevisionStamp = { fence_generation: 0, snapshot_generation: 1 };
+  let pendingPageReads: Array<() => void> = [];
+  let holdPageReads = false;
+  const listPage = (cursor: string | undefined): ConvexListPage => {
+    const generation = stamp.snapshot_generation;
+    if (cursor === undefined) {
+      return {
+        section: "quests",
+        items: [...data.quests],
+        next_cursor: "chains",
+        snapshot_generation: generation,
+      };
+    }
+    if (cursor === "chains") {
+      return {
+        section: "chains",
+        items: [...data.chains],
+        next_cursor: "fences",
+        snapshot_generation: generation,
+      };
+    }
+    return {
+      section: "fences",
+      items: [...data.fences],
+      next_cursor: null,
+      snapshot_generation: generation,
+    };
+  };
+  const clients = {
+    http: {
+      query: async (query: unknown, args: Readonly<Record<string, unknown>>) => {
+        const name = queryNames.get(query) ?? "unknown";
+        queryCounts.set(name, (queryCounts.get(name) ?? 0) + 1);
+        if (query === convexApi.serverTime) {
+          return timestamp;
+        }
+        if (query === convexApi.revisionStamp) {
+          return stamp;
+        }
+        if (query === convexApi.federatedListSnapshot) {
+          const cursor = typeof args["cursor"] === "string" ? args["cursor"] : undefined;
+          if (holdPageReads) {
+            await new Promise<void>((resolve) => {
+              pendingPageReads.push(resolve);
+            });
+          }
+          return listPage(cursor);
+        }
+        throw new Error(`unexpected query ${name}`);
+      },
+    },
+    realtime: {
+      close: async () => undefined,
+      onUpdate: (
+        query: unknown,
+        args: Readonly<Record<string, unknown>>,
+        callback: (value: unknown) => void,
+        onError?: (error: unknown) => void,
+      ) => {
+        const entry = { args, callback, onError, query, unsubscribed: false };
+        entries.push(entry);
+        return {
+          unsubscribe: () => {
+            entry.unsubscribed = true;
+          },
+        };
+      },
+    },
+  } as unknown as ConvexClientPair;
+  return {
+    clients,
+    entries,
+    /** Applies a write: new list data plus a new stamp, then delivers the stamp to subscribers. */
+    write: (next: Partial<StampListData>) => {
+      data = { ...data, ...next };
+      stamp = { ...stamp, snapshot_generation: stamp.snapshot_generation + 1 };
+      for (const entry of entries) {
+        if (entry.query === convexApi.revisionStamp && !entry.unsubscribed) {
+          entry.callback(stamp);
+        }
+      }
+    },
+    redeliverStamp: () => {
+      for (const entry of entries) {
+        if (entry.query === convexApi.revisionStamp && !entry.unsubscribed) {
+          entry.callback(stamp);
+        }
+      }
+    },
+    holdPageReads: () => {
+      holdPageReads = true;
+    },
+    releasePageReads: () => {
+      holdPageReads = false;
+      const pending = pendingPageReads;
+      pendingPageReads = [];
+      for (const resolve of pending) {
+        resolve();
+      }
+    },
+    queries: (name: keyof typeof convexApi) => queryCounts.get(name) ?? 0,
+    stampEntries: () => entries.filter((entry) => entry.query === convexApi.revisionStamp),
+    listEntries: () => entries.filter((entry) => entry.query === convexApi.federatedListSnapshot),
+  };
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) {
+      throw new Error("timed out waiting for condition");
+    }
+    await Bun.sleep(5);
+  }
+}
+
+describe("Convex viewer revision stamp", () => {
+  test("subscribes to the revision stamp and reads list pages only when it changes", async () => {
+    const fake = fakeStampClients({ chains: [], fences: [], quests: [storedQuest(1, "quest")] });
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients: fake.clients });
+    const emissions: FederatedReadSnapshot[] = [];
+    const subscription = await store.watchFederatedSnapshot("quest", (snapshot) => {
+      emissions.push(snapshot);
+    });
+
+    try {
+      expect(fake.stampEntries()).toHaveLength(1);
+      expect(fake.listEntries()).toHaveLength(0);
+      expect(fake.stampEntries()[0]?.args).toEqual({ client_protocol: QUEST_CLIENT_PROTOCOL });
+      expect(fake.queries("revisionStamp")).toBe(1);
+      expect(fake.queries("federatedListSnapshot")).toBe(3);
+      await waitFor(() => emissions.length === 1);
+      expect(emissions[0]?.dump.quests.map((item) => item.id)).toEqual([1]);
+
+      fake.redeliverStamp();
+      await Bun.sleep(20);
+      expect(fake.queries("federatedListSnapshot")).toBe(3);
+
+      fake.write({ quests: [storedQuest(1, "quest"), storedQuest(2, "quest")] });
+      await waitFor(() => emissions.length === 2, 3_000);
+      expect(fake.queries("federatedListSnapshot")).toBe(6);
+      expect(emissions[1]?.dump.quests.map((item) => item.id)).toEqual([1, 2]);
+      expect(fake.listEntries()).toHaveLength(0);
+    } finally {
+      await subscription.unsubscribe();
+    }
+    expect(fake.stampEntries()[0]?.unsubscribed).toBeTrue();
+  });
+
+  test("shares one stamp subscription and one page read across every watch on the store", async () => {
+    const fake = fakeStampClients({
+      chains: [],
+      fences: ["migrating"],
+      quests: [storedQuest(1, "quest"), storedQuest(2, "other")],
+    });
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients: fake.clients });
+    const seen = new Map<string, FederatedReadSnapshot[]>();
+    const watch = async (repository: string | undefined) =>
+      store.watchFederatedSnapshot(repository, (snapshot) => {
+        const key = repository ?? "*";
+        seen.set(key, [...(seen.get(key) ?? []), snapshot]);
+      });
+    const [questWatch, otherWatch, allWatch] = await Promise.all([
+      watch("quest"),
+      watch("other"),
+      watch(undefined),
+    ]);
+
+    try {
+      expect(fake.stampEntries()).toHaveLength(1);
+      expect(fake.queries("revisionStamp")).toBe(1);
+      expect(fake.queries("federatedListSnapshot")).toBe(3);
+      await waitFor(() => (seen.get("*")?.length ?? 0) === 1);
+
+      fake.write({
+        quests: [storedQuest(1, "quest"), storedQuest(2, "other"), storedQuest(3, "quest")],
+      });
+      await waitFor(() => (seen.get("*")?.length ?? 0) === 2, 3_000);
+      expect(fake.queries("federatedListSnapshot")).toBe(6);
+      expect(
+        seen
+          .get("quest")
+          ?.at(-1)
+          ?.dump.quests.map((item) => item.id),
+      ).toEqual([1, 3]);
+      expect(
+        seen
+          .get("other")
+          ?.at(-1)
+          ?.dump.quests.map((item) => item.id),
+      ).toEqual([2]);
+      expect(
+        seen
+          .get("*")
+          ?.at(-1)
+          ?.dump.quests.map((item) => item.id),
+      ).toEqual([1, 2, 3]);
+      expect(seen.get("*")?.at(-1)?.fencedRepositories).toEqual(["migrating"]);
+
+      await questWatch.unsubscribe();
+      await otherWatch.unsubscribe();
+      expect(fake.stampEntries()[0]?.unsubscribed).toBeFalse();
+      await allWatch.unsubscribe();
+      expect(fake.stampEntries()[0]?.unsubscribed).toBeTrue();
+
+      const reopened = await watch("quest");
+      expect(fake.stampEntries()).toHaveLength(2);
+      expect(fake.queries("revisionStamp")).toBe(2);
+      await reopened.unsubscribe();
+    } finally {
+      await Promise.all([
+        questWatch.unsubscribe(),
+        otherWatch.unsubscribe(),
+        allWatch.unsubscribe(),
+      ]);
+    }
+  });
+
+  test("coalesces stamp changes that land during a page read into one trailing read", async () => {
+    const fake = fakeStampClients();
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients: fake.clients });
+    const emissions: FederatedReadSnapshot[] = [];
+    const subscription = await store.watchFederatedSnapshot(undefined, (snapshot) => {
+      emissions.push(snapshot);
+    });
+
+    try {
+      await waitFor(() => emissions.length === 1);
+      fake.holdPageReads();
+      fake.write({ quests: [storedQuest(1, "quest")] });
+      await waitFor(() => fake.queries("federatedListSnapshot") === 4, 3_000);
+      fake.write({ quests: [storedQuest(1, "quest"), storedQuest(2, "quest")] });
+      fake.write({
+        quests: [storedQuest(1, "quest"), storedQuest(2, "quest"), storedQuest(3, "quest")],
+      });
+      fake.releasePageReads();
+      await waitFor(() => fake.queries("federatedListSnapshot") === 9, 3_000);
+      await Bun.sleep(50);
+      expect(fake.queries("federatedListSnapshot")).toBe(9);
+      expect(emissions.at(-1)?.dump.quests.map((item) => item.id)).toEqual([1, 2, 3]);
+    } finally {
+      await subscription.unsubscribe();
+    }
+  });
+
+  test("does not cache an opaque stamp probe failure", async () => {
+    let probes = 0;
+    const fake = fakeStampClients();
+    const query = fake.clients.http.query.bind(fake.clients.http);
+    (fake.clients.http as { query: unknown }).query = async (
+      reference: unknown,
+      args: Readonly<Record<string, unknown>>,
+    ) => {
+      if (reference === convexApi.revisionStamp) {
+        probes += 1;
+        if (probes === 1) {
+          throw new Error("[Request ID: bfdf4caebe0312d8] Server Error");
+        }
+      }
+      return query(reference as never, args as never);
+    };
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients: fake.clients });
+
+    const legacy = await store.watchFederatedSnapshot("quest", () => undefined);
+    expect(fake.listEntries()).toHaveLength(1);
+    expect(fake.stampEntries()).toHaveLength(0);
+    await legacy.unsubscribe();
+
+    const current = await store.watchFederatedSnapshot("quest", () => undefined);
+    expect(fake.stampEntries()).toHaveLength(1);
+    await current.unsubscribe();
   });
 });
 

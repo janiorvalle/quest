@@ -93,7 +93,7 @@ const EMPTY_DETAIL: QuestLogDetail = {
   sessionAttribution: null,
 };
 
-test("polls detail without committing unchanged snapshots and reloads quest revisions", async () => {
+test("loads detail once per quest revision instead of polling", async () => {
   const selectedSnapshot = { ...SNAPSHOT, items: [ALPHA] };
   let commits = 0;
   let detailLoads = 0;
@@ -136,9 +136,10 @@ test("polls detail without committing unchanged snapshots and reloads quest revi
     await act(async () => resolveDetailLoads.shift()?.());
     const commitsAfterInitialDetail = commits;
 
-    await waitFor(() => resolveDetailLoads.length === 1);
-    await act(async () => resolveDetailLoads.shift()?.());
-    expect(detailLoads).toBe(2);
+    await act(async () => {
+      await Bun.sleep(50);
+    });
+    expect(detailLoads).toBe(1);
     expect(commits).toBe(commitsAfterInitialDetail);
 
     await act(async () => {
@@ -162,7 +163,7 @@ test("polls detail without committing unchanged snapshots and reloads quest revi
         ],
       }),
     );
-    expect(detailLoads).toBe(3);
+    expect(detailLoads).toBe(2);
     expect(commits).toBeGreaterThan(commitsAfterInitialDetail);
   } finally {
     act(() => setup.renderer.destroy());
