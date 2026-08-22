@@ -636,21 +636,21 @@ describe("next CLI behavior", () => {
     try {
       const selected = await harness.addQuest("Brief race");
       let atomicClaims = 0;
-      let exportCount = 0;
+      let backlogReads = 0;
       const racingStore = new Proxy(harness.store, {
         get(target, property, receiver) {
           if (
-            property !== "exportAll" &&
+            property !== "readFederatedSnapshot" &&
             property !== "acceptQuestAndDetail" &&
             property !== "readQuestDetail"
           ) {
             const value = Reflect.get(target, property, receiver);
             return typeof value === "function" ? value.bind(target) : value;
           }
-          if (property === "exportAll") {
+          if (property === "readFederatedSnapshot") {
             return async () => {
-              exportCount += 1;
-              return target.exportAll();
+              backlogReads += 1;
+              return target.readFederatedSnapshot();
             };
           }
           if (property === "acceptQuestAndDetail") {
@@ -688,7 +688,7 @@ describe("next CLI behavior", () => {
         title: "Changed after claim",
       });
       expect(atomicClaims).toBe(1);
-      expect(exportCount).toBe(1);
+      expect(backlogReads).toBe(1);
     } finally {
       await harness.stop();
     }
@@ -731,19 +731,19 @@ describe("next CLI behavior", () => {
       const selected = await harness.addQuest("Guild-raced claim", { priority: 1 });
       const racingStore = new Proxy(harness.store, {
         get(target, property, receiver) {
-          if (property !== "exportAll") {
+          if (property !== "readFederatedSnapshot") {
             const value = Reflect.get(target, property, receiver);
             return typeof value === "function" ? value.bind(target) : value;
           }
           return async () => {
-            const dump = await target.exportAll();
+            const snapshot = await target.readFederatedSnapshot();
             await target.transition(selected, {
               action: "update",
               actor: identity,
               session_guild: null,
               changes: { guild: "claude" },
             });
-            return dump;
+            return snapshot;
           };
         },
       });

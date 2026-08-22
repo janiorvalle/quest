@@ -7,6 +7,7 @@ import type {
   Event,
   EventFilter,
   Evidence,
+  FederatedListDump,
   NewEvidence,
   NewQuest,
   Quest,
@@ -23,11 +24,13 @@ import type {
 } from "../schema";
 import {
   eventRepository,
+  federatedListDumpSchema,
   questDumpSchema,
   questStatusSchema,
   STORE_SCHEMA_VERSION,
   verdictSchema,
 } from "../schema";
+import { readQuestListDump } from "./list-dump";
 import type {
   BlobStore,
   FederatedFullSnapshot,
@@ -69,6 +72,14 @@ function compareQuests(left: Quest, right: Quest): number {
 function compareEvents(left: Event, right: Event): number {
   return (
     left.id - right.id || (eventRepository(left) ?? "").localeCompare(eventRepository(right) ?? "")
+  );
+}
+
+function compareChains(left: Chain, right: Chain): number {
+  return (
+    left.quest_id - right.quest_id ||
+    left.target_id - right.target_id ||
+    left.type.localeCompare(right.type)
   );
 }
 
@@ -224,7 +235,7 @@ function chainNeighbors(chain: Chain, questId: number): readonly number[] {
 }
 
 function expandExportQuestIds(
-  dump: QuestDump,
+  dump: FederatedListDump,
   source: FederatedStoreSource,
   allowedIds: Set<number>,
   fencedRepositories: ReadonlySet<string> | undefined,
@@ -253,7 +264,7 @@ function expandExportQuestIds(
 }
 
 function exportQuestIds(
-  dump: QuestDump,
+  dump: FederatedListDump,
   source: FederatedStoreSource,
   repository: string | undefined,
   fencedRepositories: ReadonlySet<string> | undefined = undefined,
@@ -674,13 +685,11 @@ export class FederatedQuestStore implements QuestStore {
     return this.#sourcesForRepository(this.#repositoryScope ?? repository);
   }
 
-  async #readSourceSnapshots(
+  async #settleSourceReads<Read>(
     repository: string | undefined,
-  ): Promise<readonly FederatedSourceRead[]> {
-    const sources = await this.#readSources(repository);
-    const attempts = await Promise.allSettled(
-      sources.map((source) => readFederatedSource(source, repository)),
-    );
+    reads: readonly Promise<Read>[],
+  ): Promise<readonly Read[]> {
+    const attempts = await Promise.allSettled(reads);
     const rejected = attempts.filter(
       (attempt): attempt is PromiseRejectedResult => attempt.status === "rejected",
     );
@@ -690,11 +699,37 @@ export class FederatedQuestStore implements QuestStore {
     return attempts.flatMap((attempt) => (attempt.status === "fulfilled" ? [attempt.value] : []));
   }
 
+  async #readSourceSnapshots(
+    repository: string | undefined,
+  ): Promise<readonly FederatedSourceRead[]> {
+    const sources = await this.#readSources(repository);
+    return this.#settleSourceReads(
+      repository,
+      sources.map((source) => readFederatedSource(source, repository)),
+    );
+  }
+
+  /**
+   * Reads each routed source's whole-store list snapshot. A repository-scoped source read keeps
+   * only one chain hop, which is enough for lists but not for relational reads (plans, chain
+   * trees, next selection) that need the transitive closure the same way exportAll does.
+   */
+  async #readWholeStoreSourceSnapshots(
+    repository: string | undefined,
+  ): Promise<readonly FederatedSourceRead[]> {
+    const sources = await this.#readSources(repository);
+    return this.#settleSourceReads(
+      repository,
+      sources.map((source) => readFederatedSource(source, undefined)),
+    );
+  }
+
   async #readFullSourceSnapshots(
     repository: string | undefined,
   ): Promise<readonly FederatedFullSourceRead[]> {
     const sources = await this.#readSources(repository);
-    const attempts = await Promise.allSettled(
+    return this.#settleSourceReads(
+      repository,
       sources.map(async (source) => ({
         source,
         ...(source.readSnapshot === undefined
@@ -702,13 +737,6 @@ export class FederatedQuestStore implements QuestStore {
           : { snapshot: await readValidatedFullSnapshot(source, repository) }),
       })),
     );
-    const rejected = attempts.filter(
-      (attempt): attempt is PromiseRejectedResult => attempt.status === "rejected",
-    );
-    if (rejected.length > 0 && (!this.#allowPartialReads || repository !== undefined)) {
-      throw federatedWatchReadError({ repo: repository }, rejected[0]?.reason);
-    }
-    return attempts.flatMap((attempt) => (attempt.status === "fulfilled" ? [attempt.value] : []));
   }
 
   #sourcesForRepositoryScope(): Promise<readonly FederatedStoreSource[]> {
@@ -847,6 +875,44 @@ export class FederatedQuestStore implements QuestStore {
     return events.flat().sort(compareEvents);
   }
 
+  /** Merges the per-source quests+chains list reads; no source pays for evidence or events. */
+  async readFederatedSnapshot(repository?: string): Promise<FederatedReadSnapshot> {
+    const scopedRepository = this.#repositoryScope ?? repository;
+    const reads = await this.#readWholeStoreSourceSnapshots(scopedRepository);
+    const dumps = await Promise.all(
+      reads.map(async ({ source, snapshot }) => ({
+        dump: snapshot?.dump ?? (await readQuestListDump(source.questStore)),
+        fencedRepositories:
+          snapshot === undefined ? undefined : new Set(snapshot.fencedRepositories),
+        source,
+      })),
+    );
+    const quests: Quest[] = [];
+    const chains: Chain[] = [];
+    const fencedRepositories = new Set<string>();
+    for (const { dump, fencedRepositories: sourceFences, source } of dumps) {
+      const allowedQuestIds = exportQuestIds(dump, source, scopedRepository, sourceFences);
+      quests.push(...dump.quests.filter((quest) => allowedQuestIds.has(quest.id)));
+      chains.push(
+        ...dump.chains.filter(
+          (link) => allowedQuestIds.has(link.quest_id) && allowedQuestIds.has(link.target_id),
+        ),
+      );
+      for (const fenced of sourceFences ?? []) {
+        fencedRepositories.add(fenced);
+      }
+    }
+    assertUniqueQuestIds(quests);
+    return {
+      dump: federatedListDumpSchema.parse({
+        schema_version: STORE_SCHEMA_VERSION,
+        quests: quests.sort(compareQuests),
+        chains: chains.sort(compareChains),
+      }),
+      fencedRepositories: [...fencedRepositories].sort(),
+    };
+  }
+
   async exportAll(): Promise<QuestDump> {
     const reads = await this.#readFullSourceSnapshots(this.#repositoryScope);
     const dumps = await Promise.all(
@@ -890,12 +956,7 @@ export class FederatedQuestStore implements QuestStore {
       schema_version: STORE_SCHEMA_VERSION,
       quests: quests.sort(compareQuests),
       evidence: evidence.sort((left, right) => left.id - right.id),
-      chains: chains.sort(
-        (left, right) =>
-          left.quest_id - right.quest_id ||
-          left.target_id - right.target_id ||
-          left.type.localeCompare(right.type),
-      ),
+      chains: chains.sort(compareChains),
       events: events.sort(compareEvents),
     });
   }

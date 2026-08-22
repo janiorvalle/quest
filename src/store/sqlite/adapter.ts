@@ -40,6 +40,8 @@ import {
   eventFilterSchema,
   eventSchema,
   evidenceSchema,
+  type FederatedListDump,
+  federatedListDumpSchema,
   type LaneConflictReference,
   type NewEvidence,
   type NewQuest,
@@ -926,13 +928,10 @@ export class SqliteStore implements QuestStore {
   }
 
   async readFederatedSnapshot(): Promise<FederatedReadSnapshot> {
-    return this.#readTransaction(() => {
-      const { schema_version, quests, chains } = this.#readQuestDump();
-      return {
-        dump: { schema_version, quests, chains },
-        fencedRepositories: this.#readFencedRepositories(),
-      };
-    });
+    return this.#readTransaction(() => ({
+      dump: this.#readQuestListDump(),
+      fencedRepositories: this.#readFencedRepositories(),
+    }));
   }
 
   async readFederatedFullSnapshot(): Promise<FederatedFullSnapshot> {
@@ -1493,6 +1492,21 @@ export class SqliteStore implements QuestStore {
     return questDumpSchema.parse({
       ...dump,
       quests: dump.quests.map((quest) => materializeExpiredLease(quest, timestamp)),
+    });
+  }
+
+  /** Reads quests and chains only, so list-shaped readers never decode evidence or events. */
+  #readQuestListDump(): FederatedListDump {
+    const timestamp = this.#now();
+    return federatedListDumpSchema.parse({
+      schema_version: STORE_SCHEMA_VERSION,
+      quests: getRows<QuestRow, []>(this.#database, `${selectQuestsSql} ORDER BY id`)
+        .map(decodeQuest)
+        .map((quest) => materializeExpiredLease(quest, timestamp)),
+      chains: getRows<Chain, []>(
+        this.#database,
+        `${selectChainsSql} ORDER BY quest_id, target_id, type`,
+      ).map((row) => chainSchema.parse(row)),
     });
   }
 

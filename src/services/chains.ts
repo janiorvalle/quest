@@ -1,5 +1,5 @@
 import type { Chain, ChainType, Quest, QuestScope } from "../schema";
-import type { QuestStore } from "../store";
+import { type QuestStore, readQuestListDump } from "../store";
 
 export interface ChainMutationResult {
   readonly changed: boolean;
@@ -182,7 +182,7 @@ export async function showQuestChains(
     await requireScopedQuest(store, id, scope);
   }
 
-  const dump = await store.exportAll();
+  const dump = await readQuestListDump(store);
   const questById = new Map(dump.quests.map((quest) => [quest.id, quest]));
   const scopedQuestIds = new Set(
     dump.quests.filter((quest) => inScope(quest, scope)).map((quest) => quest.id),
