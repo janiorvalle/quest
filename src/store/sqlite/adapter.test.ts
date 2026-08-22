@@ -1116,6 +1116,33 @@ describe("SqliteStore", () => {
     await removeDirectory(directory);
   });
 
+  test("watch delivers a sign-off that only appends events to a complete quest", async () => {
+    const { databasePath, directory } = await createDatabasePath();
+    const store = new SqliteStore(databasePath, { watchPollIntervalMs: 5 });
+    const completed = await store.addQuest({
+      ...taskInput("signed off while watched"),
+      backfill: true,
+      status: "complete",
+    });
+    let deliveries = 0;
+    const subscription = await store.watch({ repo: "sqlite" }, () => {
+      deliveries += 1;
+    });
+    const deliveriesBeforeSignoff = deliveries;
+
+    await store.transition(completed.id, {
+      action: "signoff",
+      actor,
+      notes: "checked",
+      session_guild: null,
+    });
+    await waitFor(() => deliveries > deliveriesBeforeSignoff);
+
+    await subscription.unsubscribe();
+    store.close();
+    await removeDirectory(directory);
+  });
+
   test("database constraints reject event rewrites and invalid enum storage", async () => {
     const { databasePath, directory } = await createDatabasePath();
     const store = new SqliteStore(databasePath);

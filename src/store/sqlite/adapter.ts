@@ -107,6 +107,10 @@ type DataVersionRow = {
   data_version: number;
 };
 
+type EventHighWaterRow = {
+  high_water: number | null;
+};
+
 type LeaseExpiryRow = {
   lease_expires_at: string;
 };
@@ -1273,14 +1277,10 @@ export class SqliteStore implements QuestStore {
       this.#observedDataVersion = this.#readDataVersion();
       this.#refreshNextWatchLeaseExpiry();
     }
-    const snapshot = this.#readTransaction(() => this.#listQuests(parsed));
+    const { quests: snapshot, signature } = this.#readWatchSnapshot(parsed);
     const watcherId = this.#nextWatcherId;
     this.#nextWatcherId += 1;
-    this.#watchers.set(watcherId, {
-      filter: parsed,
-      listener,
-      signature: JSON.stringify(snapshot),
-    });
+    this.#watchers.set(watcherId, { filter: parsed, listener, signature });
     this.#startWatchTimer();
     this.#callListener(listener, snapshot);
 
@@ -2230,8 +2230,7 @@ export class SqliteStore implements QuestStore {
       return;
     }
     for (const [id, watcher] of this.#watchers) {
-      const snapshot = this.#readTransaction(() => this.#listQuests(watcher.filter));
-      const signature = JSON.stringify(snapshot);
+      const { quests: snapshot, signature } = this.#readWatchSnapshot(watcher.filter);
       if (signature === watcher.signature) {
         continue;
       }
@@ -2239,6 +2238,24 @@ export class SqliteStore implements QuestStore {
       this.#callListener(watcher.listener, snapshot);
     }
     this.#refreshNextWatchLeaseExpiry();
+  }
+
+  /**
+   * A watch snapshot's identity covers the event high-water mark as well as the quest rows, so a
+   * write that only appends events or evidence (a sign-off, an attachment) still reaches watchers
+   * whose quest rows did not change.
+   */
+  #readWatchSnapshot(filter: QuestFilter): {
+    readonly quests: Quest[];
+    readonly signature: string;
+  } {
+    return this.#readTransaction(() => {
+      const quests = this.#listQuests(filter);
+      const eventHighWater =
+        getRow<EventHighWaterRow, []>(this.#database, "SELECT MAX(id) AS high_water FROM events")
+          ?.high_water ?? 0;
+      return { quests, signature: JSON.stringify({ eventHighWater, quests }) };
+    });
   }
 
   #readDataVersion(): number {
