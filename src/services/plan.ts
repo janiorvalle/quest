@@ -1,12 +1,14 @@
 import { computeQuestPlan, type QuestPlan, type QuestPlanInput } from "../domain/plan";
-import type { Quest, QuestDump, QuestScope } from "../schema";
-import type { QuestStore } from "../store";
+import type { FederatedListDump, Quest, QuestScope } from "../schema";
+import { type QuestStore, readQuestListDump } from "../store";
 
 function isInScope(quest: Quest, scope: QuestScope): boolean {
   return scope.repo === null || quest.repo === scope.repo;
 }
 
-function requiresByQuest(chains: QuestDump["chains"]): ReadonlyMap<number, readonly number[]> {
+function requiresByQuest(
+  chains: FederatedListDump["chains"],
+): ReadonlyMap<number, readonly number[]> {
   const requirements = new Map<number, number[]>();
   for (const chain of chains) {
     if (chain.type !== "requires") {
@@ -44,7 +46,7 @@ function requirementClosure(
   return included;
 }
 
-function scopedPlanInput(dump: QuestDump, scope: QuestScope, now: string): QuestPlanInput {
+function scopedPlanInput(dump: FederatedListDump, scope: QuestScope, now: string): QuestPlanInput {
   const questsById = new Map(dump.quests.map((quest) => [quest.id, quest]));
   const requirements = requiresByQuest(dump.chains);
   const scopedQuestIds = dump.quests
@@ -72,7 +74,7 @@ export async function getQuestPlanSnapshot(
   now: string,
 ): Promise<QuestPlanSnapshot> {
   const scopedStore = scope.repo === null ? store : (store.forRepository?.(scope.repo) ?? store);
-  const dump = await scopedStore.exportAll();
+  const dump = await readQuestListDump(scopedStore);
   const input = scopedPlanInput(dump, scope, now);
   const scopedQuestIds = new Set(
     input.quests.filter((quest) => isInScope(quest, scope)).map((quest) => quest.id),
