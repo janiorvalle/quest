@@ -223,6 +223,7 @@ describe("read-only quest log runtime", () => {
       const snapshot = latest(snapshots);
       expect(snapshot.scope).toBe("current");
       expect(snapshot.currentRepo).toBe("quest");
+      expect(snapshot.listRevision).toBeGreaterThan(0);
       expect(snapshot.items.map((item) => item.title)).toEqual(["Inside scope"]);
       expect(snapshot.items[0]?.predictedFiles).toEqual(["src/tui/quest-log.tsx"]);
       expect(snapshot.plan).toBeNull();

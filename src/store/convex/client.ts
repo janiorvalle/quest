@@ -102,9 +102,18 @@ export interface ConvexPendingRestoreResult {
   readonly status: "pending";
 }
 
+/** The counters every Convex list page is validated against; changes whenever list data changes. */
+export interface ConvexRevisionStamp {
+  readonly snapshot_generation: number;
+  readonly fence_generation: number;
+}
+
 export const convexApi = {
   schemaVersion: makeFunctionReference<"query", ClientProtocolInput, number>("quest:schemaVersion"),
   serverTime: makeFunctionReference<"query", ClientProtocolInput, string>("quest:serverTime"),
+  revisionStamp: makeFunctionReference<"query", AuthTokenInput, ConvexRevisionStamp>(
+    "quest:revisionStamp",
+  ),
   doctorCapacity: makeFunctionReference<"query", AuthTokenInput, StoreCapacityInspection>(
     "quest:doctorCapacity",
   ),
