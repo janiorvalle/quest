@@ -94,6 +94,75 @@ describe("federated quest reads", () => {
     }
   });
 
+  test("repository-scoped list snapshots keep the same transitive chain closure as exports", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-federated-list-closure-"));
+    const questStore = new SqliteStore(join(root, "shared.db"), { now: () => timestamp });
+    const snapshotScopes: Array<string | undefined> = [];
+    try {
+      const alphaQuest = await questStore.addQuest(task("alpha", "Alpha needs beta"));
+      const betaQuest = await questStore.addQuest(task("beta", "Beta needs gamma"));
+      const gammaQuest = await questStore.addQuest(task("gamma", "Gamma root"));
+      await questStore.addChainLink({
+        actor: "test",
+        link: { quest_id: alphaQuest.id, target_id: betaQuest.id, type: "requires" },
+      });
+      await questStore.addChainLink({
+        actor: "test",
+        link: { quest_id: betaQuest.id, target_id: gammaQuest.id, type: "requires" },
+      });
+      const source: FederatedStoreSource = {
+        blobStore: new LocalBlobStore(join(root, "shared-evidence")),
+        includeRepository: () => true,
+        questStore,
+        readFullSnapshot: () => questStore.readFederatedFullSnapshot(),
+        // Mirrors the Convex adapter: a repository-scoped list read keeps one chain hop only.
+        readSnapshot: async (repository) => {
+          snapshotScopes.push(repository);
+          const snapshot = await questStore.readFederatedSnapshot();
+          if (repository === undefined) {
+            return snapshot;
+          }
+          const scopedIds = new Set(
+            snapshot.dump.quests.filter((quest) => quest.repo === repository).map(({ id }) => id),
+          );
+          const chains = snapshot.dump.chains.filter(
+            (chain) => scopedIds.has(chain.quest_id) || scopedIds.has(chain.target_id),
+          );
+          const keptIds = new Set([
+            ...scopedIds,
+            ...chains.flatMap((chain) => [chain.quest_id, chain.target_id]),
+          ]);
+          return {
+            ...snapshot,
+            dump: {
+              ...snapshot.dump,
+              chains,
+              quests: snapshot.dump.quests.filter((quest) => keptIds.has(quest.id)),
+            },
+          };
+        },
+      };
+      const alphaScope = new FederatedQuestStore([source], "alpha");
+
+      const listSnapshot = await alphaScope.readFederatedSnapshot();
+      const exported = await alphaScope.exportAll();
+
+      expect(listSnapshot.dump.quests.map(({ id }) => id)).toEqual(
+        exported.quests.map(({ id }) => id),
+      );
+      expect(listSnapshot.dump.quests.map(({ id }) => id)).toEqual([
+        alphaQuest.id,
+        betaQuest.id,
+        gammaQuest.id,
+      ]);
+      expect(listSnapshot.dump.chains).toEqual(exported.chains);
+      expect(snapshotScopes).toEqual([undefined]);
+    } finally {
+      questStore.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   test("merges per-source quests+chains list snapshots without reading evidence or events", async () => {
     const root = await mkdtemp(join(tmpdir(), "quest-federated-list-merge-"));
     const alphaStore = new SqliteStore(join(root, "alpha.db"), { now: () => timestamp });
