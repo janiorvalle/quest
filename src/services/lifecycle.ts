@@ -165,16 +165,13 @@ async function latestTurnInPullRequest(store: QuestStore, id: number): Promise<s
 }
 
 async function hasCurrentVerificationEvidence(store: QuestStore, id: number): Promise<boolean> {
-  const events = await store.events(id);
+  const { events, evidence } = await store.readQuestDetail(id);
   const latestTurnIn = [...events].reverse().find((event) => event.action === "turnin");
   if (latestTurnIn === undefined) {
     return false;
   }
-  const dump = await store.exportAll();
   const verifyEvidenceIds = new Set(
-    dump.evidence
-      .filter((evidence) => evidence.quest_id === id && evidence.stage === "verify")
-      .map((evidence) => evidence.id),
+    evidence.filter((item) => item.stage === "verify").map((item) => item.id),
   );
   return events.some(
     (event) =>
@@ -267,14 +264,17 @@ async function attachEvidence(
   const evidence: Evidence[] = [];
   const warnings: string[] = [];
   let changed = false;
+  if (request.paths.length === 0) {
+    return { changed, evidence, warnings };
+  }
 
+  const attached = [...(await ports.questStore.readQuestDetail(questId)).evidence];
   for (const path of request.paths) {
     const file = await ports.evidenceFiles.read(path, request.workingDirectory);
     const sha256 = await ports.blobStore.put(file.bytes);
     const kind = inferEvidenceKind(file.filename);
-    const existing = (await ports.questStore.exportAll()).evidence.find(
+    const existing = attached.find(
       (candidate) =>
-        candidate.quest_id === questId &&
         candidate.sha256 === sha256 &&
         candidate.filename === file.filename &&
         candidate.kind === kind &&
@@ -287,17 +287,17 @@ async function attachEvidence(
       continue;
     }
 
-    evidence.push(
-      await ports.questStore.addEvidence({
-        quest_id: questId,
-        sha256,
-        filename: file.filename,
-        kind,
-        stage: request.stage,
-        added_by: request.actor,
-        session_guild: request.sessionGuild,
-      }),
-    );
+    const added = await ports.questStore.addEvidence({
+      quest_id: questId,
+      sha256,
+      filename: file.filename,
+      kind,
+      stage: request.stage,
+      added_by: request.actor,
+      session_guild: request.sessionGuild,
+    });
+    evidence.push(added);
+    attached.push(added);
     changed = true;
   }
 
@@ -389,7 +389,7 @@ async function ensureReplayDuplicateLink(
   if (duplicateOf === null) {
     return true;
   }
-  const duplicateLinks = (await store.exportAll()).chains.filter(
+  const duplicateLinks = (await store.readQuestDetail(questId)).chains.filter(
     (link) => link.quest_id === questId && link.type === "duplicate-of",
   );
   if (duplicateLinks.some((link) => link.target_id === duplicateOf)) {

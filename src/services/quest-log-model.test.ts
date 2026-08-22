@@ -416,8 +416,8 @@ describe("read-only quest log runtime", () => {
       await runtime.start();
       await waitFor(() => latest(snapshots).loading === false && latest(snapshots).plan !== null);
 
-      const exportAll = store.exportAll.bind(store);
-      store.exportAll = async () => {
+      const readFederatedSnapshot = store.readFederatedSnapshot.bind(store);
+      store.readFederatedSnapshot = async () => {
         throw new Error("fixture plan refresh failed");
       };
       const incoming = await store.addQuest({
@@ -430,7 +430,7 @@ describe("read-only quest log runtime", () => {
           latest(snapshots).items.some((item) => item.id === incoming.id),
       );
       expect(latest(snapshots).items.map((item) => item.id)).toContain(incoming.id);
-      store.exportAll = exportAll;
+      store.readFederatedSnapshot = readFederatedSnapshot;
     } finally {
       unsubscribe();
       await runtime.stop();
@@ -451,13 +451,13 @@ describe("read-only quest log runtime", () => {
       store,
     });
     const unsubscribe = runtime.subscribe((snapshot) => snapshots.push(snapshot));
-    const exportAll = store.exportAll.bind(store);
+    const readFederatedSnapshot = store.readFederatedSnapshot.bind(store);
     let shouldFail = true;
-    store.exportAll = async () => {
+    store.readFederatedSnapshot = async () => {
       if (shouldFail) {
         throw new Error("fixture initial plan load failed");
       }
-      return exportAll();
+      return readFederatedSnapshot();
     };
 
     try {

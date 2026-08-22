@@ -5,7 +5,7 @@ import {
   type PlanQuest,
 } from "../domain";
 import type { Chain, LaneConflictReference, Quest, QuestScope } from "../schema";
-import type { QuestStore } from "../store";
+import { type QuestStore, readQuestListDump } from "../store";
 import { compileQuestBriefFromSnapshot, type QuestBrief } from "./brief";
 import {
   acceptLifecycleQuest,
@@ -374,9 +374,9 @@ export async function getNextQuest(
   sessionAttribution: SessionAttribution = {},
   options: NextQuestOptions = {},
 ): Promise<NextQuestResult> {
-  const dump = await store.exportAll();
+  const backlog = await readQuestListDump(store);
   const selection = selectNextQuest(
-    { chains: dump.chains, quests: dump.quests },
+    { chains: backlog.chains, quests: backlog.quests },
     scope,
     policy,
     sessionGuild,

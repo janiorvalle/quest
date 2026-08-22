@@ -27,6 +27,7 @@ export {
   MINIMUM_QUEST_CLIENT_PROTOCOL,
   QUEST_CLIENT_PROTOCOL,
 } from "./convex";
+export { readQuestListDump } from "./list-dump";
 export { LocalBlobStore } from "./local-blob-store";
 export type {
   AcceptQuestAndDetailResult,

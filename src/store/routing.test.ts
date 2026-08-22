@@ -94,6 +94,73 @@ describe("federated quest reads", () => {
     }
   });
 
+  test("merges per-source quests+chains list snapshots without reading evidence or events", async () => {
+    const root = await mkdtemp(join(tmpdir(), "quest-federated-list-merge-"));
+    const alphaStore = new SqliteStore(join(root, "alpha.db"), { now: () => timestamp });
+    const betaStore = new SqliteStore(join(root, "beta.db"), { now: () => timestamp });
+    let fullSnapshotReads = 0;
+    let exportReads = 0;
+    try {
+      const alphaRoot = await alphaStore.addQuest(task("alpha", "Alpha root"));
+      const alphaDependent = await alphaStore.addQuest(task("alpha", "Alpha dependent"));
+      const alphaStale = await alphaStore.addQuest(task("ignored", "Ignored stale quest"));
+      await alphaStore.addChainLink({
+        actor: "test",
+        link: { quest_id: alphaDependent.id, target_id: alphaRoot.id, type: "requires" },
+      });
+      await alphaStore.addChainLink({
+        actor: "test",
+        link: { quest_id: alphaStale.id, target_id: alphaRoot.id, type: "requires" },
+      });
+      for (const filler of ["Skip one", "Skip two", "Skip three"]) {
+        await betaStore.addQuest(task("skip", filler));
+      }
+      const betaQuest = await betaStore.addQuest(task("beta", "Beta quest"));
+      const source = (repo: string, questStore: SqliteStore): FederatedStoreSource => ({
+        blobStore: new LocalBlobStore(join(root, `${repo}-evidence`)),
+        includeRepository: (candidate) => candidate === repo,
+        questStore: Object.assign(questStore, {
+          exportAll: async () => {
+            exportReads += 1;
+            return questStore.readFederatedFullSnapshot().then((snapshot) => snapshot.dump);
+          },
+        }),
+        readFullSnapshot: async () => {
+          fullSnapshotReads += 1;
+          return questStore.readFederatedFullSnapshot();
+        },
+        readSnapshot: async () => ({
+          ...(await questStore.readFederatedSnapshot()),
+          fencedRepositories: [`${repo}-fenced`],
+        }),
+      });
+      const store = new FederatedQuestStore([
+        source("alpha", alphaStore),
+        source("beta", betaStore),
+      ]);
+
+      const snapshot = await store.readFederatedSnapshot();
+
+      expect(snapshot.dump.quests.map((quest) => [quest.id, quest.repo])).toEqual([
+        [alphaRoot.id, "alpha"],
+        [alphaDependent.id, "alpha"],
+        [betaQuest.id, "beta"],
+      ]);
+      expect(snapshot.dump.chains).toEqual([
+        { quest_id: alphaDependent.id, target_id: alphaRoot.id, type: "requires" },
+      ]);
+      expect(snapshot.dump).not.toHaveProperty("events");
+      expect(snapshot.dump).not.toHaveProperty("evidence");
+      expect(snapshot.fencedRepositories).toEqual(["alpha-fenced", "beta-fenced"]);
+      expect(fullSnapshotReads).toBe(0);
+      expect(exportReads).toBe(0);
+    } finally {
+      alphaStore.close();
+      betaStore.close();
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
   test("keeps reactive list snapshots bounded while history and exports stay complete", async () => {
     const root = await mkdtemp(join(tmpdir(), "quest-federated-list-snapshot-"));
     const questStore = new SqliteStore(join(root, "remote.db"), { now: () => timestamp });
