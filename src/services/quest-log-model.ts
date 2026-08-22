@@ -79,6 +79,8 @@ export interface QuestLogSnapshot {
   readonly currentRepo: string | null;
   readonly error: string | null;
   readonly items: readonly QuestLogItem[];
+  /** Advances every time the live quest list delivers; the detail pane reloads on it. */
+  readonly listRevision: number;
   readonly loading: boolean;
   readonly plan: QuestLogPlan | null;
   readonly refreshing: boolean;
@@ -179,6 +181,7 @@ export const EMPTY_QUEST_LOG_SNAPSHOT: QuestLogSnapshot = {
   currentRepo: null,
   error: null,
   items: [],
+  listRevision: 0,
   loading: true,
   plan: null,
   refreshing: false,
@@ -603,6 +606,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
   let planSnapshot: QuestPlanSnapshot | null = null;
   let signoffLens: QuestLogSignoffLens = EMPTY_QUEST_LOG_SIGNOFF;
   let planRevision = 0;
+  let listRevision = 0;
   let loading = true;
   let scopeRefreshing = false;
   let signoffRefreshing = false;
@@ -738,6 +742,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
       currentRepo,
       error,
       items,
+      listRevision,
       loading,
       plan: planSnapshot === null ? null : planForItems(planSnapshot, items),
       refreshing: scopeRefreshing || signoffRefreshing,
@@ -1060,6 +1065,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
               error = activeReadError();
               quests = nextQuests;
               loading = false;
+              listRevision += 1;
               emit();
               requestPlanRefresh(activeGeneration, targetScope, targetRepo);
               requestMergedPrQuestIdsRefresh(activeGeneration, targetScope, targetRepo);
@@ -1090,6 +1096,7 @@ export function createQuestLogRuntime(options: QuestLogRuntimeOptions): QuestLog
               }
               error = activeReadError();
               blockedIds = nextBlockedIds;
+              listRevision += 1;
               emit();
               requestPlanRefresh(activeGeneration, targetScope, targetRepo);
               if (signoffLensActive) {

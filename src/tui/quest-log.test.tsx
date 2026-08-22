@@ -37,6 +37,7 @@ const SNAPSHOT: QuestLogSnapshot = {
   currentRepo: "quest",
   error: null,
   items: [ALPHA, BETA],
+  listRevision: 0,
   loading: false,
   plan: null,
   refreshing: false,
@@ -93,7 +94,7 @@ const EMPTY_DETAIL: QuestLogDetail = {
   sessionAttribution: null,
 };
 
-test("loads detail once per quest revision instead of polling", async () => {
+test("reloads detail on quest and list revisions instead of polling", async () => {
   const selectedSnapshot = { ...SNAPSHOT, items: [ALPHA] };
   let commits = 0;
   let detailLoads = 0;
@@ -165,6 +166,17 @@ test("loads detail once per quest revision instead of polling", async () => {
     );
     expect(detailLoads).toBe(2);
     expect(commits).toBeGreaterThan(commitsAfterInitialDetail);
+
+    await act(async () => {
+      emitSnapshot?.({
+        ...selectedSnapshot,
+        items: [{ ...ALPHA, updatedAt: "2026-08-05T20:00:01.000Z" }],
+        listRevision: 1,
+      });
+    });
+    await waitFor(() => resolveDetailLoads.length === 1);
+    await act(async () => resolveDetailLoads.shift()?.());
+    expect(detailLoads).toBe(3);
   } finally {
     act(() => setup.renderer.destroy());
   }

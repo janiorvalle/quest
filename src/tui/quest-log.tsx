@@ -148,7 +148,11 @@ function tabsForAreas(
 
 const DETAIL_RETRY_MS = 1_000;
 
-function useQuestDetail(runtime: QuestLogRuntime, current: QuestLogItem | undefined) {
+function useQuestDetail(
+  runtime: QuestLogRuntime,
+  current: QuestLogItem | undefined,
+  listRevision: number,
+) {
   const [detail, setDetail] = useState<Awaited<ReturnType<QuestLogRuntime["loadDetail"]>> | null>(
     null,
   );
@@ -159,6 +163,9 @@ function useQuestDetail(runtime: QuestLogRuntime, current: QuestLogItem | undefi
   const loadedDetailIdentity = useRef("");
   const detailKey =
     current === undefined ? "" : `${current.repo}\u0000${current.id}\u0000${current.updatedAt}`;
+  const reloadDetail = useRef<((revision: number) => void) | null>(null);
+  const latestListRevision = useRef(listRevision);
+  latestListRevision.current = listRevision;
   const updateDetailStaleness = useCallback((next: boolean): void => {
     if (detailStaleRef.current !== next) {
       detailStaleRef.current = next;
@@ -189,42 +196,75 @@ function useQuestDetail(runtime: QuestLogRuntime, current: QuestLogItem | undefi
     const repository = detailKey.slice(0, separator);
     const id = Number(detailKey.slice(separator + 1, secondSeparator));
     let cancelled = false;
+    let inFlight = false;
+    let reloadRequested = false;
+    let loadedRevision = latestListRevision.current;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
-    // The key carries the quest's updated_at, so this effect re-runs when the live list reports
-    // a change to the selected quest; a failed load retries until it succeeds or the key moves on.
+    // Loads run when the selection changes (the key carries the quest's updated_at) and whenever
+    // the live list delivers, because evidence, events, and chain neighbours can change without
+    // touching the selected quest's record. A failed load retries until it succeeds or the key moves.
     const load = (): void => {
-      runtime.loadDetail(id, repository).then(
-        (value) => {
-          if (cancelled) {
-            return;
+      if (cancelled) {
+        return;
+      }
+      if (inFlight) {
+        reloadRequested = true;
+        return;
+      }
+      inFlight = true;
+      reloadRequested = false;
+      runtime
+        .loadDetail(id, repository)
+        .then(
+          (value) => {
+            if (cancelled) {
+              return;
+            }
+            const signature = JSON.stringify(value);
+            hasLoadedDetail.current = true;
+            updateDetailStaleness(false);
+            if (signature !== detailSignature.current) {
+              detailSignature.current = signature;
+              setDetail(value);
+            }
+          },
+          () => {
+            if (cancelled) {
+              return;
+            }
+            if (hasLoadedDetail.current) {
+              updateDetailStaleness(true);
+            }
+            retryTimer = setTimeout(load, DETAIL_RETRY_MS);
+          },
+        )
+        .finally(() => {
+          inFlight = false;
+          if (reloadRequested) {
+            load();
           }
-          const signature = JSON.stringify(value);
-          hasLoadedDetail.current = true;
-          updateDetailStaleness(false);
-          if (signature !== detailSignature.current) {
-            detailSignature.current = signature;
-            setDetail(value);
-          }
-        },
-        () => {
-          if (cancelled) {
-            return;
-          }
-          if (hasLoadedDetail.current) {
-            updateDetailStaleness(true);
-          }
-          retryTimer = setTimeout(load, DETAIL_RETRY_MS);
-        },
-      );
+        });
+    };
+    reloadDetail.current = (revision) => {
+      if (revision === loadedRevision) {
+        return;
+      }
+      loadedRevision = revision;
+      load();
     };
     load();
     return () => {
       cancelled = true;
+      reloadDetail.current = null;
       if (retryTimer !== undefined) {
         clearTimeout(retryTimer);
       }
     };
   }, [detailKey, runtime, updateDetailStaleness]);
+
+  useEffect(() => {
+    reloadDetail.current?.(listRevision);
+  }, [listRevision]);
 
   return { detail, detailStale };
 }
@@ -454,6 +494,7 @@ export function QuestLogApp({
     currentRepo: null,
     error: null,
     items: [],
+    listRevision: 0,
     loading: true,
     plan: null,
     refreshing: false,
@@ -521,7 +562,7 @@ export function QuestLogApp({
   const current = selectedQuest(activeItems, activeSelectedIndex);
   const currentPr = current?.pr;
   const currentQuestId = current?.id;
-  const detailState = useQuestDetail(runtime, current);
+  const detailState = useQuestDetail(runtime, current, snapshot.listRevision);
   const detail = detailState.detail;
   const geometry = mainPaneGeometry(dimensions.width, dimensions.height);
   const detailMetrics = useMemo(
