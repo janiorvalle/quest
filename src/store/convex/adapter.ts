@@ -51,6 +51,7 @@ import type {
   StoreStaleClaimsInspection,
   WatchSubscription,
 } from "../port";
+import { BatchHistoryUnavailableError, parseBatchHistoryQuestIds } from "../port";
 import { statsForQuests } from "../routing";
 import {
   authTokenInput,
@@ -474,6 +475,7 @@ export class ConvexStore implements QuestStore {
   readonly #ownsClients: boolean;
   readonly #leaseTtlMinutes: number;
   #failNextEventAppend = false;
+  #batchHistoryAvailable: boolean | undefined;
   #federatedListSnapshotAvailable: boolean | undefined;
   #revisionStampAvailable: boolean | undefined;
   #viewerFeed: Promise<ConvexViewerFeed | undefined> | undefined;
@@ -1068,6 +1070,46 @@ export class ConvexStore implements QuestStore {
       ...authTokenInput(this.#clients),
       quest_id: parsed,
     });
+  }
+
+  async readBatchHistory(questIds: readonly number[]): Promise<Event[]> {
+    const parsed = parseBatchHistoryQuestIds(questIds);
+    if (parsed.length === 0) {
+      return [];
+    }
+    if (this.#batchHistoryAvailable === false) {
+      throw new BatchHistoryUnavailableError();
+    }
+    return this.#readPagedBatchHistory(parsed);
+  }
+
+  async #readPagedBatchHistory(questIds: readonly number[]): Promise<Event[]> {
+    for (let attempt = 0; attempt <= EVENT_QUERY_SNAPSHOT_RETRY_LIMIT; attempt += 1) {
+      try {
+        const events = await assembleEventPages((cursor) =>
+          this.#clients.http.query(convexApi.batchHistory, {
+            ...authTokenInput(this.#clients),
+            cursor,
+            quest_ids: questIds,
+          }),
+        );
+        this.#batchHistoryAvailable = true;
+        return events.sort((left, right) => left.id - right.id);
+      } catch (error: unknown) {
+        const missingQuery = missingConvexFunctionFailure(error, "batchHistory");
+        if (missingQuery !== undefined) {
+          if (missingQuery === "confirmed-missing") {
+            this.#batchHistoryAvailable = false;
+          }
+          throw new BatchHistoryUnavailableError();
+        }
+        if (isEventQuerySnapshotChanged(error) && attempt < EVENT_QUERY_SNAPSHOT_RETRY_LIMIT) {
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error("unreachable Convex batch history retry state");
   }
 
   async queryEvents(filter: EventFilter): Promise<Event[]> {

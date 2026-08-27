@@ -1077,6 +1077,117 @@ describe("Convex event query pagination", () => {
   });
 });
 
+describe("Convex batch history pagination", () => {
+  const historyEvent = (id: number, questId: number): Event => ({
+    id,
+    quest_id: questId,
+    at: timestamp,
+    actor: "batch-history/tester",
+    action: "update",
+    detail: { id },
+  });
+
+  test("assembles selected quest histories from one paginated read", async () => {
+    const queryArgs: Readonly<Record<string, unknown>>[] = [];
+    const clients = {
+      http: {
+        query: async (query: unknown, args: Readonly<Record<string, unknown>>) => {
+          expect(query).toBe(convexApi.batchHistory);
+          queryArgs.push(args);
+          return args["cursor"] === null
+            ? { items: [historyEvent(3, 2)], next_cursor: "page-2" }
+            : { items: [historyEvent(1, 1)], next_cursor: null };
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.readBatchHistory([2, 1])).resolves.toEqual([
+      historyEvent(1, 1),
+      historyEvent(3, 2),
+    ]);
+    expect(queryArgs.map((args) => args["cursor"])).toEqual([null, "page-2"]);
+    expect(queryArgs.map((args) => args["quest_ids"])).toEqual([
+      [1, 2],
+      [1, 2],
+    ]);
+  });
+
+  test("restarts the whole batch when a write invalidates its snapshot", async () => {
+    const cursors: unknown[] = [];
+    let pageTwoAttempts = 0;
+    const clients = {
+      http: {
+        query: async (_query: unknown, args: Readonly<Record<string, unknown>>) => {
+          const cursor = args["cursor"];
+          cursors.push(cursor);
+          if (cursor === null) {
+            return { items: [historyEvent(1, 1)], next_cursor: "page-2" };
+          }
+          pageTwoAttempts += 1;
+          if (pageTwoAttempts === 1) {
+            throw new Error(
+              "[CONVEX_SNAPSHOT_CHANGED] the Convex store changed while its paginated batch history was being read",
+            );
+          }
+          return { items: [historyEvent(2, 2)], next_cursor: null };
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.readBatchHistory([1, 2])).resolves.toEqual([
+      historyEvent(1, 1),
+      historyEvent(2, 2),
+    ]);
+    expect(cursors).toEqual([null, "page-2", null, "page-2"]);
+  });
+
+  test("reports and remembers a missing batch history query", async () => {
+    let batchQueries = 0;
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.batchHistory) {
+            batchQueries += 1;
+            throw new Error("Could not find public function for 'quest:batchHistory'");
+          }
+          throw new Error("unexpected query");
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.readBatchHistory([2, 1])).rejects.toThrow("BATCH_HISTORY_QUERY_UNAVAILABLE");
+    await expect(store.readBatchHistory([2, 1])).rejects.toThrow("BATCH_HISTORY_QUERY_UNAVAILABLE");
+    expect(batchQueries).toBe(1);
+  });
+
+  test("does not cache a redacted batch query failure", async () => {
+    let batchQueries = 0;
+    const clients = {
+      http: {
+        query: async (query: unknown) => {
+          if (query === convexApi.batchHistory) {
+            batchQueries += 1;
+            throw new Error("[Request ID: abc123] Server Error");
+          }
+          throw new Error("unexpected query");
+        },
+      },
+      realtime: { close: async () => undefined },
+    } as unknown as ConvexClientPair;
+    const store = new ConvexStore("http://127.0.0.1:3210", { clients });
+
+    await expect(store.readBatchHistory([1])).rejects.toThrow("BATCH_HISTORY_QUERY_UNAVAILABLE");
+    await expect(store.readBatchHistory([1])).rejects.toThrow("BATCH_HISTORY_QUERY_UNAVAILABLE");
+    expect(batchQueries).toBe(2);
+  });
+});
+
 describe("Convex restore rolling upgrades", () => {
   test("resumes replaceAll when a commit response is lost after deletion starts", async () => {
     const empty: QuestDump = {

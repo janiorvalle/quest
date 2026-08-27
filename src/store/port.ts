@@ -23,6 +23,29 @@ import type {
   StoreCompatibilityResult,
   TouchQuestInput,
 } from "../schema";
+import { questSchema } from "../schema";
+
+export const BATCH_HISTORY_MAX_QUEST_IDS = 128;
+
+export class BatchHistoryUnavailableError extends Error {
+  constructor() {
+    super(
+      "[BATCH_HISTORY_QUERY_UNAVAILABLE] this backend does not expose the atomic batch history query; deploy the current Quest backend, or use paginated per-quest event reads with snapshot stabilization during the rolling upgrade",
+    );
+    this.name = "BatchHistoryUnavailableError";
+  }
+}
+
+export function parseBatchHistoryQuestIds(questIds: readonly number[]): readonly number[] {
+  if (questIds.length > BATCH_HISTORY_MAX_QUEST_IDS) {
+    throw new Error(
+      `[BATCH_HISTORY_IDS_LIMIT] batch history accepts at most ${BATCH_HISTORY_MAX_QUEST_IDS} quest IDs per call; split this read into batches of ${BATCH_HISTORY_MAX_QUEST_IDS} or fewer and retry`,
+    );
+  }
+  return [...new Set(questIds.map((questId) => questSchema.shape.id.parse(questId)))].sort(
+    (left, right) => left - right,
+  );
+}
 
 export interface BackupDatabaseInspection {
   readonly dump: QuestDump;
@@ -201,6 +224,9 @@ export interface QuestStore {
 
   /** Reads one quest's append-only events in stable ID order from one query snapshot. */
   events(questId: number): Promise<Event[]>;
+
+  /** Reads selected quest histories in stable ID order from one backend consistency point. */
+  readBatchHistory?(questIds: readonly number[]): Promise<Event[]>;
 
   /** Reads append-only events across the selected quests using one query snapshot; filters may use an ID cursor. */
   queryEvents(filter: EventFilter): Promise<Event[]>;

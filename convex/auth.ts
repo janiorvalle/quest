@@ -94,6 +94,23 @@ type MemberCredentials = ClientProtocolInput & {
   readonly auth_token?: string;
 };
 
+export type ExpensiveMemberQueryPage = {
+  readonly actor: string;
+  readonly cursorSection: string;
+  readonly functionName: "exportAll" | "federatedSnapshot" | "rawExportAll";
+};
+
+export function logExpensiveMemberQueryPage(page: ExpensiveMemberQueryPage): void {
+  // biome-ignore lint/suspicious/noConsole: Convex dashboard logs are the observability surface for expensive reads.
+  console.log(
+    JSON.stringify({
+      actor: page.actor,
+      function: page.functionName,
+      cursor_section: page.cursorSection,
+    }),
+  );
+}
+
 export async function requireMemberActor(
   ctx: Pick<MemberMutationContext, "runMutation">,
   credentials: MemberCredentials,

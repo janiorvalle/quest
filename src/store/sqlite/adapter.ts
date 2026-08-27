@@ -78,6 +78,7 @@ import type {
   StoreMigrationSession,
   WatchSubscription,
 } from "../port";
+import { parseBatchHistoryQuestIds } from "../port";
 import {
   SQLITE_MIGRATION_GLOBAL_GUARD,
   SQLITE_SCHEMA_DEFINITIONS,
@@ -1021,6 +1022,21 @@ export class SqliteStore implements QuestStore {
         this.#database,
         `${selectEventsSql} WHERE quest_id = ? ORDER BY id`,
         parsedId,
+      ).map(decodeEvent),
+    );
+  }
+
+  async readBatchHistory(questIds: readonly number[]): Promise<Event[]> {
+    const parsed = parseBatchHistoryQuestIds(questIds);
+    if (parsed.length === 0) {
+      return [];
+    }
+    const placeholders = parsed.map(() => "?").join(", ");
+    return this.#readTransaction(() =>
+      getRows<EventRow, SQLQueryBindings[]>(
+        this.#database,
+        `${selectEventsSql} WHERE quest_id IN (${placeholders}) ORDER BY id`,
+        ...parsed,
       ).map(decodeEvent),
     );
   }

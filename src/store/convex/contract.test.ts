@@ -17,7 +17,7 @@ import { ConvexStore } from "./adapter";
 import { ConvexBackupDatabase } from "./backup";
 import { ConvexBlobStore } from "./blob-store";
 import { closeConvexClientPair, convexApi, createConvexClientPair } from "./client";
-import { parseConvexEventPage } from "./pagination";
+import { CONVEX_EVENT_PAGE_MAX_ITEMS, parseConvexEventPage } from "./pagination";
 import { MINIMUM_QUEST_CLIENT_PROTOCOL } from "./protocol";
 
 const deployment = process.env["QUEST_CONVEX_TEST_URL"];
@@ -158,6 +158,128 @@ if (deployment === undefined || authToken === undefined) {
     );
   }
   defineBlobStoreContract("ConvexBlobStore contract against local deployment", blobStoreFactory);
+
+  test.serial(
+    "batch history ignores unrelated writes and rejects selected history changes",
+    async () => {
+      const clients = createConvexClientPair(deployment, { authToken });
+      const store = new ConvexStore(deployment, { clients });
+      const quest: NewQuest = {
+        repo: "batch-alpha",
+        area: "store",
+        kind: "task",
+        title: "batch history alpha",
+        description: "batch history consistency fixture",
+        opened_by: "contract/tester",
+        guild: null,
+        assignee: null,
+        status: "open",
+        verdict: null,
+        verdict_notes: null,
+        priority: 2,
+        pr: null,
+        predicted_files: [],
+        reopen_count: 0,
+        lease_expires_at: null,
+        backfill: false,
+      };
+      try {
+        await store.replaceAll(emptyDump);
+        const alpha = await store.addQuest(quest);
+        await store.addQuest({ ...quest, repo: "batch-beta", title: "batch history beta" });
+        const dump = await store.exportAll();
+        const eventHighWater = dump.events.reduce(
+          (highest, event) => Math.max(highest, event.id),
+          0,
+        );
+        await store.replaceAll({
+          ...dump,
+          events: [
+            ...dump.events,
+            ...Array.from({ length: CONVEX_EVENT_PAGE_MAX_ITEMS }, (_, index) => ({
+              id: eventHighWater + index + 1,
+              quest_id: alpha.id,
+              at: "2026-08-27T00:00:00.000Z",
+              actor: "contract/tester",
+              action: "update" as const,
+              detail: { index },
+            })),
+          ],
+        });
+
+        const first = parseConvexEventPage(
+          await clients.http.query(convexApi.batchHistory, {
+            auth_token: authToken,
+            cursor: null,
+            quest_ids: [alpha.id],
+          }),
+        );
+        expect(first.items).toHaveLength(CONVEX_EVENT_PAGE_MAX_ITEMS);
+        expect(first.next_cursor).not.toBeNull();
+        await store.addQuest({ ...quest, title: "unrelated batch write" });
+        const second = parseConvexEventPage(
+          await clients.http.query(convexApi.batchHistory, {
+            auth_token: authToken,
+            cursor: first.next_cursor,
+            quest_ids: [alpha.id],
+          }),
+        );
+        expect(second.items).toHaveLength(1);
+        expect(second.next_cursor).toBeNull();
+
+        const restarted = parseConvexEventPage(
+          await clients.http.query(convexApi.batchHistory, {
+            auth_token: authToken,
+            cursor: null,
+            quest_ids: [alpha.id],
+          }),
+        );
+        const restartedCursor = restarted.next_cursor;
+        if (restartedCursor === null) {
+          throw new Error("batch history fixture must require a second page");
+        }
+        await store.acceptQuest({ id: alpha.id, owner: "contract/tester" });
+        await expect(
+          clients.http.query(convexApi.batchHistory, {
+            auth_token: authToken,
+            cursor: restartedCursor,
+            quest_ids: [alpha.id],
+          }),
+        ).rejects.toThrow("CONVEX_SNAPSHOT_CHANGED");
+
+        const beforeRestore = await store.exportAll();
+        const restoreFirst = parseConvexEventPage(
+          await clients.http.query(convexApi.batchHistory, {
+            auth_token: authToken,
+            cursor: null,
+            quest_ids: [alpha.id],
+          }),
+        );
+        const restoreCursor = restoreFirst.next_cursor;
+        if (restoreCursor === null) {
+          throw new Error("batch history restore fixture must require a second page");
+        }
+        await store.replaceAll(beforeRestore);
+        await expect(
+          clients.http.query(convexApi.batchHistory, {
+            auth_token: authToken,
+            cursor: restoreCursor,
+            quest_ids: [alpha.id],
+          }),
+        ).rejects.toThrow("CONVEX_SNAPSHOT_CHANGED");
+        await expect(
+          clients.http.query(convexApi.batchHistory, {
+            auth_token: authToken,
+            cursor: null,
+            quest_ids: Array.from({ length: 129 }, (_, index) => index + 1),
+          }),
+        ).rejects.toThrow("BATCH_HISTORY_IDS_LIMIT");
+      } finally {
+        await store.replaceAll(emptyDump).catch(() => undefined);
+        await closeConvexClientPair(clients);
+      }
+    },
+  );
 
   test.serial("Convex lane conflicts include active leases with timezone offsets", async () => {
     const clients = createConvexClientPair(deployment, { authToken });

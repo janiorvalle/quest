@@ -229,6 +229,14 @@ export const convexApi = {
   events: makeFunctionReference<"query", AuthTokenInput & { readonly quest_id: number }, Event[]>(
     "quest:events",
   ),
+  batchHistory: makeFunctionReference<
+    "query",
+    AuthTokenInput & {
+      readonly cursor?: string | null;
+      readonly quest_ids: readonly number[];
+    },
+    ConvexEventPage
+  >("quest:batchHistory"),
   queryEvents: makeFunctionReference<
     "query",
     AuthTokenInput & {

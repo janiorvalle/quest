@@ -38,6 +38,7 @@ describe("QuestStore contract suite", () => {
       "chain invariants are enforced inside the write boundary",
       "backfilled adds enforce kind and verdict validity",
       "events and state changes commit together",
+      "batch history reads selected quests in stable order",
       "event queries support every individual filter",
       "event queries compose filters",
       "event query ranges include offset-equivalent endpoints",
