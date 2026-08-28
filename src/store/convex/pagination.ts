@@ -30,10 +30,35 @@ export interface ConvexEventCursor {
   readonly snapshot_generation: number;
 }
 
+export interface ConvexBatchHistoryCursor {
+  readonly version: 1;
+  readonly quest_index: number;
+  readonly database_cursor: string | null;
+  readonly snapshot_generation: number;
+  readonly restore_epoch: number;
+  readonly request_key: string;
+  readonly quest_event_high_waters: readonly {
+    readonly quest_id: number;
+    readonly event_high_water: number | null;
+  }[];
+}
+
 const convexEventCursorSchema = z.strictObject({
   version: z.literal(1),
   database_cursor: z.string().nullable(),
   snapshot_generation: z.int().nonnegative(),
+});
+
+const convexBatchHistoryCursorSchema = z.strictObject({
+  version: z.literal(1),
+  quest_index: z.int().nonnegative(),
+  database_cursor: z.string().nullable(),
+  snapshot_generation: z.int().nonnegative(),
+  restore_epoch: z.int().nonnegative(),
+  request_key: z.string(),
+  quest_event_high_waters: z.array(
+    z.strictObject({ quest_id: z.int().nonnegative(), event_high_water: z.int().nullable() }),
+  ),
 });
 
 export function encodeConvexEventCursor(cursor: ConvexEventCursor): string {
@@ -42,6 +67,14 @@ export function encodeConvexEventCursor(cursor: ConvexEventCursor): string {
 
 export function decodeConvexEventCursor(cursor: string): ConvexEventCursor {
   return convexEventCursorSchema.parse(JSON.parse(cursor));
+}
+
+export function encodeConvexBatchHistoryCursor(cursor: ConvexBatchHistoryCursor): string {
+  return JSON.stringify(convexBatchHistoryCursorSchema.parse(cursor));
+}
+
+export function decodeConvexBatchHistoryCursor(cursor: string): ConvexBatchHistoryCursor {
+  return convexBatchHistoryCursorSchema.parse(JSON.parse(cursor));
 }
 
 export function parseConvexEventPage(value: unknown): ConvexEventPage {

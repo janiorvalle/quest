@@ -64,6 +64,7 @@ const scenarios = [
   { name: "chain invariants are enforced inside the write boundary", run: verifyChainInvariants },
   { name: "backfilled adds enforce kind and verdict validity", run: verifyBackfilledAdds },
   { name: "events and state changes commit together", run: verifyEventStateAtomicity },
+  { name: "batch history reads selected quests in stable order", run: verifyBatchHistory },
   { name: "event queries support every individual filter", run: verifyEventFilters },
   { name: "event queries compose filters", run: verifyCombinedEventFilters },
   {
@@ -797,6 +798,23 @@ async function verifyEventFilters(factory: QuestStoreFactory): Promise<void> {
     );
     expect(await store.queryEvents({ until: shiftTimestamp(firstAdd.at, -1) })).toEqual([]);
     expect(await store.queryEvents({ since: shiftTimestamp(lastEvent.at, 1) })).toEqual([]);
+  });
+}
+
+async function verifyBatchHistory(factory: QuestStoreFactory): Promise<void> {
+  await withStore(factory, async (store) => {
+    const fixture = await createEventQueryFixture(store);
+    requireContract(
+      store.readBatchHistory !== undefined,
+      "the store must implement the additive batch history read",
+    );
+    const expected = [
+      ...(await store.events(fixture.first.id)),
+      ...(await store.events(fixture.second.id)),
+    ].sort((left, right) => left.id - right.id);
+
+    expect(await store.readBatchHistory([fixture.second.id, fixture.first.id])).toEqual(expected);
+    expect(await store.readBatchHistory([])).toEqual([]);
   });
 }
 

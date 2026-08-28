@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,6 +22,9 @@ const actor = "janior";
 const scope: QuestScope = { repo: "quest" };
 const QUEST_COUNT = 200;
 const TOGGLES_PER_QUEST = 10;
+
+// Windows needs more than the suite default to write each 4,200-event SQLite fixture.
+setDefaultTimeout(60_000);
 
 type ReadCounts = ReadonlyMap<string, number>;
 

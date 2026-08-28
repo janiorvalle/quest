@@ -1,8 +1,8 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { ConvexError } from "convex/values";
 
 import { MINIMUM_QUEST_CLIENT_PROTOCOL, QUEST_CLIENT_PROTOCOL } from "../src/store/convex/protocol";
-import { requireClientProtocol } from "./auth";
+import { logExpensiveMemberQueryPage, requireClientProtocol } from "./auth";
 
 function captureProtocolFailure(
   clientProtocol: number | undefined,
@@ -31,4 +31,21 @@ test("rejects missing and outdated Quest clients with an upgrade instruction", (
 
 test("accepts the current Quest client protocol", () => {
   expect(() => requireClientProtocol(QUEST_CLIENT_PROTOCOL)).not.toThrow();
+});
+
+test("logs only the member name and page coordinates for an expensive read", () => {
+  const log = spyOn(console, "log").mockImplementation(() => undefined);
+  try {
+    logExpensiveMemberQueryPage({
+      actor: "janior",
+      functionName: "federatedSnapshot",
+      cursorSection: "events",
+    });
+
+    expect(log).toHaveBeenCalledWith(
+      '{"actor":"janior","function":"federatedSnapshot","cursor_section":"events"}',
+    );
+  } finally {
+    log.mockRestore();
+  }
 });

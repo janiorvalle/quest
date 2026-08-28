@@ -7,7 +7,9 @@ import {
   CONVEX_DUMP_PAGE_MAX_ITEMS,
   type ConvexDumpPage,
   createConvexRestorePages,
+  decodeConvexBatchHistoryCursor,
   decodeConvexListCursor,
+  encodeConvexBatchHistoryCursor,
   encodeConvexListCursor,
   parseConvexListPage,
 } from "./pagination";
@@ -98,4 +100,22 @@ test("list cursors and pages preserve bounded snapshot state", () => {
     fencedRepositories: ["alpha", "zeta"],
     quests: [],
   });
+});
+
+test("batch history cursors bind pagination to one ID set and snapshot", () => {
+  const cursor = {
+    version: 1,
+    quest_index: 3,
+    database_cursor: "next-event",
+    snapshot_generation: 42,
+    restore_epoch: 40,
+    request_key: "[1,2,3,4]",
+    quest_event_high_waters: [
+      { quest_id: 1, event_high_water: 8 },
+      { quest_id: 2, event_high_water: 13 },
+      { quest_id: 3, event_high_water: null },
+    ],
+  } as const;
+
+  expect(decodeConvexBatchHistoryCursor(encodeConvexBatchHistoryCursor(cursor))).toEqual(cursor);
 });

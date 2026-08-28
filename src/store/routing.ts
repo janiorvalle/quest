@@ -41,6 +41,7 @@ import type {
   QuestWatchListener,
   WatchSubscription,
 } from "./port";
+import { parseBatchHistoryQuestIds } from "./port";
 
 export interface FederatedStoreSource {
   readonly blobStore: BlobStore;
@@ -572,6 +573,33 @@ async function matchingQuestSources(
   return matches.flatMap((match) => (match === null ? [] : [match]));
 }
 
+async function matchingQuestSourceReads(
+  reads: readonly FederatedSourceRead[],
+  id: number,
+  repository?: string,
+): Promise<readonly FederatedQuestMatch[]> {
+  const matches = await Promise.all(
+    reads.map(async ({ source, snapshot }) => {
+      if (snapshot !== undefined) {
+        const quest = snapshot.dump.quests.find(
+          (candidate) =>
+            candidate.id === id &&
+            (repository === undefined || candidate.repo === repository) &&
+            sourceIncludesRepository(source, candidate.repo, new Set(snapshot.fencedRepositories)),
+        );
+        return quest === undefined ? null : { quest, source, snapshot };
+      }
+      const quest = await source.questStore.getQuest(id);
+      return quest !== null &&
+        (repository === undefined || quest.repo === repository) &&
+        source.includeRepository(quest.repo)
+        ? { quest, source }
+        : null;
+    }),
+  );
+  return matches.flatMap((match) => (match === null ? [] : [match]));
+}
+
 function requireUnambiguousQuest(matches: readonly FederatedQuestMatch[], id: number): void {
   if (matches.length > 1) {
     throw ambiguousDisplayIdError(id);
@@ -838,6 +866,58 @@ export class FederatedQuestStore implements QuestStore {
         )
           .map((event) => ({ ...event, repo: match.quest.repo }))
           .sort(compareEvents);
+  }
+
+  async readBatchHistory(questIds: readonly number[]): Promise<Event[]> {
+    const parsedQuestIds = parseBatchHistoryQuestIds(questIds);
+    const reads = await this.#readSourceSnapshots(this.#repositoryScope);
+    const matches = await Promise.all(
+      parsedQuestIds.map(async (questId) => {
+        const matches = await matchingQuestSourceReads(reads, questId, this.#repositoryScope);
+        requireUnambiguousQuest(matches, questId);
+        return matches[0];
+      }),
+    );
+    const matchesBySource = new Map<FederatedStoreSource, FederatedQuestMatch[]>();
+    for (const match of matches) {
+      if (match !== undefined) {
+        const sourceMatches = matchesBySource.get(match.source) ?? [];
+        sourceMatches.push(match);
+        matchesBySource.set(match.source, sourceMatches);
+      }
+    }
+    const eventGroups = await Promise.all(
+      [...matchesBySource].map(async ([source, sourceMatches]) => {
+        const sourceQuestIds = sourceMatches.map(({ quest }) => quest.id);
+        const events =
+          source.questStore.readBatchHistory === undefined
+            ? (
+                await Promise.all(
+                  sourceQuestIds.map((questId) => source.questStore.events(questId)),
+                )
+              )
+                .flat()
+                .sort(compareEvents)
+            : await source.questStore.readBatchHistory(sourceQuestIds);
+        const readError = sourceReadError(source, this.#repositoryScope);
+        if (readError !== undefined) {
+          throw readError;
+        }
+        const repositoriesByQuestId = new Map(
+          sourceMatches.map(({ quest }) => [quest.id, quest.repo] as const),
+        );
+        return events.map((event) => {
+          const repository = repositoriesByQuestId.get(event.quest_id);
+          if (repository === undefined) {
+            throw new FederatedReadError(
+              `[BATCH_HISTORY_EVENT_OUTSIDE_BATCH] a routed backend returned history for unrequested quest ${event.quest_id}; retry after all Quest backends run matching versions`,
+            );
+          }
+          return { ...event, repo: repository };
+        });
+      }),
+    );
+    return eventGroups.flat().sort(compareEvents);
   }
 
   async queryEvents(filter: EventFilter): Promise<Event[]> {

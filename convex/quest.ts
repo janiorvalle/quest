@@ -70,6 +70,7 @@ import {
   CONVEX_DUMP_PAGE_MAX_ITEMS,
   CONVEX_EVENT_PAGE_MAX_BYTES,
   CONVEX_EVENT_PAGE_MAX_ITEMS,
+  type ConvexBatchHistoryCursor,
   type ConvexDumpCursor,
   type ConvexDumpPage,
   type ConvexEventCursor,
@@ -77,9 +78,11 @@ import {
   type ConvexListCursor,
   type ConvexListPage,
   type ConvexRestorePage,
+  decodeConvexBatchHistoryCursor,
   decodeConvexDumpCursor,
   decodeConvexEventCursor,
   decodeConvexListCursor,
+  encodeConvexBatchHistoryCursor,
   encodeConvexDumpCursor,
   encodeConvexEventCursor,
   encodeConvexListCursor,
@@ -91,8 +94,9 @@ import type {
   StoreEvidenceSampleInspection,
   StoreStaleClaimsInspection,
 } from "../src/store/port";
+import { parseBatchHistoryQuestIds } from "../src/store/port";
 import { assertAdminSecret } from "./admin";
-import { requireMemberActor, requireMemberQueryActor } from "./auth";
+import { logExpensiveMemberQueryPage, requireMemberActor, requireMemberQueryActor } from "./auth";
 import type schema from "./schema";
 
 const clientProtocolArgs = { client_protocol: v.optional(v.number()) };
@@ -211,6 +215,7 @@ const RESTORE_LEASE_DURATION_MS = 10 * 60 * 1_000;
 const RESTORE_MUTATION_MAXIMUM_BYTES_READ = 2 * 1_024 * 1_024;
 const RESTORE_MUTATION_MAXIMUM_ROWS_READ = 256;
 const SNAPSHOT_GENERATION_COUNTER = "snapshot_generation";
+const RESTORE_EPOCH_COUNTER = "restore_epoch";
 const FENCE_GENERATION_COUNTER = "fence_generation";
 type ConvexListMode = ConvexListCursor["mode"];
 const DOCTOR_EVENT_RATE_SAMPLE_SIZE = 64;
@@ -711,6 +716,14 @@ async function snapshotGeneration(ctx: QueryContext): Promise<number> {
   return counter?.value ?? eventSequenceHighWater(ctx);
 }
 
+async function restoreEpoch(ctx: QueryContext): Promise<number> {
+  const counter = await ctx.db
+    .query("counters")
+    .withIndex("by_name", (query) => query.eq("name", RESTORE_EPOCH_COUNTER))
+    .unique();
+  return counter?.value ?? 0;
+}
+
 async function fenceGeneration(ctx: QueryContext): Promise<number> {
   const counter = await ctx.db
     .query("counters")
@@ -965,6 +978,133 @@ async function readEventQueryPage(
           ...cursor,
           database_cursor: result.continueCursor,
         }),
+  };
+}
+
+function parseBatchHistoryCursor(cursor: string): ConvexBatchHistoryCursor {
+  try {
+    return decodeConvexBatchHistoryCursor(cursor);
+  } catch {
+    return failQuestDomain(
+      "CONVEX_SNAPSHOT_CURSOR_INVALID",
+      "the Convex batch history cursor is invalid or belongs to another deployment; restart the batch history read and retry with the first cursor it returns",
+    );
+  }
+}
+
+async function batchHistoryCursor(
+  ctx: QueryContext,
+  encodedCursor: string | null,
+  requestKey: string,
+  questIds: readonly number[],
+): Promise<ConvexBatchHistoryCursor> {
+  const questCount = questIds.length;
+  const cursor =
+    encodedCursor === null
+      ? {
+          version: 1 as const,
+          quest_index: 0,
+          database_cursor: null,
+          snapshot_generation: await snapshotGeneration(ctx),
+          restore_epoch: await restoreEpoch(ctx),
+          request_key: requestKey,
+          quest_event_high_waters: await batchHistoryEventHighWaters(ctx, questIds),
+        }
+      : parseBatchHistoryCursor(encodedCursor);
+  if (cursor.request_key !== requestKey || (questCount > 0 && cursor.quest_index >= questCount)) {
+    failQuestDomain(
+      "CONVEX_SNAPSHOT_CURSOR_INVALID",
+      "the Convex batch history cursor does not match this quest ID batch; restart the read and keep its cursor with the same quest IDs",
+    );
+  }
+  if ((await restoreEpoch(ctx)) !== cursor.restore_epoch) {
+    failQuestDomain(
+      "CONVEX_SNAPSHOT_CHANGED",
+      "the Convex store was restored while its paginated batch history was being read; restart the read to capture one complete consistency point",
+    );
+  }
+  if (
+    (await snapshotGeneration(ctx)) !== cursor.snapshot_generation &&
+    !(await batchHistoryEventsAreStable(ctx, cursor))
+  ) {
+    failQuestDomain(
+      "CONVEX_SNAPSHOT_CHANGED",
+      "a requested quest history changed while its paginated batch history was being read; restart the read to capture one complete consistency point",
+    );
+  }
+  return cursor;
+}
+
+async function batchHistoryEventHighWaters(
+  ctx: QueryContext,
+  questIds: readonly number[],
+): Promise<ConvexBatchHistoryCursor["quest_event_high_waters"]> {
+  return Promise.all(
+    questIds.map(async (questId) => {
+      const event = await ctx.db
+        .query("events")
+        .withIndex("by_quest_id", (query) => query.eq("quest_id", questId))
+        .order("desc")
+        .first();
+      return {
+        quest_id: questId,
+        event_high_water: event === null ? null : parseEventDocument(event).id,
+      };
+    }),
+  );
+}
+
+async function batchHistoryEventsAreStable(
+  ctx: QueryContext,
+  cursor: ConvexBatchHistoryCursor,
+): Promise<boolean> {
+  const current = await batchHistoryEventHighWaters(
+    ctx,
+    cursor.quest_event_high_waters.map(({ quest_id }) => quest_id),
+  );
+  return stableSerialize(current) === stableSerialize(cursor.quest_event_high_waters);
+}
+
+function nextBatchHistoryCursor(
+  cursor: ConvexBatchHistoryCursor,
+  continueCursor: string,
+  isDone: boolean,
+  questCount: number,
+): string | null {
+  const questIndex = isDone ? cursor.quest_index + 1 : cursor.quest_index;
+  if (questIndex >= questCount) {
+    return null;
+  }
+  return encodeConvexBatchHistoryCursor({
+    ...cursor,
+    quest_index: questIndex,
+    database_cursor: isDone ? null : continueCursor,
+  });
+}
+
+async function readBatchHistoryPage(
+  ctx: QueryContext,
+  questIds: readonly number[],
+  encodedCursor: string | null,
+): Promise<ConvexEventPage> {
+  const cursor = await batchHistoryCursor(ctx, encodedCursor, stableSerialize(questIds), questIds);
+  const questId = questIds[cursor.quest_index];
+  if (questId === undefined) {
+    return { items: [], next_cursor: null };
+  }
+  const result = await ctx.db
+    .query("events")
+    .withIndex("by_quest_id", (query) => query.eq("quest_id", questId))
+    .order("asc")
+    .paginate(eventPaginationOptions(cursor.database_cursor));
+  return {
+    items: result.page.map(parseEventDocument).sort((left, right) => left.id - right.id),
+    next_cursor: nextBatchHistoryCursor(
+      cursor,
+      result.continueCursor,
+      result.isDone,
+      questIds.length,
+    ),
   };
 }
 
@@ -2903,14 +3043,20 @@ export const federatedSnapshot = queryGeneric({
     ...clientProtocolArgs,
   },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args);
+    const actor = await requireMemberQueryActor(ctx, args);
     const fencedRepositories = await activeFencedRepositories(ctx);
     const cursor = parseDumpCursor(
       args.cursor ?? (await createDumpCursor(ctx, now(), false, fencedRepositories)),
     );
     await requireStableDumpCursor(ctx, cursor, cursor.lease_cutoff, false, fencedRepositories);
+    const page = await readDumpPage(ctx, cursor);
+    logExpensiveMemberQueryPage({
+      actor,
+      functionName: "federatedSnapshot",
+      cursorSection: cursor.section,
+    });
     return {
-      ...(await readDumpPage(ctx, cursor)),
+      ...page,
       fencedRepositories,
     };
   },
@@ -3021,6 +3167,21 @@ export const events = queryGeneric({
   },
 });
 
+export const batchHistory = queryGeneric({
+  args: {
+    auth_token: v.optional(v.string()),
+    cursor: v.optional(v.union(v.string(), v.null())),
+    quest_ids: v.array(v.number()),
+    ...clientProtocolArgs,
+  },
+  handler: async (ctx, args) => {
+    await requireMemberQueryActor(ctx, args);
+    await requireNoPartialRestore(ctx);
+    const questIds = parseBatchHistoryQuestIds(args.quest_ids);
+    return readBatchHistoryPage(ctx, questIds, args.cursor ?? null);
+  },
+});
+
 export const queryEvents = queryGeneric({
   args: {
     auth_token: v.optional(v.string()),
@@ -3048,13 +3209,19 @@ export const exportAll = queryGeneric({
     ...clientProtocolArgs,
   },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args);
+    const actor = await requireMemberQueryActor(ctx, args);
     const leaseCutoff = parseLeaseCutoff(args.lease_cutoff);
     const cursor = parseDumpCursor(
       args.cursor ?? (await createDumpCursor(ctx, leaseCutoff, false)),
     );
     await requireStableDumpCursor(ctx, cursor, leaseCutoff, false);
-    return readDumpPage(ctx, cursor);
+    const page = await readDumpPage(ctx, cursor);
+    logExpensiveMemberQueryPage({
+      actor,
+      functionName: "exportAll",
+      cursorSection: cursor.section,
+    });
+    return page;
   },
 });
 
@@ -3065,10 +3232,16 @@ export const rawExportAll = queryGeneric({
     ...clientProtocolArgs,
   },
   handler: async (ctx, args) => {
-    await requireMemberQueryActor(ctx, args);
+    const actor = await requireMemberQueryActor(ctx, args);
     const cursor = parseDumpCursor(args.cursor ?? (await createDumpCursor(ctx, "", true)));
     await requireStableDumpCursor(ctx, cursor, "", true);
-    return readDumpPage(ctx, cursor);
+    const page = await readDumpPage(ctx, cursor);
+    logExpensiveMemberQueryPage({
+      actor,
+      functionName: "rawExportAll",
+      cursorSection: cursor.section,
+    });
+    return page;
   },
 });
 
@@ -3664,6 +3837,10 @@ export const commitRestore = mutationGeneric({
     const committedSnapshotGeneration = sequenceFloorSnapshotGeneration + 1;
     await ctx.db.insert("counters", {
       name: SNAPSHOT_GENERATION_COUNTER,
+      value: committedSnapshotGeneration,
+    });
+    await ctx.db.insert("counters", {
+      name: RESTORE_EPOCH_COUNTER,
       value: committedSnapshotGeneration,
     });
     const timestamp = now();
