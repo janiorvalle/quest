@@ -10,50 +10,40 @@ team. Quest does not deploy to, or require access to, anyone else's project.
 - A Convex account, or a self-hosted Convex backend
 - The Convex CLI login or deployment credentials for the team's project
 
-## GitHub release deployment
+## GitHub releases
 
 The repository's `Release` workflow builds and verifies the five supported
 executables, publishes the binaries, `checksums.txt`, and both installers, then
-smoke-tests the published installer before deploying the Convex backend. The
-publication step always completes before the backend deployment starts, so a
-client is never pointed at a backend version it cannot download.
+smoke-tests the published installer. That is all it does: Quest is open source,
+and the workflow never deploys anyone's Convex backend and never receives a
+deploy key. If publication or the installer smoke fails, the workflow removes
+the incomplete release.
 
-The deployment job initializes Convex's ignored code-generation files on its
-clean runner before running the version-aware deploy command. If deployment
-fails, the published release is left in place: a lost deploy response can mean
-that Convex accepted the deployment, so an administrator must inspect the
-backend before retrying rather than deleting a client release that may already
-match it.
+Push a tag such as `v0.24.0` to build and publish that release. The same
+workflow can be started from **Actions > Release > Run workflow** with the
+version input `0.24.0`; the workflow creates the tag at the selected commit.
+`QUEST_VERSION=0.24.0 make release` remains the local build-and-publish
+fallback when Actions is unavailable and keeps the same five-target build and
+verification path.
 
-One-time repository setup:
+Deploying a backend is a separate, per-team step that always happens after the
+release exists, so a client is never pointed at a backend version it cannot
+download. The backend fences clients by the release version baked into its
+bundle, so a plain `bunx convex deploy` (which bakes a development version)
+locks a cloud deployment closed until a versioned deploy replaces it.
 
-1. Create a production Convex deploy key with the `deployment:deploy`
-   permission for the team's production deployment.
-2. Create a GitHub Actions environment named `production`. Require production
-   reviewers and restrict its deployment refs to protected `main` and `v*`
-   tags; run manual releases from `main`.
-3. Add the key as the `production` environment secret
-   `CONVEX_DEPLOY_KEY`.
-
-The key is read only by the protected release jobs and is never committed,
-placed in a workflow file, or printed in logs. The deployment job passes the release version as
-`QUEST_VERSION` while running `bun run convex:deploy`, which lets the released
-Convex bundle carry the same version as the downloaded CLI.
-
-The first release after a wire-contract migration is still an administrator
-ceremony: complete the conversion in **Migrate deployments from ready to open**
-before releasing that contract. The workflow deliberately does not receive
-`QUEST_ADMIN_SECRET` or mutate existing rows; it publishes the client before
-deploying the versioned backend as required for ordinary releases.
-
-After setup, push a tag such as `v0.24.0` to build and publish that release.
-The same workflow can be started from **Actions > Release > Run workflow** with
-the version input `0.24.0`; the workflow creates the tag at the selected commit.
-
-`QUEST_VERSION=0.24.0 make release` remains the local build-and-publish fallback
-when Actions is unavailable. It keeps the same five-target build and
-verification path. After it publishes, deploy the matching versioned backend
-with the same wrapper used by Actions:
+Deploy from the released source, never from a checkout that has moved past it:
+the stamped version must describe the functions actually deployed, or a
+released client will pass the fence against a backend it was never tested with.
+A release is final only when its `Release` workflow run has finished
+successfully: the installer smoke runs after publication, and a failed smoke
+deletes the release, so a backend deployed the moment the release appeared
+would fence clients onto a version nobody can download. Wait for the run to
+complete (for example `gh run watch`) before deploying. Then check out the
+release tag (`git checkout v0.24.0`) and deploy the matching versioned backend
+with the wrapper. Prereleases (for example
+`0.24.0-beta.1`) publish client binaries only; the backend fence accepts stable
+versions, so deploy backends from stable releases:
 
 ```sh
 QUEST_VERSION=0.24.0 bun run convex:deploy
