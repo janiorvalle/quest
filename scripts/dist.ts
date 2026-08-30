@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { artifactName, resolveDistVersion, selectDistTargets } from "./dist-config";
 import { ensureDistributionDependencies } from "./dist-deps";
 import { buildStandaloneExecutable } from "./standalone-build";
+import { questVersionDefine } from "./version-stamp";
 
 const rootDirectory = resolve(import.meta.dir, "..");
 const distDirectory = join(rootDirectory, "dist");
@@ -33,9 +34,7 @@ for (const target of targets) {
   const name = artifactName(version, target);
   const outputPath = join(distDirectory, name);
   await buildStandaloneExecutable({
-    define: {
-      __QUEST_VERSION__: JSON.stringify(version),
-    },
+    define: questVersionDefine(version),
     entrypoint,
     outfile: outputPath,
     requiredAssets,

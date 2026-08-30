@@ -33,6 +33,11 @@ bun install
 bunx convex dev --once --configure=new
 ```
 
+That first `dev` command only creates the local project selection. It uploads a
+development bundle, so it is not the production deployment ceremony. `make
+backend` configures its isolated local deployment to accept development clients;
+other targets require the runtime variable below.
+
 Initialize Convex's ignored local typecheck config before the first strict
 deployment check:
 
@@ -40,23 +45,39 @@ deployment check:
 bunx convex codegen --init
 ```
 
-Deploy the same `convex/` directory to the project's production deployment:
+Deploy the same `convex/` directory to the project's production deployment,
+stamping the release version into the Convex bundle before Convex typechecks and
+pushes it:
 
 ```sh
-bunx convex deploy
+QUEST_VERSION=1.2.3 bun run convex:deploy
 ```
 
-The deploy command typechecks, bundles, and pushes the functions, schema, and
-indexes from this repository. The deployment URL printed by the CLI is the URL
-used by quest's Convex store configuration.
+The wrapper temporarily writes the literal used by the Convex bundle from the
+same `__QUEST_VERSION__` stamp used by the CLI executable, restores the source
+file after the deploy exits, and passes any extra Convex flags through. The
+deployment URL printed by the CLI is the URL used by quest's Convex store
+configuration. `QUEST_MIN_CLIENT_VERSION`, when set in the Convex environment,
+may raise that stamped floor but can never lower it.
 
 For a self-hosted backend, put `CONVEX_SELF_HOSTED_URL` and
 `CONVEX_SELF_HOSTED_ADMIN_KEY` in an env file and pass it to both commands:
 
 ```sh
 bunx convex dev --once --env-file .env.self-hosted
-bunx convex deploy --env-file .env.self-hosted
+QUEST_VERSION=1.2.3 bun run convex:deploy --env-file .env.self-hosted
 ```
+
+For self-hosted development, set the variable on the same target selected by the
+self-hosted env file. `--env-file` selects connection credentials; it does not
+set function runtime variables:
+
+```sh
+printf '1' | bunx convex env set --env-file .env.self-hosted QUEST_ALLOW_DEV_CLIENTS
+```
+
+For an already selected local or self-hosted target, omit `--env-file`. Do not set
+this variable on a cloud production deployment.
 
 Keep `.env.local` and any deployment-key file out of version control.
 
@@ -126,29 +147,34 @@ retried until the deployment secret and supplied value agree.
 
 ## Migrate deployments from ready to open
 
-Wire contract v10 removes `ready`: every unclaimed quest is `open`. Upgrade each
-deployment in this order so old rows remain readable throughout the rollout:
+Wire contract v10 removes `ready`: every unclaimed quest is `open`. Because every
+release deployment rejects older clients immediately, publish the v10 Quest
+binary before deploying the v10 functions:
 
-1. Deploy the v10 Convex functions. Their storage validator temporarily accepts
-   legacy `ready` rows, and every read translates them to `open`.
-2. Run the admin-gated conversion against that deployment:
+1. Release the v10 Quest binary and install it on the administrator machine. The
+   new client can still communicate with a pre-v10 backend while the rollout is
+   in progress, but do not run the ready-status migration until the new functions
+   are deployed.
+2. Deploy the v10 Convex functions to one target at a time with the same stable
+   `QUEST_VERSION` as the binary. Their storage validator accepts legacy `ready`
+   rows, and every read translates them to `open`.
+3. Run the admin-gated conversion against that deployment:
 
    ```sh
    QUEST_ADMIN_SECRET="..." quest migrate --ready-statuses \
      --deployment <deployment-url>
    ```
 
-3. Record the returned `converted`, `unchanged`, and `total` counts. Run the same
+4. Record the returned `converted`, `unchanged`, and `total` counts. Run the same
    command once more; `converted` must be `0`, proving the conversion is
    idempotent.
-4. Release the v10 Quest binary only after every target deployment has completed
-   the conversion.
 
 When `QUEST_ADMIN_SECRET` is unset, Quest asks for it without echoing. It is sent
 in the Convex request body and never appears in command arguments. The mutation
 changes only quest rows. Historical events are append-only and remain
-byte-for-byte unchanged. A v9 binary rejects v10 logical dumps; do not reverse
-the release order.
+byte-for-byte unchanged. Older clients receive `QUEST_CLI_OUTDATED` and upgrade
+through the published binary; there is no grace window. Do not deploy the new
+functions before the binary is available for that self-heal path.
 
 ## First invite
 

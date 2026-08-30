@@ -273,6 +273,24 @@ describe("platform directories", () => {
     expect(platform.directories.state).toBe("/home/example/.local/state/quest");
   });
 
+  test("uses the installer-selected directory for the executable", () => {
+    const posixPlatform = createPlatform({
+      platform: "linux",
+      homeDirectory: "/home/example",
+      environment: { QUEST_INSTALL_DIR: "/opt/quest/bin" },
+    });
+    expect(posixPlatform.directories.install).toBe("/opt/quest/bin");
+    expect(posixPlatform.directories.executable).toBe("/opt/quest/bin/quest");
+
+    const windowsPlatform = createPlatform({
+      platform: "win32",
+      homeDirectory: windowsHome,
+      environment: { QUEST_INSTALL_DIR: "D:\\Tools\\Quest" },
+    });
+    expect(windowsPlatform.directories.install).toBe("D:\\Tools\\Quest");
+    expect(windowsPlatform.directories.executable).toBe("D:\\Tools\\Quest\\quest.exe");
+  });
+
   test("resolves Windows directories from application data variables", () => {
     const platform = createPlatform({
       platform: "win32",

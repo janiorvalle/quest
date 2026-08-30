@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test --timeout 20000",
     "check": "bun run lint && bun run typecheck && bun run test",
+    "convex:deploy": "bun run scripts/convex-deploy.ts",
     "dist": "bun run scripts/dist.ts && bun run scripts/verify-dist.ts",
     "dist:smoke": "bun run dist && bun run scripts/install-smoke.ts"
   },

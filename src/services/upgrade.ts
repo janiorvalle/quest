@@ -20,6 +20,7 @@ import {
   hostDistributionTarget,
 } from "../distribution";
 import type { ExecutableReplacementOutcome, ExecutableReplacer } from "../platform";
+import { compareQuestVersions } from "../store/convex/protocol";
 
 export const DEFAULT_UPGRADE_REPOSITORY = "janiorvalle/quest";
 
@@ -152,11 +153,6 @@ interface LatestRelease {
   readonly repository: string;
   readonly target: DistributionTarget;
   readonly version: string;
-}
-
-interface ComparableVersion {
-  readonly numbers: readonly number[];
-  readonly prerelease: readonly string[];
 }
 
 function defaultHttpClient(token: string | undefined): UpgradeHttpClient {
@@ -417,96 +413,9 @@ function checksumForArtifact(checksumText: string, artifactName: string): string
   );
 }
 
-function comparableVersion(version: string): ComparableVersion | undefined {
-  const [baseAndPrerelease, build] = version.replace(/^v/u, "").split("+");
-  if (build !== undefined && build === "") {
-    return undefined;
-  }
-  const [base, prerelease = ""] = baseAndPrerelease?.split("-") ?? [];
-  if (base === undefined || base === "") {
-    return undefined;
-  }
-  const numberParts = base.split(".");
-  if (numberParts.some((part) => !/^\d+$/u.test(part))) {
-    return undefined;
-  }
-  const numbers = numberParts.map((part) => Number(part));
-  if (numbers.some((part) => !Number.isSafeInteger(part))) {
-    return undefined;
-  }
-  return {
-    numbers,
-    prerelease: prerelease === "" ? [] : prerelease.split("."),
-  };
-}
-
-function comparePrereleaseIdentifiers(left: string, right: string): number {
-  const leftNumber = /^\d+$/u.test(left) ? Number(left) : undefined;
-  const rightNumber = /^\d+$/u.test(right) ? Number(right) : undefined;
-  if (leftNumber !== undefined && rightNumber !== undefined) {
-    return Math.sign(leftNumber - rightNumber);
-  }
-  if (leftNumber !== undefined) {
-    return -1;
-  }
-  if (rightNumber !== undefined) {
-    return 1;
-  }
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function compareNumberSequences(left: readonly number[], right: readonly number[]): number {
-  const count = Math.max(left.length, right.length);
-  for (let index = 0; index < count; index += 1) {
-    const difference = (left[index] ?? 0) - (right[index] ?? 0);
-    if (difference !== 0) {
-      return Math.sign(difference);
-    }
-  }
-  return 0;
-}
-
-function comparePrereleaseVersions(left: readonly string[], right: readonly string[]): number {
-  if (left.length === 0 && right.length !== 0) {
-    return 1;
-  }
-  if (left.length !== 0 && right.length === 0) {
-    return -1;
-  }
-  const countOfIdentifiers = Math.max(left.length, right.length);
-  for (let index = 0; index < countOfIdentifiers; index += 1) {
-    const leftIdentifier = left[index];
-    const rightIdentifier = right[index];
-    if (leftIdentifier === undefined) {
-      return -1;
-    }
-    if (rightIdentifier === undefined) {
-      return 1;
-    }
-    const difference = comparePrereleaseIdentifiers(leftIdentifier, rightIdentifier);
-    if (difference !== 0) {
-      return difference;
-    }
-  }
-  return 0;
-}
-
-function compareVersions(left: ComparableVersion, right: ComparableVersion): number {
-  const numericDifference = compareNumberSequences(left.numbers, right.numbers);
-  return numericDifference === 0
-    ? comparePrereleaseVersions(left.prerelease, right.prerelease)
-    : numericDifference;
-}
-
 function newerRelease(latest: string, current: string): boolean {
-  if (latest === current) {
-    return false;
-  }
-  const latestComparable = comparableVersion(latest);
-  const currentComparable = comparableVersion(current);
-  return latestComparable === undefined || currentComparable === undefined
-    ? true
-    : compareVersions(latestComparable, currentComparable) > 0;
+  const comparison = compareQuestVersions(latest, current);
+  return comparison === undefined || comparison > 0;
 }
 
 function lookupResult(currentVersion: string, release: LatestRelease): UpgradeLookupResult {
