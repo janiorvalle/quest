@@ -12,9 +12,13 @@ import { ConvexError, v } from "convex/values";
 
 import {
   type ClientProtocolInput,
+  compareQuestVersions,
+  isStableQuestVersion,
   MINIMUM_QUEST_CLIENT_PROTOCOL,
+  QUEST_DEV_VERSION,
 } from "../src/store/convex/protocol";
 import type schema from "./schema";
+import { deployedQuestVersion } from "./version";
 
 export type MemberMutationContext = GenericMutationCtx<
   DataModelFromSchemaDefinition<typeof schema>
@@ -70,11 +74,83 @@ export const questApiKeys = new ApiKeys(componentApiKeys(), {
 
 type MemberAuthErrorCode =
   | "QUEST_CLI_OUTDATED"
+  | "QUEST_CLIENT_VERSION_CONFIG_INVALID"
   | "QUEST_CONVEX_TOKEN_REQUIRED"
   | "QUEST_CONVEX_TOKEN_INVALID";
 
+const MINIMUM_CLIENT_VERSION_ENVIRONMENT_VARIABLE = "QUEST_MIN_CLIENT_VERSION";
+const ALLOW_DEV_CLIENTS_ENVIRONMENT_VARIABLE = "QUEST_ALLOW_DEV_CLIENTS";
+
 function failMemberAuth(code: MemberAuthErrorCode, message: string): never {
   throw new ConvexError({ code, message });
+}
+
+function developmentClientsAllowed(): boolean {
+  return process.env[ALLOW_DEV_CLIENTS_ENVIRONMENT_VARIABLE] === "1";
+}
+
+function minimumClientVersion(): string {
+  const configuredMinimum = process.env[MINIMUM_CLIENT_VERSION_ENVIRONMENT_VARIABLE]?.trim();
+  if (!isStableQuestVersion(deployedQuestVersion)) {
+    if (deployedQuestVersion !== QUEST_DEV_VERSION || !developmentClientsAllowed()) {
+      return failMemberAuth(
+        "QUEST_CLIENT_VERSION_CONFIG_INVALID",
+        "this Convex bundle has no valid baked Quest release version; deploy again with `QUEST_VERSION=x.y.z bun run convex:deploy`, then retry. No read or mutation was attempted.",
+      );
+    }
+    if (configuredMinimum === undefined || configuredMinimum === "") {
+      return deployedQuestVersion;
+    }
+    if (!isStableQuestVersion(configuredMinimum)) {
+      return failMemberAuth(
+        "QUEST_CLIENT_VERSION_CONFIG_INVALID",
+        "QUEST_MIN_CLIENT_VERSION must be a stable released semantic version such as 1.2.3; set it before retrying. No read or mutation was attempted.",
+      );
+    }
+    return configuredMinimum;
+  }
+  if (configuredMinimum === undefined || configuredMinimum === "") {
+    return deployedQuestVersion;
+  }
+  if (!isStableQuestVersion(configuredMinimum)) {
+    return failMemberAuth(
+      "QUEST_CLIENT_VERSION_CONFIG_INVALID",
+      `QUEST_MIN_CLIENT_VERSION must be a stable semantic version at least ${deployedQuestVersion}; set it to a value such as ${deployedQuestVersion}, then retry. No read or mutation was attempted.`,
+    );
+  }
+  const comparison = compareQuestVersions(configuredMinimum, deployedQuestVersion);
+  if (comparison === undefined) {
+    return failMemberAuth(
+      "QUEST_CLIENT_VERSION_CONFIG_INVALID",
+      `QUEST_MIN_CLIENT_VERSION must be a semantic version at least ${deployedQuestVersion}; set it to a value such as ${deployedQuestVersion}, then retry. No read or mutation was attempted.`,
+    );
+  }
+  return comparison > 0 ? configuredMinimum : deployedQuestVersion;
+}
+
+export function requireClientVersion(clientVersion: string | undefined): void {
+  const minimum = minimumClientVersion();
+  const developmentClientAllowed = developmentClientsAllowed();
+  if (clientVersion === QUEST_DEV_VERSION) {
+    if (developmentClientAllowed) {
+      return;
+    }
+    failMemberAuth(
+      "QUEST_CLI_OUTDATED",
+      `this Quest CLI version ${clientVersion} is not allowed on this Convex deployment; the required released client version is ${minimum}; run \`quest upgrade\`, then retry. No read or mutation was attempted.`,
+    );
+  }
+  const comparison =
+    clientVersion === undefined ? undefined : compareQuestVersions(clientVersion, minimum);
+  if (comparison !== undefined && comparison >= 0) {
+    return;
+  }
+
+  const received = clientVersion === undefined ? "missing" : clientVersion;
+  failMemberAuth(
+    "QUEST_CLI_OUTDATED",
+    `this Quest CLI version ${received} is older than the Convex deployment's required client version ${minimum}; run \`quest upgrade\`, then retry. No read or mutation was attempted.`,
+  );
 }
 
 export function requireClientProtocol(clientProtocol: number | undefined): void {
@@ -88,6 +164,11 @@ export function requireClientProtocol(clientProtocol: number | undefined): void 
       "this Quest CLI is too old for this Convex deployment; run `quest upgrade`, then retry. No read or mutation was attempted.",
     );
   }
+}
+
+export function requireClientCompatibility(credentials: ClientProtocolInput): void {
+  requireClientVersion(credentials.client_version);
+  requireClientProtocol(credentials.client_protocol);
 }
 
 type MemberCredentials = ClientProtocolInput & {
@@ -115,7 +196,7 @@ export async function requireMemberActor(
   ctx: Pick<MemberMutationContext, "runMutation">,
   credentials: MemberCredentials,
 ): Promise<string> {
-  requireClientProtocol(credentials.client_protocol);
+  requireClientCompatibility(credentials);
   const authToken = credentials.auth_token;
   if (authToken === undefined || authToken.trim() === "") {
     return failMemberAuth(
@@ -157,7 +238,7 @@ export async function requireMemberQueryActor(
   ctx: MemberQueryContext,
   credentials: MemberCredentials,
 ): Promise<string> {
-  requireClientProtocol(credentials.client_protocol);
+  requireClientCompatibility(credentials);
   const authToken = credentials.auth_token;
   if (authToken === undefined || authToken.trim() === "") {
     return failMemberAuth(
@@ -188,12 +269,16 @@ export async function requireMemberQueryActor(
 
 export const validateActorReference = makeFunctionReference<
   "mutation",
-  { readonly auth_token: string; readonly client_protocol?: number },
+  { readonly auth_token: string } & ClientProtocolInput,
   string
 >("auth:validateActor");
 
 export const validateActor = internalMutationGeneric({
-  args: { auth_token: v.string(), client_protocol: v.optional(v.number()) },
+  args: {
+    auth_token: v.string(),
+    client_protocol: v.optional(v.number()),
+    client_version: v.optional(v.string()),
+  },
   handler: async (ctx: MemberMutationContext, args) => requireMemberActor(ctx, args),
 });
 

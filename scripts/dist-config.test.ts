@@ -13,16 +13,18 @@ describe("distribution configuration", () => {
     ]);
   });
 
-  test("uses an explicit version when provided", () => {
-    expect(resolveDistVersion("1.2.3-rc.1")).toBe("1.2.3-rc.1");
+  test("uses an explicit stable version when provided", () => {
+    expect(resolveDistVersion("1.2.3")).toBe("1.2.3");
   });
 
   test("defaults to the package version", () => {
     expect(resolveDistVersion(undefined)).toBe("0.0.0");
   });
 
-  test("rejects versions unsafe for artifact names", () => {
+  test("rejects versions that are not stable semantic versions", () => {
     expect(() => resolveDistVersion("../release")).toThrow("invalid distribution version");
+    expect(() => resolveDistVersion("1.2")).toThrow("invalid distribution version");
+    expect(() => resolveDistVersion("1.2.3-rc.1")).toThrow("invalid distribution version");
   });
 
   test("selects one target or the complete matrix", () => {

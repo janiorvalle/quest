@@ -96,10 +96,18 @@ import type {
 } from "../src/store/port";
 import { parseBatchHistoryQuestIds } from "../src/store/port";
 import { assertAdminSecret } from "./admin";
-import { logExpensiveMemberQueryPage, requireMemberActor, requireMemberQueryActor } from "./auth";
+import {
+  logExpensiveMemberQueryPage,
+  requireClientCompatibility,
+  requireMemberActor,
+  requireMemberQueryActor,
+} from "./auth";
 import type schema from "./schema";
 
-const clientProtocolArgs = { client_protocol: v.optional(v.number()) };
+const clientProtocolArgs = {
+  client_protocol: v.optional(v.number()),
+  client_version: v.optional(v.string()),
+};
 const emptyArgs = clientProtocolArgs;
 const failureArgs = { ...clientProtocolArgs, test_failure: v.optional(v.boolean()) };
 
@@ -2238,12 +2246,16 @@ async function recoverCommittedMigrationFence(
 
 export const schemaVersion = queryGeneric({
   args: emptyArgs,
-  handler: async () => STORE_SCHEMA_VERSION,
+  handler: async (_ctx, args) => {
+    requireClientCompatibility(args);
+    return STORE_SCHEMA_VERSION;
+  },
 });
 
 export const migrateReadyStatuses = mutationGeneric({
   args: { admin_secret: v.string(), ...clientProtocolArgs },
   handler: async (ctx, args) => {
+    requireClientCompatibility(args);
     await assertAdminSecret(args.admin_secret);
     await requireNoRestoreLease(ctx);
     const quests = await ctx.db.query("quests").collect();
@@ -2267,7 +2279,10 @@ export const migrateReadyStatuses = mutationGeneric({
 // Quest 83 deliberately leaves authorization to Quest 86; this provider is tested against an anonymous local deployment.
 export const serverTime = queryGeneric({
   args: emptyArgs,
-  handler: async () => now(),
+  handler: async (_ctx, args) => {
+    requireClientCompatibility(args);
+    return now();
+  },
 });
 
 /**
@@ -3521,6 +3536,7 @@ export const fenceRepository = mutationGeneric({
     ...clientProtocolArgs,
   },
   handler: async (ctx, args) => {
+    requireClientCompatibility(args);
     const lease = await requireRestoreLease(ctx, args.token);
     const repo = args.repo.trim();
     if (repo === "") {
@@ -3565,6 +3581,7 @@ export const fenceRepository = mutationGeneric({
 export const unfenceRepository = mutationGeneric({
   args: { token: v.string(), repo: v.string(), ...clientProtocolArgs },
   handler: async (ctx, args) => {
+    requireClientCompatibility(args);
     await requireRestoreLease(ctx, args.token);
     const repo = args.repo.trim();
     const existing = await ctx.db

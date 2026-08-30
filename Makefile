@@ -1,4 +1,4 @@
-.PHONY: setup backend check format lint typecheck test dist-deps dist dist-smoke release
+.PHONY: setup backend check format lint typecheck test convex-deploy dist-deps dist dist-smoke release
 
 setup:
 	bun install
@@ -16,7 +16,22 @@ backend:
 	cd "$$scratch"; \
 	env -u CONVEX_DEPLOYMENT -u CONVEX_DEPLOY_KEY \
 		-u CONVEX_SELF_HOSTED_URL -u CONVEX_SELF_HOSTED_ADMIN_KEY \
-		CONVEX_AGENT_MODE=anonymous bunx convex dev < /dev/null
+		CONVEX_AGENT_MODE=anonymous bunx convex dev < /dev/null & \
+	backend_pid=$$!; \
+	while :; do \
+		if printf '1' | env -u CONVEX_DEPLOYMENT -u CONVEX_DEPLOY_KEY \
+			-u CONVEX_SELF_HOSTED_URL -u CONVEX_SELF_HOSTED_ADMIN_KEY \
+			bunx convex env set QUEST_ALLOW_DEV_CLIENTS >/dev/null 2>&1; then \
+			break; \
+		fi; \
+		if ! kill -0 "$$backend_pid" 2>/dev/null; then \
+			backend_status=1; \
+			wait "$$backend_pid" || backend_status=$$?; \
+			exit "$$backend_status"; \
+		fi; \
+		sleep 1; \
+	done; \
+	wait "$$backend_pid"
 
 check: lint typecheck test
 
@@ -31,6 +46,10 @@ typecheck:
 
 test:
 	bun run test
+
+convex-deploy:
+	@test -n "$(QUEST_VERSION)" || (echo "set QUEST_VERSION, for example: QUEST_VERSION=1.2.3 make convex-deploy" >&2; exit 2)
+	QUEST_VERSION="$(QUEST_VERSION)" bun run scripts/convex-deploy.ts $(CONVEX_ARGS)
 
 dist-deps:
 	bun run scripts/dist-deps.ts

@@ -13,7 +13,7 @@ import type { FederatedReadSnapshot } from "../port";
 import { ConvexStore } from "./adapter";
 import { type ConvexClientPair, type ConvexRevisionStamp, convexApi } from "./client";
 import type { ConvexListPage } from "./pagination";
-import { QUEST_CLIENT_PROTOCOL } from "./protocol";
+import { clientProtocolInput } from "./protocol";
 
 const timestamp = "2026-08-05T20:00:00.000Z";
 const quest = newQuestSchema.parse({
@@ -409,7 +409,7 @@ describe("Convex reactive watches", () => {
 
     entries[0]?.callback(fullSnapshot);
 
-    expect(entries[0]?.args).toEqual({ client_protocol: QUEST_CLIENT_PROTOCOL });
+    expect(entries[0]?.args).toEqual(clientProtocolInput());
     expect(emissions).toEqual([
       {
         dump: { chains: [], quests: [], schema_version: STORE_SCHEMA_VERSION },
@@ -509,7 +509,7 @@ describe("Convex reactive watches", () => {
       // server time, the rejected stamp probe, and the initial list read
       expect(fake.httpQueries()).toBe(3);
       expect(fake.entries[0]?.args).toEqual({
-        client_protocol: QUEST_CLIENT_PROTOCOL,
+        ...clientProtocolInput(),
         repository: "quest",
       });
       await subscription.unsubscribe();
@@ -786,7 +786,7 @@ describe("Convex viewer revision stamp", () => {
     try {
       expect(fake.stampEntries()).toHaveLength(1);
       expect(fake.listEntries()).toHaveLength(0);
-      expect(fake.stampEntries()[0]?.args).toEqual({ client_protocol: QUEST_CLIENT_PROTOCOL });
+      expect(fake.stampEntries()[0]?.args).toEqual(clientProtocolInput());
       expect(fake.queries("revisionStamp")).toBe(1);
       expect(fake.queries("federatedListSnapshot")).toBe(3);
       await waitFor(() => emissions.length === 1);
@@ -1456,15 +1456,15 @@ describe("Convex restore rolling upgrades", () => {
 
     expect(calls).toEqual([
       {
-        args: { client_protocol: QUEST_CLIENT_PROTOCOL },
+        args: clientProtocolInput(),
         query: convexApi.doctorCapacity,
       },
       {
-        args: { client_protocol: QUEST_CLIENT_PROTOCOL },
+        args: clientProtocolInput(),
         query: convexApi.doctorEvidenceSample,
       },
       {
-        args: { client_protocol: QUEST_CLIENT_PROTOCOL, lease_cutoff: timestamp },
+        args: { ...clientProtocolInput(), lease_cutoff: timestamp },
         query: convexApi.doctorStaleClaims,
       },
     ]);
