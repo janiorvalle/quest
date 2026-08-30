@@ -18,7 +18,7 @@
       "devDependencies": {
         "@biomejs/biome": "2.5.6",
         "@types/bun": "1.3.14",
-        "@types/react": "19.2.17",
+        "@types/react": "19.2.18",
         "lefthook": "2.1.10",
         "typescript": "5.9.3",
       },
@@ -121,7 +121,7 @@
 
     "@types/node": ["@types/node@26.1.2", "", { "dependencies": { "undici-types": "~8.3.0" } }, "sha512-Vu4a5UFA9rIIFJ7rB/Vaafh9lrCQszopTCx6KjFboXTGQbPNasehVR5TEiithSDGyd1DEiUByggTZsg8jukeIg=="],
 
-    "@types/react": ["@types/react@19.2.17", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-MXfmqaVPEVgkBT/aY0aGCkRWWtByiYQXo3xdQ8r5RzuFrPiRn8Gar2tQdXSUQ2GKV3bkXckek89V8wQBY2Q/Aw=="],
+    "@types/react": ["@types/react@19.2.18", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-AnzbBERsrLKtk2XSfTbYRLjQPdy116Sty4q+T+Bp3IC4l6jNBvreVPAHmpq9qhXQM7CXZPjLVmGMw9sy+hxQ3w=="],
 
     "@vllnt/convex-api-keys": ["@vllnt/convex-api-keys@0.2.0", "", { "dependencies": { "@convex-dev/sharded-counter": "^0.2.0" }, "peerDependencies": { "convex": "^1.36.1" } }, "sha512-1m50cbGJMCbDn2TbnbOKZGAvfFz5FFMPbg4YBQJZaKXxc/3uk+aNXndf3iPhebUe7qR7mikUp43uF+sh1YXPZg=="],
 
