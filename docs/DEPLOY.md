@@ -10,6 +10,55 @@ team. Quest does not deploy to, or require access to, anyone else's project.
 - A Convex account, or a self-hosted Convex backend
 - The Convex CLI login or deployment credentials for the team's project
 
+## GitHub release deployment
+
+The repository's `Release` workflow builds and verifies the five supported
+executables, publishes the binaries, `checksums.txt`, and both installers, then
+smoke-tests the published installer before deploying the Convex backend. The
+publication step always completes before the backend deployment starts, so a
+client is never pointed at a backend version it cannot download.
+
+The deployment job initializes Convex's ignored code-generation files on its
+clean runner before running the version-aware deploy command. If deployment
+fails, the published release is left in place: a lost deploy response can mean
+that Convex accepted the deployment, so an administrator must inspect the
+backend before retrying rather than deleting a client release that may already
+match it.
+
+One-time repository setup:
+
+1. Create a production Convex deploy key with the `deployment:deploy`
+   permission for the team's production deployment.
+2. Create a GitHub Actions environment named `production`. Require production
+   reviewers and restrict its deployment refs to protected `main` and `v*`
+   tags; run manual releases from `main`.
+3. Add the key as the `production` environment secret
+   `CONVEX_DEPLOY_KEY`.
+
+The key is read only by the protected release jobs and is never committed,
+placed in a workflow file, or printed in logs. The deployment job passes the release version as
+`QUEST_VERSION` while running `bun run convex:deploy`, which lets the released
+Convex bundle carry the same version as the downloaded CLI.
+
+The first release after a wire-contract migration is still an administrator
+ceremony: complete the conversion in **Migrate deployments from ready to open**
+before releasing that contract. The workflow deliberately does not receive
+`QUEST_ADMIN_SECRET` or mutate existing rows; it publishes the client before
+deploying the versioned backend as required for ordinary releases.
+
+After setup, push a tag such as `v0.24.0` to build and publish that release.
+The same workflow can be started from **Actions > Release > Run workflow** with
+the version input `0.24.0`; the workflow creates the tag at the selected commit.
+
+`QUEST_VERSION=0.24.0 make release` remains the local build-and-publish fallback
+when Actions is unavailable. It keeps the same five-target build and
+verification path. After it publishes, deploy the matching versioned backend
+with the same wrapper used by Actions:
+
+```sh
+QUEST_VERSION=0.24.0 bun run convex:deploy
+```
+
 Run every command below from the root of this repository.
 
 Local testing and real deployment are separate paths. For local testing, run
@@ -40,10 +89,11 @@ deployment check:
 bunx convex codegen --init
 ```
 
-Deploy the same `convex/` directory to the project's production deployment:
+Deploy the same `convex/` directory to the project's production deployment,
+stamping the release version into the bundle before Convex typechecks it:
 
 ```sh
-bunx convex deploy
+QUEST_VERSION=1.2.3 bun run convex:deploy
 ```
 
 The deploy command typechecks, bundles, and pushes the functions, schema, and
@@ -55,7 +105,7 @@ For a self-hosted backend, put `CONVEX_SELF_HOSTED_URL` and
 
 ```sh
 bunx convex dev --once --env-file .env.self-hosted
-bunx convex deploy --env-file .env.self-hosted
+QUEST_VERSION=1.2.3 bun run convex:deploy --env-file .env.self-hosted
 ```
 
 Keep `.env.local` and any deployment-key file out of version control.
