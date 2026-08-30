@@ -18,8 +18,14 @@ import {
   writeViewerTheme,
 } from "../config";
 import { cleanupStaleEvidenceMaterializations, createLocalEvidenceFileReader } from "../evidence";
-import type { CliOutputBoundary, ExitCode } from "../output";
-import { createCliOutputBoundary } from "../output";
+import {
+  type CliOutputBoundary,
+  createCliOutputBoundary,
+  EXIT_DOMAIN_ERROR,
+  EXIT_SUCCESS,
+  EXIT_USAGE_ERROR,
+  type ExitCode,
+} from "../output";
 import type { EvidenceOpener, PlatformModule, PlatformModuleOptions } from "../platform";
 import { createPlatform, validateWorkingDirectory } from "../platform";
 import {
@@ -60,6 +66,7 @@ import {
   type FederatedSnapshotWatchListener,
   type FederatedStoreSource,
   inspectSqliteStore,
+  isQuestCliOutdatedError,
   LocalBlobStore,
   migrateSqliteStore,
   type QuestStore,
@@ -96,6 +103,8 @@ import {
 } from "./scope";
 import { refreshInstalledSkillsAfterUpgrade } from "./skill";
 import { executeUpgradeCli, isUpgradeCliRequest, type UpgradeCliRequest } from "./upgrade";
+
+const AUTO_UPGRADE_ATTEMPT_ENVIRONMENT_VARIABLE = "QUEST_AUTO_UPGRADE_ATTEMPT";
 
 type BackendName = Config["store"]["backend"];
 
@@ -146,6 +155,7 @@ export interface CreateCompositionRootOptions {
   readonly prompter?: CliPrompter;
   readonly recoveryMode?: boolean;
   readonly restoreMode?: boolean;
+  readonly upgradeOperations?: UpgradeOperations;
   readonly validateWorkingDirectory?: WorkingDirectoryValidator;
   readonly version?: string;
 }
@@ -173,13 +183,17 @@ export interface QuestCompositionRoot {
 
 export interface QuestMainRuntime {
   readonly backendFactories?: CliBackendFactories;
+  readonly configLoader?: ConfigLoader;
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly initialWorkingDirectory?: string;
   readonly output?: CliOutputBoundary;
   readonly platformFactory?: PlatformFactory;
+  readonly reexecute?: QuestReexecutor;
   readonly upgradeOperations?: UpgradeOperations;
   readonly version?: string;
 }
+
+export type QuestReexecutor = (argumentsWithoutRuntime: readonly string[]) => Promise<number>;
 
 interface StandaloneUpgradeOptions {
   readonly environment: Readonly<Record<string, string | undefined>>;
@@ -341,6 +355,9 @@ function recordCompatibilityAttempt(
 ): void {
   const key = backendKey(handle.store);
   if (attempt.status === "rejected") {
+    if (isQuestCliOutdatedError(attempt.reason)) {
+      throw attempt.reason;
+    }
     const detail =
       attempt.reason instanceof Error ? attempt.reason.message : String(attempt.reason);
     compatibilityFailures.set(key, detail);
@@ -1360,6 +1377,39 @@ function githubToken(
   );
 }
 
+function compiledExecutablePath(): string | undefined {
+  return /\.(?:c|m)?tsx?$/u.test(Bun.main) ? undefined : process.execPath;
+}
+
+function createRuntimeUpgradeOperations(options: {
+  readonly environment: Readonly<Record<string, string | undefined>>;
+  readonly platform: PlatformModule;
+  readonly upgradeOperations?: UpgradeOperations;
+}): UpgradeOperations {
+  if (options.upgradeOperations !== undefined) {
+    return options.upgradeOperations;
+  }
+  const token = githubToken(options.environment);
+  const executablePath = compiledExecutablePath() ?? options.platform.directories.executable;
+  return createUpgradeOperations({
+    executablePath,
+    platform: options.platform.name,
+    refreshInstalledSkills: (executablePath, previousVersion) =>
+      refreshInstalledSkillsAfterUpgrade({
+        environment: options.environment,
+        executablePath,
+        previousVersion,
+      }),
+    ...(options.environment["QUEST_UPGRADE_REPO"] === undefined
+      ? {}
+      : { repository: options.environment["QUEST_UPGRADE_REPO"] }),
+    ...(token === undefined ? {} : { token }),
+    ...(options.platform.replaceExecutable === undefined
+      ? {}
+      : { replaceExecutable: options.platform.replaceExecutable }),
+  });
+}
+
 function standaloneUpgradeOptions(
   runtime: QuestMainRuntime,
   output: CliOutputBoundary,
@@ -1387,6 +1437,7 @@ function compositionRootOptions(
       sqlite: createSqliteCliBackend,
       convex: createConvexCliBackend,
     },
+    ...(runtime.configLoader === undefined ? {} : { configLoader: runtime.configLoader }),
     launchTui,
     output,
     cleanupStaleEvidence: request?.command !== "doctor",
@@ -1397,6 +1448,9 @@ function compositionRootOptions(
       ? {}
       : { initialWorkingDirectory: runtime.initialWorkingDirectory }),
     ...(runtime.platformFactory === undefined ? {} : { platformFactory: runtime.platformFactory }),
+    ...(runtime.upgradeOperations === undefined
+      ? {}
+      : { upgradeOperations: runtime.upgradeOperations }),
     ...(runtime.version === undefined ? {} : { version: runtime.version }),
   };
 }
@@ -1410,26 +1464,13 @@ async function runStandaloneUpgrade(
     environment: options.environment,
     workingDirectory: options.initialWorkingDirectory,
   });
-  const token = githubToken(options.environment);
-  const operations =
-    options.upgradeOperations ??
-    createUpgradeOperations({
-      executablePath: platform.directories.executable,
-      platform: platform.name,
-      refreshInstalledSkills: (executablePath, previousVersion) =>
-        refreshInstalledSkillsAfterUpgrade({
-          environment: options.environment,
-          executablePath,
-          previousVersion,
-        }),
-      ...(options.environment["QUEST_UPGRADE_REPO"] === undefined
-        ? {}
-        : { repository: options.environment["QUEST_UPGRADE_REPO"] }),
-      ...(token === undefined ? {} : { token }),
-      ...(platform.replaceExecutable === undefined
-        ? {}
-        : { replaceExecutable: platform.replaceExecutable }),
-    });
+  const operations = createRuntimeUpgradeOperations({
+    environment: options.environment,
+    platform,
+    ...(options.upgradeOperations === undefined
+      ? {}
+      : { upgradeOperations: options.upgradeOperations }),
+  });
   return executeUpgradeCli({
     applicationVersion: options.version ?? applicationVersion,
     clock: createSystemClock(),
@@ -1516,19 +1557,12 @@ export async function createCompositionRoot(
   await cleanupStartupEvidence(options.cleanupStaleEvidence);
   const config = await loadCompositionConfig(options, platform, environment);
   const viewer = createEvidenceOpener(platform);
-  const token = githubToken(environment);
-  const upgrade = createUpgradeOperations({
-    executablePath: platform.directories.executable,
-    platform: platform.name,
-    refreshInstalledSkills: (executablePath, previousVersion) =>
-      refreshInstalledSkillsAfterUpgrade({ environment, executablePath, previousVersion }),
-    ...(environment["QUEST_UPGRADE_REPO"] === undefined
+  const upgrade = createRuntimeUpgradeOperations({
+    environment,
+    platform,
+    ...(options.upgradeOperations === undefined
       ? {}
-      : { repository: environment["QUEST_UPGRADE_REPO"] }),
-    ...(token === undefined ? {} : { token }),
-    ...(platform.replaceExecutable === undefined
-      ? {}
-      : { replaceExecutable: platform.replaceExecutable }),
+      : { upgradeOperations: options.upgradeOperations }),
   });
   const router = createBackendRouter(options, config, platform, environment);
   const openDefaultBackend = router.openDefaultBackend;
@@ -1559,12 +1593,118 @@ export async function createCompositionRoot(
   };
 }
 
-export async function runQuestMain(
-  launchTui: FutureTuiLauncher,
-  argumentsWithoutRuntime: readonly string[] = process.argv.slice(2),
-  runtime: QuestMainRuntime = {},
+function childEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+): Record<string, string> {
+  const merged = Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
+  );
+  for (const [key, value] of Object.entries(environment)) {
+    if (value === undefined) {
+      delete merged[key];
+    } else {
+      merged[key] = value;
+    }
+  }
+  merged[AUTO_UPGRADE_ATTEMPT_ENVIRONMENT_VARIABLE] = "1";
+  return merged;
+}
+
+function reexecutionCommand(
+  argumentsWithoutRuntime: readonly string[],
+  executablePath: string,
+): readonly string[] {
+  return [executablePath, ...argumentsWithoutRuntime];
+}
+
+async function reexecuteQuest(
+  argumentsWithoutRuntime: readonly string[],
+  environment: Readonly<Record<string, string | undefined>>,
+  executablePath: string,
+): Promise<number> {
+  const child = Bun.spawn({
+    cmd: [...reexecutionCommand(argumentsWithoutRuntime, executablePath)],
+    env: childEnvironment(environment),
+    stderr: "inherit",
+    stdin: "inherit",
+    stdout: "inherit",
+  });
+  return child.exited;
+}
+
+function normalizeChildExitCode(exitCode: number): ExitCode {
+  if (exitCode === EXIT_SUCCESS) {
+    return EXIT_SUCCESS;
+  }
+  if (exitCode === EXIT_USAGE_ERROR) {
+    return EXIT_USAGE_ERROR;
+  }
+  return EXIT_DOMAIN_ERROR;
+}
+
+async function selfHealOutdatedCli(
+  argumentsWithoutRuntime: readonly string[],
+  runtime: QuestMainRuntime,
+  environment: Readonly<Record<string, string | undefined>>,
 ): Promise<ExitCode> {
-  const output = runtime.output ?? createCliOutputBoundary();
+  const platform = (runtime.platformFactory ?? createPlatform)({
+    environment,
+    workingDirectory: runtime.initialWorkingDirectory ?? process.cwd(),
+  });
+  const operations = createRuntimeUpgradeOperations({
+    environment,
+    platform,
+    ...(runtime.upgradeOperations === undefined
+      ? {}
+      : { upgradeOperations: runtime.upgradeOperations }),
+  });
+  const result = await operations.install(runtime.version ?? applicationVersion);
+  if (!result.installed) {
+    throw new Error(
+      `quest upgrade found no release newer than ${runtime.version ?? applicationVersion}; run \`quest upgrade --check\` and retry`,
+    );
+  }
+  const executablePath = compiledExecutablePath() ?? platform.directories.executable;
+  const exitCode = await (
+    runtime.reexecute ?? ((args) => reexecuteQuest(args, environment, executablePath))
+  )(argumentsWithoutRuntime);
+  return normalizeChildExitCode(exitCode);
+}
+
+async function handleOutdatedCliError(options: {
+  readonly argumentsWithoutRuntime: readonly string[];
+  readonly environment: Readonly<Record<string, string | undefined>>;
+  readonly output: CliOutputBoundary;
+  readonly runtime: QuestMainRuntime;
+  readonly shouldSelfHeal: boolean;
+  readonly error: unknown;
+}): Promise<ExitCode | undefined> {
+  if (!options.shouldSelfHeal || !isQuestCliOutdatedError(options.error)) {
+    return undefined;
+  }
+  try {
+    return await selfHealOutdatedCli(
+      options.argumentsWithoutRuntime,
+      options.runtime,
+      options.environment,
+    );
+  } catch (upgradeError) {
+    return options.output.writeError({
+      kind: "domain",
+      message: upgradeError instanceof Error ? upgradeError.message : String(upgradeError),
+    });
+  }
+}
+
+async function runQuestMainAttempt(
+  launchTui: FutureTuiLauncher,
+  argumentsWithoutRuntime: readonly string[],
+  runtime: QuestMainRuntime,
+  output: CliOutputBoundary,
+  shouldSelfHeal: boolean,
+): Promise<ExitCode> {
   try {
     const parsed = await parseQuestCliArguments(argumentsWithoutRuntime, output);
     if (parsed.outcome === "exit") {
@@ -1589,12 +1729,49 @@ export async function runQuestMain(
     const root = await createCompositionRoot(
       compositionRootOptions(runtime, launchTui, output, parsed.request),
     );
-    return await runParsedQuestCli(parsed.flags, root.dependencies, parsed.request);
+    return await runParsedQuestCli(parsed.flags, root.dependencies, parsed.request, {
+      handleError: (error) =>
+        handleOutdatedCliError({
+          argumentsWithoutRuntime,
+          environment: runtime.environment ?? process.env,
+          error,
+          output,
+          runtime,
+          shouldSelfHeal,
+        }),
+    });
   } catch (error) {
+    const selfHealExitCode = await handleOutdatedCliError({
+      argumentsWithoutRuntime,
+      environment: runtime.environment ?? process.env,
+      error,
+      output,
+      runtime,
+      shouldSelfHeal,
+    });
+    if (selfHealExitCode !== undefined) {
+      return selfHealExitCode;
+    }
     const message = error instanceof Error ? error.message : String(error);
     return output.writeError({
       kind: error instanceof ConfigLoadError ? "usage" : "domain",
       message,
     });
   }
+}
+
+export async function runQuestMain(
+  launchTui: FutureTuiLauncher,
+  argumentsWithoutRuntime: readonly string[] = process.argv.slice(2),
+  runtime: QuestMainRuntime = {},
+): Promise<ExitCode> {
+  const output = runtime.output ?? createCliOutputBoundary();
+  const environment = runtime.environment ?? process.env;
+  return runQuestMainAttempt(
+    launchTui,
+    argumentsWithoutRuntime,
+    runtime,
+    output,
+    environment[AUTO_UPGRADE_ATTEMPT_ENVIRONMENT_VARIABLE] !== "1",
+  );
 }

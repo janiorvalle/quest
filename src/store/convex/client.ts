@@ -406,10 +406,19 @@ export interface ConvexClientProtocol {
 }
 
 class ConvexClientProtocolState implements ConvexClientProtocol {
+  #clientVersionSupported = true;
   #legacy = false;
 
   input(): ClientProtocolInput {
-    return this.#legacy ? {} : clientProtocolInput();
+    if (this.#legacy) {
+      return {};
+    }
+    const input = clientProtocolInput();
+    return this.#clientVersionSupported ? input : { client_protocol: input.client_protocol };
+  }
+
+  selectVersionlessProtocol(): void {
+    this.#clientVersionSupported = false;
   }
 
   selectLegacyProtocol(): void {
@@ -447,29 +456,57 @@ function normalizeConvexError(error: unknown): unknown {
   return new Error(`[${code}] ${message}`);
 }
 
-function withClientProtocol<Args extends readonly unknown[]>(args: Args): Args {
+function withClientProtocol<Args extends readonly unknown[]>(
+  args: Args,
+  protocolInput: ClientProtocolInput,
+): Args {
   const [input, ...rest] = args;
-  return [
-    { ...(input as Readonly<Record<string, unknown>>), ...clientProtocolInput() },
-    ...rest,
-  ] as unknown as Args;
+  const nextInput = {
+    ...(input as Readonly<Record<string, unknown>>),
+    ...protocolInput,
+  };
+  if (protocolInput.client_protocol === undefined) {
+    delete nextInput.client_protocol;
+  }
+  if (protocolInput.client_version === undefined) {
+    delete nextInput.client_version;
+  }
+  return [nextInput, ...rest] as unknown as Args;
 }
 
 function withoutClientProtocol<Args extends readonly unknown[]>(args: Args): Args {
   const [input, ...rest] = args;
-  const { client_protocol: _clientProtocol, ...legacyInput } = input as Readonly<
-    Record<string, unknown>
-  >;
+  const {
+    client_protocol: _clientProtocol,
+    client_version: _clientVersion,
+    ...legacyInput
+  } = input as Readonly<Record<string, unknown>>;
   return [legacyInput, ...rest] as unknown as Args;
 }
 
-function isUnsupportedClientProtocol(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    /ArgumentValidationError[\s\S]*(?:extra field|not in the validator)[\s\S]*client_protocol|ArgumentValidationError[\s\S]*client_protocol[\s\S]*(?:extra field|not in the validator)/i.test(
-      error.message,
-    )
-  );
+function withoutClientVersion<Args extends readonly unknown[]>(args: Args): Args {
+  const [input, ...rest] = args;
+  const { client_version: _clientVersion, ...versionlessInput } = input as Readonly<
+    Record<string, unknown>
+  >;
+  return [versionlessInput, ...rest] as unknown as Args;
+}
+
+function unsupportedClientField(error: unknown): "client_protocol" | "client_version" | undefined {
+  if (
+    !(error instanceof Error) ||
+    !/ArgumentValidationError[\s\S]*(?:extra field|not in the validator)/i.test(error.message)
+  ) {
+    return undefined;
+  }
+  if (/client_version/i.test(error.message)) {
+    return "client_version";
+  }
+  return /client_protocol/i.test(error.message) ? "client_protocol" : undefined;
+}
+
+export function isQuestCliOutdatedError(error: unknown): boolean {
+  return error instanceof Error && /\[QUEST_CLI_OUTDATED\]/u.test(error.message);
 }
 
 class QuestConvexHttpClient extends NativeConvexHttpClient {
@@ -488,20 +525,41 @@ class QuestConvexHttpClient extends NativeConvexHttpClient {
     args: Args,
     request: (nextArgs: Args) => Promise<Result>,
   ): Promise<Result> {
+    const protocolInput = this.#protocol.input();
     const nextArgs =
-      this.#protocol.input().client_protocol === undefined
+      protocolInput.client_protocol === undefined
         ? withoutClientProtocol(args)
-        : withClientProtocol(args);
+        : withClientProtocol(args, protocolInput);
     try {
       return await request(nextArgs);
     } catch (error: unknown) {
-      if (!isUnsupportedClientProtocol(error)) {
+      const unsupportedField = unsupportedClientField(error);
+      if (unsupportedField === undefined) {
         throw normalizeConvexError(error);
       }
-      this.#protocol.selectLegacyProtocol();
+      if (unsupportedField === "client_version") {
+        this.#protocol.selectVersionlessProtocol();
+      } else {
+        this.#protocol.selectLegacyProtocol();
+      }
+      const fallbackArgs =
+        unsupportedField === "client_version"
+          ? withoutClientVersion(withClientProtocol(args, protocolInput))
+          : withoutClientProtocol(args);
       try {
-        return await request(withoutClientProtocol(args));
+        return await request(fallbackArgs);
       } catch (retryError: unknown) {
+        if (
+          unsupportedField === "client_version" &&
+          unsupportedClientField(retryError) !== undefined
+        ) {
+          this.#protocol.selectLegacyProtocol();
+          try {
+            return await request(withoutClientProtocol(args));
+          } catch (legacyError: unknown) {
+            throw normalizeConvexError(legacyError);
+          }
+        }
         throw normalizeConvexError(retryError);
       }
     }

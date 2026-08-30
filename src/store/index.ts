@@ -24,6 +24,7 @@ export {
   createConvexClock,
   createConvexHttpClient,
   createConvexStoreCompatibilityProbe,
+  isQuestCliOutdatedError,
   MINIMUM_QUEST_CLIENT_PROTOCOL,
   QUEST_CLIENT_PROTOCOL,
 } from "./convex";

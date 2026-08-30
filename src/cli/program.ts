@@ -1389,13 +1389,21 @@ export async function runParsedQuestCli(
   flags: GlobalCliOptions,
   dependencies: QuestCliDependencies,
   request?: QuestCliRequest,
+  options: {
+    readonly handleError?: (error: unknown) => Promise<ExitCode | undefined>;
+  } = {},
 ): Promise<ExitCode> {
   let exitCode: ExitCode;
   try {
     exitCode = await executeQuestCli(flags, request, dependencies);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    exitCode = dependencies.output.writeError({ kind: classifyCliError(error), message });
+    const handledExitCode = await options.handleError?.(error);
+    if (handledExitCode !== undefined) {
+      exitCode = handledExitCode;
+    } else {
+      const message = error instanceof Error ? error.message : String(error);
+      exitCode = dependencies.output.writeError({ kind: classifyCliError(error), message });
+    }
   }
   try {
     await dependencies.close?.();

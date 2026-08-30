@@ -228,7 +228,7 @@ describe("CLI composition root", () => {
         convex: rejectingBackend,
       },
       environment: {},
-      initialWorkingDirectory: "/work/quest",
+      initialWorkingDirectory: process.cwd(),
       output: createCliOutputBoundary({
         stderr: (text) => stderr.push(text),
         stdout: (text) => stdout.push(text),
@@ -243,6 +243,94 @@ describe("CLI composition root", () => {
       "quest upgrade: 1.3.0 is available (current 1.2.3); run quest upgrade to install\n",
     ]);
     expect(stderr).toEqual([]);
+  });
+
+  test("upgrades and re-executes once when a backend fences the CLI version", async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const installs: string[] = [];
+    const reexecutions: string[][] = [];
+    const outdatedBackend: CliBackendFactory = async () => {
+      throw new Error(
+        "[QUEST_CLI_OUTDATED] this Quest CLI version 1.2.2 is older than the Convex deployment's required client version 1.2.3; run `quest upgrade`, then retry. No read or mutation was attempted.",
+      );
+    };
+    const upgradeOperations: UpgradeOperations = {
+      check: async () => {
+        throw new Error("check must not run during self-heal");
+      },
+      install: async (currentVersion) => {
+        installs.push(currentVersion);
+        return {
+          artifact: "quest-1.2.3-darwin-arm64",
+          artifact_url: "https://example.test/quest-1.2.3-darwin-arm64",
+          checksum: "a".repeat(64),
+          current_version: currentVersion,
+          installed: true,
+          latest_version: "1.2.3",
+          release_url: "https://example.test/releases/v1.2.3",
+          repository: "janiorvalle/quest",
+          skill_refresh_failures: [],
+          skill_refreshes: [],
+          target: "darwin-arm64",
+          update_available: true,
+        };
+      },
+    };
+    const exitCode = await runQuestMain(async () => undefined, ["list"], {
+      backendFactories: { sqlite: outdatedBackend, convex: outdatedBackend },
+      configLoader,
+      environment: {},
+      initialWorkingDirectory: process.cwd(),
+      output: createCliOutputBoundary({
+        stderr: (text) => stderr.push(text),
+        stdout: (text) => stdout.push(text),
+      }),
+      platformFactory,
+      reexecute: async (argumentsWithoutRuntime) => {
+        reexecutions.push([...argumentsWithoutRuntime]);
+        return EXIT_SUCCESS;
+      },
+      upgradeOperations,
+      version: "1.2.2",
+    });
+
+    expect(exitCode).toBe(EXIT_SUCCESS);
+    expect(installs).toEqual(["1.2.2"]);
+    expect(reexecutions).toEqual([["list"]]);
+    expect(stdout).toEqual([]);
+    expect(stderr).toEqual([]);
+  });
+
+  test("surfaces the existing upgrade error when self-heal cannot install", async () => {
+    const stderr: string[] = [];
+    const outdatedBackend: CliBackendFactory = async () => {
+      throw new Error("[QUEST_CLI_OUTDATED] upgrade required");
+    };
+    const upgradeOperations: UpgradeOperations = {
+      check: async () => {
+        throw new Error("check must not run during self-heal");
+      },
+      install: async () => {
+        throw new Error("UPGRADE_INSTALL_FAILED: download the release and retry");
+      },
+    };
+
+    const exitCode = await runQuestMain(async () => undefined, ["list"], {
+      backendFactories: { sqlite: outdatedBackend, convex: outdatedBackend },
+      configLoader,
+      environment: {},
+      initialWorkingDirectory: process.cwd(),
+      output: createCliOutputBoundary({ stderr: (text) => stderr.push(text) }),
+      platformFactory,
+      upgradeOperations,
+      version: "1.2.2",
+    });
+
+    expect(exitCode).toBe(EXIT_DOMAIN_ERROR);
+    expect(stderr).toEqual([
+      "quest: domain: UPGRADE_INSTALL_FAILED: download the release and retry",
+    ]);
   });
 
   test("selects the configured backend only in the root and injects its ports", async () => {

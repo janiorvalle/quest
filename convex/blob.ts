@@ -95,6 +95,7 @@ export const generateUploadUrl = mutationGeneric({
   args: {
     auth_token: v.optional(v.string()),
     client_protocol: v.optional(v.number()),
+    client_version: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     await requireMemberActor(ctx, args);
@@ -106,6 +107,7 @@ export const finalizeUpload = actionGeneric({
   args: {
     auth_token: v.optional(v.string()),
     client_protocol: v.optional(v.number()),
+    client_version: v.optional(v.string()),
     sha256: v.string(),
     storage_id: v.id("_storage"),
     replace_existing: v.optional(v.boolean()),
@@ -114,6 +116,7 @@ export const finalizeUpload = actionGeneric({
     await ctx.runMutation(validateActorReference, {
       auth_token: args.auth_token ?? "",
       ...(args.client_protocol === undefined ? {} : { client_protocol: args.client_protocol }),
+      ...(args.client_version === undefined ? {} : { client_version: args.client_version }),
     });
     const address = sha256Schema.parse(args.sha256);
     const stored = await ctx.storage.get(args.storage_id);
@@ -152,6 +155,7 @@ export const getUrl = queryGeneric({
   args: {
     auth_token: v.optional(v.string()),
     client_protocol: v.optional(v.number()),
+    client_version: v.optional(v.string()),
     sha256: v.string(),
   },
   handler: async (ctx, args) => {
@@ -166,6 +170,7 @@ export const has = queryGeneric({
   args: {
     auth_token: v.optional(v.string()),
     client_protocol: v.optional(v.number()),
+    client_version: v.optional(v.string()),
     sha256: v.string(),
   },
   handler: async (ctx, args) => {

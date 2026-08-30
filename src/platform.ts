@@ -249,12 +249,20 @@ function platformDirectories(
   }
 
   const backup = paths.join(homeDirectory, "Backups", APPLICATION_DIRECTORY);
+  const configuredInstall =
+    platform === "win32"
+      ? absoluteCaseInsensitiveEnvironmentDirectory(
+          environment,
+          "QUEST_INSTALL_DIR",
+          paths.isAbsolute,
+        )
+      : absoluteEnvironmentDirectory(environment, "QUEST_INSTALL_DIR", paths.isAbsolute);
 
   switch (platform) {
     case "darwin": {
       const config = paths.join(homeDirectory, ".config", APPLICATION_DIRECTORY);
       const state = paths.join(homeDirectory, ".local", "state", APPLICATION_DIRECTORY);
-      const install = paths.join(homeDirectory, POSIX_INSTALL_DIRECTORY);
+      const install = configuredInstall ?? paths.join(homeDirectory, POSIX_INSTALL_DIRECTORY);
       return {
         config,
         state,
@@ -273,7 +281,7 @@ function platformDirectories(
         paths.join(homeDirectory, ".local", "state");
       const config = paths.join(configRoot, APPLICATION_DIRECTORY);
       const state = paths.join(stateRoot, APPLICATION_DIRECTORY);
-      const install = paths.join(homeDirectory, POSIX_INSTALL_DIRECTORY);
+      const install = configuredInstall ?? paths.join(homeDirectory, POSIX_INSTALL_DIRECTORY);
       return {
         config,
         state,
@@ -295,7 +303,8 @@ function platformDirectories(
         ) ?? paths.join(homeDirectory, "AppData", "Local");
       const config = paths.join(appData, APPLICATION_DIRECTORY);
       const state = paths.join(localAppData, APPLICATION_DIRECTORY);
-      const install = paths.join(localAppData, "Programs", APPLICATION_DIRECTORY);
+      const install =
+        configuredInstall ?? paths.join(localAppData, "Programs", APPLICATION_DIRECTORY);
       return {
         config,
         state,

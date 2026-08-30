@@ -75,17 +75,17 @@ jobs:
         run: bun run scripts/dist.ts
         env:
           QUEST_TARGET: ${{ matrix.target }}
-          QUEST_VERSION: 0.0.0-ci
+          QUEST_VERSION: 0.0.0
       - name: Verify native artifact
         run: bun run scripts/verify-dist.ts
         env:
           QUEST_TARGET: ${{ matrix.target }}
-          QUEST_VERSION: 0.0.0-ci
+          QUEST_VERSION: 0.0.0
       - name: Exercise native installer
         run: bun run scripts/install-smoke.ts
         env:
           QUEST_TARGET: ${{ matrix.target }}
-          QUEST_VERSION: 0.0.0-ci
+          QUEST_VERSION: 0.0.0
 
   install-smoke:
     name: Installer smoke

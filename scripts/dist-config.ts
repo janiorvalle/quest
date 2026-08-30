@@ -1,5 +1,6 @@
 import packageMetadata from "../package.json";
 import { distributionArtifactName, distributionTargets } from "../src/distribution";
+import { isStableQuestVersion } from "../src/store/convex/protocol";
 
 export const distTargets = distributionTargets;
 
@@ -7,7 +8,7 @@ export type DistTarget = (typeof distTargets)[number];
 
 export function resolveDistVersion(environmentVersion: string | undefined): string {
   const version = environmentVersion ?? packageMetadata.version;
-  if (!/^[0-9A-Za-z][0-9A-Za-z.+-]*$/.test(version)) {
+  if (!isStableQuestVersion(version)) {
     throw new Error(`invalid distribution version: ${JSON.stringify(version)}`);
   }
   return version;
