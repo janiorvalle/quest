@@ -31,17 +31,6 @@ jobs:
       prerelease: ${{ steps.version.outputs.prerelease }}
       tag_created: ${{ steps.tag.outputs.created }}
     steps:
-      - name: Verify Convex deploy key is configured
-        shell: bash
-        env:
-          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${CONVEX_DEPLOY_KEY:-}" ]]; then
-            echo "::error::production environment secret CONVEX_DEPLOY_KEY is missing; add the production Convex deploy key before running a release"
-            exit 1
-          fi
-
       - name: Resolve release version
         id: version
         shell: bash
@@ -240,40 +229,6 @@ jobs:
           QUEST_INSTALL_VERSION: ${{ needs.prepare.outputs.version }}
         run: sh install.sh
 
-  deploy:
-    name: Deploy released Convex backend
-    needs:
-      - prepare
-      - publish
-      - published_installer_smoke
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: production
-    permissions:
-      contents: read # checkout the backend source
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version-file: package.json
-          no-cache: true
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-      - name: Initialize Convex deployment files
-        env:
-          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
-        run: bunx convex codegen --init
-      - name: Deploy backend after publication
-        shell: bash
-        env:
-          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
-          QUEST_VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-          bun run convex:deploy --message "quest $QUEST_VERSION"
-
   cleanup_failed_release:
     name: Remove incomplete publication
     if: ${{ always() && needs.prepare.result == 'success' && (needs.publish.result != 'success' || needs.published_installer_smoke.result != 'success') }}
@@ -281,7 +236,6 @@ jobs:
       - prepare
       - publish
       - published_installer_smoke
-      - deploy
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
