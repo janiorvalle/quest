@@ -140,20 +140,40 @@ async function createFailingPowerShellArtifact(): Promise<{
   };
 }
 
+function hasPowerShell(): boolean {
+  if (Bun.which("pwsh") !== null) {
+    return true;
+  }
+  if (process.platform === "win32") {
+    throw new Error("PowerShell is required to test install.ps1");
+  }
+  process.stdout.write("Skipped install.ps1 smoke because pwsh is unavailable\n");
+  return false;
+}
+
+async function passingPowerShellArtifact(): Promise<{
+  readonly artifact: string;
+  readonly checksums: string;
+}> {
+  if (process.platform === "win32") {
+    return {
+      artifact: installerEnvironment.QUEST_INSTALL_ARTIFACT,
+      checksums: installerEnvironment.QUEST_INSTALL_CHECKSUMS,
+    };
+  }
+  return createPowerShellArtifact(
+    join(temporaryDirectory, "powershell-passing"),
+    `#!/bin/sh\nprintf 'quest ${version}\\n'\n`,
+  );
+}
+
 async function runPowerShellFailureSmoke(): Promise<void> {
-  if (Bun.which("pwsh") === null) {
-    if (process.platform === "win32") {
-      throw new Error("PowerShell is required to test install.ps1");
-    }
-    process.stdout.write("Skipped install.ps1 smoke because pwsh is unavailable\n");
+  if (!hasPowerShell()) {
     return;
   }
 
   if (process.platform !== "win32") {
-    const passingFixture = await createPowerShellArtifact(
-      join(temporaryDirectory, "powershell-passing"),
-      `#!/bin/sh\nprintf 'quest ${version}\\n'\n`,
-    );
+    const passingFixture = await passingPowerShellArtifact();
     const passing = await runPowerShellInstaller({
       ...installerEnvironment,
       QUEST_INSTALL_ARTIFACT: passingFixture.artifact,
@@ -189,6 +209,38 @@ async function runPowerShellFailureSmoke(): Promise<void> {
     throw new Error(
       `install.ps1 replaced the real error with a null error: ${failing.output.trim()}`,
     );
+  }
+}
+
+// scripts/install-smoke.ps1 runs the installer through Invoke-Expression, the
+// way `irm ... | iex` does, and on Windows also checks a relative install
+// folder goes on the user PATH as an absolute one.
+async function runPowerShellSessionSmoke(): Promise<void> {
+  if (!hasPowerShell()) {
+    return;
+  }
+  const fixture = await passingPowerShellArtifact();
+  const work = join(temporaryDirectory, "powershell-session");
+  await mkdir(work, { recursive: true });
+  const smoke = Bun.spawn({
+    cmd: [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      join(rootDirectory, "scripts", "install-smoke.ps1"),
+      "-Work",
+      work,
+    ],
+    env: {
+      ...installerEnvironment,
+      QUEST_INSTALL_ARTIFACT: fixture.artifact,
+      QUEST_INSTALL_CHECKSUMS: fixture.checksums,
+    },
+    stderr: "inherit",
+    stdout: "inherit",
+  });
+  if ((await smoke.exited) !== 0) {
+    throw new Error("scripts/install-smoke.ps1 failed");
   }
 }
 
@@ -343,6 +395,7 @@ try {
 
   await runPrivateInstallerSmoke();
   await runPowerShellFailureSmoke();
+  await runPowerShellSessionSmoke();
 
   const untrustedDirectory = join(temporaryDirectory, "untrusted-cwd");
   const preloadMarker = join(untrustedDirectory, "preload-ran");

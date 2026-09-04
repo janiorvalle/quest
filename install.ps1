@@ -1,3 +1,6 @@
+# The whole installer runs in its own scope, so `irm ... | iex` in a terminal
+# leaves that terminal's preferences, functions, and variables as they were.
+& {
 $ErrorActionPreference = "Stop"
 
 function Fail([string]$Message) {
@@ -45,8 +48,10 @@ $apiBaseUrl = if ($env:QUEST_INSTALL_API_BASE_URL) {
 } else {
   "https://api.github.com"
 }
+# The folder goes into the user PATH, so a relative override is made absolute
+# against the current location first.
 $installDir = if ($env:QUEST_INSTALL_DIR) {
-  $env:QUEST_INSTALL_DIR
+  $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:QUEST_INSTALL_DIR)
 } else {
   Join-Path $env:LOCALAPPDATA "Programs\quest"
 }
@@ -282,4 +287,5 @@ try {
   }
 } finally {
   Remove-Item -Recurse -Force $temporaryDirectory -ErrorAction SilentlyContinue
+}
 }
